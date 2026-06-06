@@ -1,0 +1,1711 @@
+from __future__ import annotations
+
+import base64
+import json
+from datetime import UTC, datetime, timedelta
+import time
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BytesIO
+from pathlib import Path
+from urllib.parse import urlparse
+
+from fastapi.testclient import TestClient
+from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from media2api import models as db_models
+from media2api.config import settings
+from media2api.database import SessionLocal
+from media2api.main import app
+from media2api.services_core import AccountScheduler, ModelRouter
+from media2api.utils import dumps
+headers = {"Authorization": "Bearer dev-admin-key"}
+
+
+def assert_ok(resp):
+    if resp.status_code >= 400:
+        raise AssertionError(f"{resp.status_code}: {resp.text}")
+    return resp.json()
+
+
+def tiny_png_bytes() -> bytes:
+    image = Image.new("RGB", (24, 24), color=(84, 185, 129))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class StaticAssetHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        data = tiny_png_bytes()
+        self.send_response(200)
+        self.send_header("content-type", "image/png")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def main() -> None:
+    server = HTTPServer(("127.0.0.1", 0), StaticAssetHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      with TestClient(app) as client:
+        assert_ok(client.get("/health"))
+        assert_ok(client.patch("/v1/admin/users/usr_admin", headers=headers, json={"wallet_balance": 1000000, "status": "active"}))
+        models = assert_ok(client.get("/v1/models", headers=headers))
+        assert models["data"]
+        providers = assert_ok(client.get("/v1/providers", headers=headers))
+        assert len(providers["data"]) >= 1
+        accounts = assert_ok(client.get("/v1/accounts", headers=headers))
+        assert len(accounts["data"]) >= 1
+        mappings = assert_ok(client.get("/v1/model-mappings", headers=headers))
+        assert len(mappings["data"]) >= 1
+        runtime = assert_ok(client.get("/v1/runtime", headers=headers))
+        assert "job_counts" in runtime
+        assert runtime["asset_store"] == "local"
+        assert runtime["asset_backend"]["type"] == "local"
+        assert runtime["worker_concurrency"] >= 1
+        assert runtime["worker_stalled_job_seconds"] >= 1
+        readiness = assert_ok(client.get("/v1/admin/readiness", headers=headers))
+        assert readiness["object"] == "readiness" and readiness["core_ready"] is True, readiness
+        assert {"database_query", "operation_coverage", "external_connector_accounts", "external_mixed_media_provider"}.issubset({check["name"] for check in readiness["checks"]}), readiness
+        dashboard = assert_ok(client.get("/v1/admin/dashboard", headers=headers))
+        assert dashboard["object"] == "admin.dashboard" and "success_rate" in dashboard["jobs"] and "usage_today" in dashboard["billing"], dashboard
+        assert "worker_concurrency" in dashboard["runtime"] and "active_leases" in dashboard["accounts"], dashboard
+        admin_login = client.get("/admin")
+        assert admin_login.status_code == 401 and "media2api Admin" in admin_login.text and "API Key" in admin_login.text
+        admin_page = client.get("/admin?admin_key=dev-admin-key")
+        assert admin_page.status_code == 200 and "Dashboard" in admin_page.text and "Today Jobs" in admin_page.text and "Operations" in admin_page.text
+        for admin_control in ["Activate Template", "Dry Run Activate", "External Acceptance", "Account External Acceptance", "Account Acceptance Suite", "Account Diagnostics", "Job Diagnostics", "Acceptance Report", "Provider Onboarding", "Operator Workbench", "Production Go-Live", "Connector Conformance", "External Preflight", "Connector Manifest", "System Requirements", "Final Acceptance", "Delivery Package", "Lease Self Test", "Stalled Recovery Test", "Recover Stalled Jobs", "Mock Stability Test", "Asset Storage Test", "Fallback Self Test", "Readiness", "Credential Value", "Contract Operations", "Contract Suite", "Sync Capabilities", "Config Snapshot", "Export Config", "Dry Run Import"]:
+            assert admin_control in admin_page.text, admin_control
+        operator_workbench = assert_ok(client.get("/v1/admin/operator-workbench-report", headers=headers))
+        assert operator_workbench["object"] == "media2api.operator_workbench_report", operator_workbench
+        assert operator_workbench["summary"]["required_missing_routes"] == 0, operator_workbench
+        module_names = {item["module"] for item in operator_workbench["modules"]}
+        assert {"Dashboard", "Users", "Models", "Providers", "Accounts", "Jobs", "Assets", "Billing", "Alerts", "Webhooks", "Audit"}.issubset(module_names), operator_workbench
+        go_live_plan = assert_ok(client.get("/v1/admin/production-go-live-plan", headers=headers))
+        assert go_live_plan["object"] == "media2api.production_go_live_plan", go_live_plan
+        assert set(["text_to_image", "image_edit", "text_to_video", "image_to_video"]).issubset(set(go_live_plan["required_operations"])), go_live_plan
+        assert go_live_plan["single_provider_candidates"], go_live_plan
+        assert {"activate_dry_run", "external_acceptance_live", "scripted_acceptance"}.issubset(set(go_live_plan["single_provider_candidates"][0]["commands"])), go_live_plan
+        connector_conformance = assert_ok(client.get("/v1/admin/connector-conformance-report", headers=headers))
+        assert connector_conformance["object"] == "media2api.connector_conformance_report", connector_conformance
+        assert set(["text_to_image", "image_edit", "text_to_video", "image_to_video"]).issubset(set(connector_conformance["required_operations"])), connector_conformance
+        conformance_provider_ids = {item["provider_id"] for item in connector_conformance["providers"]}
+        assert {"jimeng", "gemini", "qwen", "pollinations"}.issubset(conformance_provider_ids), connector_conformance
+        assert all("operation_matrix" in item for item in connector_conformance["providers"]), connector_conformance
+        external_preflight = assert_ok(client.get("/v1/admin/external-connector-preflight", headers=headers))
+        assert external_preflight["object"] == "media2api.external_connector_preflight", external_preflight
+        assert set(["text_to_image", "image_edit", "text_to_video", "image_to_video"]).issubset(set(external_preflight["required_operations"])), external_preflight
+        assert external_preflight["providers"] and "activate_template" in external_preflight["providers"][0]["commands"], external_preflight
+        manifest_template = assert_ok(client.get("/v1/admin/external-connector-manifest-template?provider_id=jimeng", headers=headers))
+        assert manifest_template["object"] == "media2api.external_connector_manifest_template", manifest_template
+        assert manifest_template["provider_id"] == "jimeng" and manifest_template["default_manifest"]["accounts"], manifest_template
+        manifest_secret = "smoke-manifest-secret-token"
+        manifest_plan = assert_ok(
+            client.post(
+                "/v1/admin/external-connector-manifest",
+                headers=headers,
+                json={
+                    "provider_id": "jimeng",
+                    "base_url": "https://connector.example.com",
+                    "credential_value": manifest_secret,
+                    "credential_kind": "bearer_token",
+                    "dry_run": True,
+                    "operations": ["text_to_image", "image_edit", "text_to_video", "image_to_video"],
+                    "accounts": [
+                        {"account_id": "acct_smoke_manifest_1", "account_label": "Smoke Manifest 1", "concurrency_limit": 1},
+                        {"account_id": "acct_smoke_manifest_2", "account_label": "Smoke Manifest 2", "credential_ref": "env://SMOKE_MANIFEST_2", "concurrency_limit": 2},
+                    ],
+                },
+            )
+        )
+        assert manifest_plan["object"] == "media2api.external_connector_manifest" and manifest_plan["dry_run"] is True, manifest_plan
+        assert len(manifest_plan["accounts"]) == 2 and manifest_plan["accounts"][0]["credential_value_provided"] is True, manifest_plan
+        assert manifest_secret not in json.dumps(manifest_plan, ensure_ascii=False), manifest_plan
+        system_requirements = assert_ok(client.get("/v1/admin/system-requirements-report", headers=headers))
+        assert system_requirements["object"] == "media2api.system_requirements_report", system_requirements
+        assert system_requirements["summary"]["total_requirements"] >= 30, system_requirements
+        system_requirement_ids = {item["id"] for item in system_requirements["requirements"]}
+        assert {"C-001", "API-001", "API-OPENAI", "API-NATIVE", "MODEL-001", "ASSET-004", "PA-001", "ACC-001", "BILL-001", "ADMIN-001", "OBS-001", "SEC-001", "SDK-001", "CONNECTOR-SDK-001", "PREFLIGHT-001", "MANIFEST-001", "FINAL-ACCEPTANCE-001", "DELIVERY-001", "MVP-CORE", "MVP-REAL-PROVIDER"}.issubset(system_requirement_ids), system_requirements
+        assert system_requirements["summary"]["core_ready"] is True, system_requirements
+        final_acceptance = assert_ok(client.get("/v1/admin/final-acceptance-matrix", headers=headers))
+        assert final_acceptance["object"] == "media2api.final_acceptance_matrix", final_acceptance
+        final_ids = {item["id"] for item in final_acceptance["rows"]}
+        assert {"AC-001", "AC-002", "AC-003", "AC-004", "AC-005", "AC-006", "AC-007", "AC-008", "AC-S-001", "AC-S-002", "AC-S-003", "AC-S-004", "AC-S-005", "N-001", "N-002", "N-003", "N-004", "N-005", "N-006", "N-007", "N-008", "AC-PROD-001"}.issubset(final_ids), final_acceptance
+        assert final_acceptance["core_ready"] is True, final_acceptance
+        assert any(item["id"] == "AC-PROD-001" and item["blocked_by"] == "authorized_external_connector_accounts" for item in final_acceptance["blocked_rows"]), final_acceptance
+        delivery_package = assert_ok(client.get("/v1/admin/delivery-package", headers=headers))
+        assert delivery_package["object"] == "media2api.delivery_package", delivery_package
+        assert delivery_package["readiness"]["core_ready"] is True, delivery_package
+        assert "remote_acceptance" in delivery_package["acceptance_commands"], delivery_package
+        assert "external_connector_preflight" in delivery_package, delivery_package
+        assert "external_connector_manifest" in delivery_package and "external_connector_manifest_template" in delivery_package["acceptance_commands"], delivery_package
+        assert "final_acceptance_matrix" in delivery_package and "final_acceptance_matrix" in delivery_package["acceptance_commands"], delivery_package
+        assert "SDK-001" in system_requirement_ids and delivery_package["developer_assets"]["examples"], delivery_package
+        assert any(item["path"] == "examples/media2api_sdk.py" and item["exists"] for item in delivery_package["developer_assets"]["examples"]), delivery_package
+        redact_request_id = "req_smoke_admin_query_redact"
+        admin_redact_page = client.get("/admin?admin_key=dev-admin-key&view=dashboard", headers={"x-request-id": redact_request_id})
+        assert admin_redact_page.status_code == 200, admin_redact_page.text
+        redacted_logs = assert_ok(client.get(f"/v1/admin/request-logs?request_id={redact_request_id}", headers=headers))
+        assert redacted_logs["data"], redacted_logs
+        redacted_query = redacted_logs["data"][0]["metadata"].get("query", "")
+        assert "dev-admin-key" not in redacted_query and "admin_key" in redacted_query and "redacted" in redacted_query, redacted_query
+        lease_self_test = assert_ok(client.post("/v1/admin/account-leases/self-test-expiry", headers=headers))
+        assert lease_self_test["object"] == "lease_expiry_self_test" and lease_self_test["ok"] is True, lease_self_test
+        assert lease_self_test["job"]["status"] == "expired" and lease_self_test["job"]["error"]["code"] == "LEASE_EXPIRED", lease_self_test
+        assert lease_self_test["account"]["current_leases_after"] == lease_self_test["account"]["current_leases_before"], lease_self_test
+        terminal_lease_job_id = f"job_terminal_lease_{int(time.time() * 1000)}"
+        terminal_lease_id = f"lease_terminal_{int(time.time() * 1000)}"
+        with SessionLocal() as db:
+            account = db.get(db_models.AccountResource, "acct_mock_default")
+            active_before = (
+                db.query(db_models.AccountLease)
+                .filter(db_models.AccountLease.account_id == "acct_mock_default", db_models.AccountLease.status == "active")
+                .count()
+            )
+            account.current_leases = active_before + 1
+            db.add(
+                db_models.MediaJob(
+                    id=terminal_lease_job_id,
+                    user_id="usr_admin",
+                    api_key_id="key_admin",
+                    operation="text_to_image",
+                    logical_model="t2i-fast",
+                    normalized_params_json=dumps({"model": "t2i-fast", "prompt": "terminal lease reconcile", "n": 1}),
+                    input_asset_ids_json=dumps([]),
+                    output_asset_ids_json=dumps([]),
+                    provider_id="mock",
+                    provider_model="mock-image-fast",
+                    account_id="acct_mock_default",
+                    provider_task_id=f"terminal_{terminal_lease_job_id}",
+                    status="completed",
+                    cost_estimate=0,
+                    final_cost=0,
+                )
+            )
+            db.add(
+                db_models.AccountLease(
+                    id=terminal_lease_id,
+                    job_id=terminal_lease_job_id,
+                    account_id="acct_mock_default",
+                    provider_id="mock",
+                    provider_model="mock-image-fast",
+                    expires_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30),
+                    status="active",
+                )
+            )
+            db.commit()
+        terminal_reconcile = assert_ok(client.post("/v1/admin/account-leases/reconcile?account_id=acct_mock_default", headers=headers))
+        assert terminal_reconcile["released_terminal_leases"] >= 1, terminal_reconcile
+        terminal_leases = assert_ok(client.get(f"/v1/admin/account-leases?job_id={terminal_lease_job_id}", headers=headers))
+        assert terminal_leases["data"] and terminal_leases["data"][0]["status"] == "released", terminal_leases
+        stalled_self_test = assert_ok(client.post("/v1/admin/media-jobs/self-test-stalled-recovery", headers=headers))
+        assert stalled_self_test["object"] == "stalled_job_recovery_self_test" and stalled_self_test["ok"] is True, stalled_self_test
+        assert stalled_self_test["recovery"]["recovered"] == 1, stalled_self_test
+        assert stalled_self_test["recovered_job"]["status"] == "queued", stalled_self_test
+        assert stalled_self_test["job"]["status"] == "cancelled", stalled_self_test
+        assert any(event["event_type"] == "stalled_job_requeued" for event in stalled_self_test["events"]), stalled_self_test
+        connector_cancel_self_test = assert_ok(client.post("/v1/admin/media-jobs/self-test-connector-cancel", headers=headers))
+        assert connector_cancel_self_test["object"] == "connector_cancel_self_test" and connector_cancel_self_test["ok"] is True, connector_cancel_self_test
+        assert connector_cancel_self_test["job"]["status"] == "cancelled", connector_cancel_self_test
+        assert connector_cancel_self_test["provider_cancel"]["status"] == "cancelled", connector_cancel_self_test
+        assert connector_cancel_self_test["upstream"]["cancel_hits"] == 1, connector_cancel_self_test
+        assert connector_cancel_self_test["lease"]["status"] == "released", connector_cancel_self_test
+        assert all(hold["status"] == "refunded" for hold in connector_cancel_self_test["billing"]["holds"]), connector_cancel_self_test
+        assert connector_cancel_self_test["billing"]["wallet_after"] == connector_cancel_self_test["billing"]["wallet_before"], connector_cancel_self_test
+        mock_stability = assert_ok(client.post("/v1/admin/stability/self-test-mock", headers=headers, json={"iterations": 3}))
+        assert mock_stability["object"] == "mock_stability_self_test" and mock_stability["ok"] is True, mock_stability
+        assert mock_stability["iterations_completed"] == 3 and not mock_stability["leases"]["active_lease_leaks"], mock_stability
+        assert mock_stability["assets"]["output_asset_count"] >= 3 and mock_stability["billing"]["held_holds"] == 0, mock_stability
+        asset_storage_self_test = assert_ok(client.post("/v1/admin/assets/self-test-storage", headers=headers, json={"cleanup": True}))
+        assert asset_storage_self_test["object"] == "asset_storage_self_test" and asset_storage_self_test["ok"] is True, asset_storage_self_test
+        assert asset_storage_self_test["read"]["ok"] is True, asset_storage_self_test
+        assert asset_storage_self_test["signed_url"]["signature_ok"] is True, asset_storage_self_test
+        assert asset_storage_self_test["cleanup"]["deleted"] is True, asset_storage_self_test
+        temp_url_asset_self_test = assert_ok(client.post("/v1/admin/assets/self-test-temp-url", headers=headers))
+        assert temp_url_asset_self_test["object"] == "temp_url_asset_self_test" and temp_url_asset_self_test["ok"] is True, temp_url_asset_self_test
+        assert temp_url_asset_self_test["job"]["status"] == "completed", temp_url_asset_self_test
+        assert temp_url_asset_self_test["source"]["second_fetch_status"] == 410, temp_url_asset_self_test
+        assert temp_url_asset_self_test["platform_download"]["ok"] is True, temp_url_asset_self_test
+        assert not [lease for lease in temp_url_asset_self_test["leases"] if lease["status"] == "active"], temp_url_asset_self_test
+        assert "http://127.0.0.1" not in str(temp_url_asset_self_test["admin_asset"].get("provider_meta")), temp_url_asset_self_test
+        temp_url_attempts_text = json.dumps(temp_url_asset_self_test.get("attempts") or [], sort_keys=True)
+        assert "http://127.0.0.1" not in temp_url_attempts_text and "image_url_hash" in temp_url_attempts_text, temp_url_asset_self_test
+        fallback_self_test = assert_ok(client.post("/v1/admin/fallback/self-test", headers=headers))
+        assert fallback_self_test["object"] == "fallback_self_test" and fallback_self_test["ok"] is True, fallback_self_test
+        assert fallback_self_test["job"]["status"] == "completed", fallback_self_test
+        assert [attempt["status"] for attempt in fallback_self_test["attempts"]] == ["failed", "completed"], fallback_self_test
+        assert fallback_self_test["fallback"]["fallback_event_count"] >= 1, fallback_self_test
+        assert fallback_self_test["billing"]["usage_records"] == 1 and fallback_self_test["billing"]["held_holds"] == 0, fallback_self_test
+        fallback_timeout_self_test = assert_ok(client.post("/v1/admin/fallback/self-test-timeout", headers=headers))
+        assert fallback_timeout_self_test["object"] == "fallback_timeout_self_test" and fallback_timeout_self_test["ok"] is True, fallback_timeout_self_test
+        assert fallback_timeout_self_test["job"]["status"] == "completed", fallback_timeout_self_test
+        assert [attempt["status"] for attempt in fallback_timeout_self_test["attempts"]] == ["failed", "completed"], fallback_timeout_self_test
+        assert fallback_timeout_self_test["attempts"][0]["error_code"] == "PROVIDER_TIMEOUT", fallback_timeout_self_test
+        assert fallback_timeout_self_test["fallback"]["fallback_event_count"] >= 1, fallback_timeout_self_test
+        assert fallback_timeout_self_test["billing"]["usage_records"] == 1 and fallback_timeout_self_test["billing"]["held_holds"] == 0, fallback_timeout_self_test
+        account_cooldown_self_test = assert_ok(client.post("/v1/admin/accounts/self-test-cooldown", headers=headers))
+        assert account_cooldown_self_test["object"] == "account_cooldown_self_test" and account_cooldown_self_test["ok"] is True, account_cooldown_self_test
+        assert account_cooldown_self_test["account"]["status_before_cleanup"] == "cooldown", account_cooldown_self_test
+        assert account_cooldown_self_test["account"]["failure_score_before_cleanup"] >= 0.75, account_cooldown_self_test
+        assert account_cooldown_self_test["probe_job"]["status"] == "failed", account_cooldown_self_test
+        assert account_cooldown_self_test["probe_job"]["error"]["code"] == "UNSUPPORTED_MODEL_OPERATION", account_cooldown_self_test
+        assert not [lease for lease in account_cooldown_self_test["leases"] if lease["status"] == "active"], account_cooldown_self_test
+        assert account_cooldown_self_test["billing"]["held_holds"] == 0 and account_cooldown_self_test["alerts"], account_cooldown_self_test
+        onboarding = assert_ok(client.get("/v1/admin/provider-onboarding-report", headers=headers))
+        assert onboarding["object"] == "media2api.provider_onboarding_report", onboarding
+        assert onboarding["summary"]["providers"] >= 15 and "p0_action_required" in onboarding["summary"], onboarding
+        provider_rows = {row["provider_id"]: row for row in onboarding["providers"]}
+        assert {"openai_image", "gemini", "grok", "qwen", "jimeng"}.issubset(provider_rows), provider_rows.keys()
+        assert provider_rows["gemini"]["operator_endpoints"]["external_acceptance"].endswith("/gemini/external-acceptance"), provider_rows["gemini"]
+        assert "dev-admin-key" not in str(onboarding), onboarding
+        for admin_section in ["Users", "Models", "Model Mappings", "Assets", "Webhooks"]:
+            assert admin_section in admin_page.text, admin_section
+        metrics = client.get("/metrics")
+        assert metrics.status_code == 200 and "media2api_jobs_total" in metrics.text
+        for metric_name in [
+            "media2api_jobs_status_total",
+            "media2api_media_job_duration_seconds",
+            "media2api_provider_submit_errors_total",
+            "media2api_provider_poll_timeout_total",
+            "media2api_account_lease_active",
+            "media2api_account_failure_score",
+            "media2api_account_quota_remaining",
+            "media2api_account_quota_available",
+            "media2api_asset_ingest_failed_total",
+            "media2api_fallback_attempts_total",
+            "media2api_stalled_jobs_active",
+            "media2api_stalled_jobs_recovered_total",
+        ]:
+            assert metric_name in metrics.text, metric_name
+        for metric_name in [
+            "media_jobs_total",
+            "media_job_duration_seconds",
+            "provider_submit_errors_total",
+            "provider_poll_timeout_total",
+            "account_lease_active",
+            "account_failure_score",
+            "asset_ingest_failed_total",
+            "billing_holds_total",
+            "fallback_attempts_total",
+            "stalled_jobs_active",
+            "stalled_jobs_recovered_total",
+        ]:
+            assert metric_name in metrics.text, metric_name
+        users = assert_ok(client.get("/v1/admin/users", headers=headers))
+        assert len(users["data"]) >= 1
+        api_keys = assert_ok(client.get("/v1/admin/api-keys", headers=headers))
+        assert len(api_keys["data"]) >= 1
+        suffix = str(int(time.time() * 1000))
+        key_user_id = f"usr_key_{suffix}"
+        assert_ok(client.post("/v1/admin/users", headers=headers, json={"id": key_user_id, "email": f"{key_user_id}@media2api.local", "wallet_balance": 100000}))
+        created_key = assert_ok(client.post("/v1/admin/api-keys", headers=headers, json={"user_id": key_user_id, "name": "key-smoke"}))
+        smoke_key_headers = {"Authorization": f"Bearer {created_key['api_key']}"}
+        assert_ok(client.get("/v1/models", headers=smoke_key_headers))
+        non_admin_api = client.get("/v1/admin/users", headers=smoke_key_headers)
+        assert non_admin_api.status_code == 403 and non_admin_api.json()["code"] == "ADMIN_REQUIRED", non_admin_api.text
+        for internal_path in ["/v1/providers", "/v1/accounts", "/v1/model-mappings"]:
+            internal_resp = client.get(internal_path, headers=smoke_key_headers)
+            assert internal_resp.status_code == 403 and internal_resp.json()["code"] == "ADMIN_REQUIRED", internal_resp.text
+        non_admin_assets = client.get("/v1/admin/assets", headers=smoke_key_headers)
+        assert non_admin_assets.status_code == 403 and non_admin_assets.json()["code"] == "ADMIN_REQUIRED", non_admin_assets.text
+        non_admin_preview = client.post("/v1/router/preview", headers=smoke_key_headers, json={"model": "t2i-fast", "operation": "text_to_image", "params": {"prompt": "x"}})
+        assert non_admin_preview.status_code == 403 and non_admin_preview.json()["code"] == "ADMIN_REQUIRED", non_admin_preview.text
+        credential_skip_provider_id = f"provider_credential_skip_{suffix}"
+        credential_skip_model_id = f"model_credential_skip_{suffix}"
+        credential_skip_provider_model = f"credential-skip-model-{suffix}"
+        credential_skip_mapping_id = f"{credential_skip_model_id}:{credential_skip_provider_id}:{credential_skip_provider_model}"
+        credential_skip_missing_account_id = f"acct_credential_skip_missing_{suffix}"
+        credential_skip_public_account_id = f"acct_credential_skip_public_{suffix}"
+        credential_skip_job_id = f"job_credential_skip_{suffix}"
+        with SessionLocal() as db:
+            db.add(
+                db_models.Provider(
+                    id=credential_skip_provider_id,
+                    name="Credential Skip Smoke Provider",
+                    adapter_type="http_adapter",
+                    status="active",
+                    base_config_json=dumps({}),
+                    notes="smoke credential availability regression",
+                )
+            )
+            db.add(
+                db_models.LogicalModel(
+                    id=credential_skip_model_id,
+                    display_name="Credential Skip Smoke Model",
+                    operations_json=dumps(["text_to_image"]),
+                    constraints_json=dumps({}),
+                    default_params_json=dumps({}),
+                    billing_class="image_fast",
+                    enabled=True,
+                )
+            )
+            db.add(
+                db_models.ProviderModelMapping(
+                    id=credential_skip_mapping_id,
+                    logical_model=credential_skip_model_id,
+                    provider_id=credential_skip_provider_id,
+                    provider_model=credential_skip_provider_model,
+                    operations_json=dumps(["text_to_image"]),
+                    priority=1,
+                    weight=1,
+                    cost_score=0.5,
+                    speed_score=0.5,
+                    quality_score=0.5,
+                    reliability_score=0.5,
+                    enabled=True,
+                )
+            )
+            db.add(
+                db_models.AccountResource(
+                    id=credential_skip_missing_account_id,
+                    provider_id=credential_skip_provider_id,
+                    label="Missing Env Credential Smoke",
+                    credential_ref=f"env://MEDIA2API_MISSING_CREDENTIAL_SKIP_{suffix}",
+                    supported_operations_json=dumps(["text_to_image"]),
+                    supported_provider_models_json=dumps([credential_skip_provider_model]),
+                    quota_buckets_json=dumps([{"type": "credits", "remaining_estimate": 10, "confidence": 1}]),
+                    concurrency_limit=1,
+                    current_leases=0,
+                    health_score=1.0,
+                    failure_score=0.0,
+                    status="active",
+                )
+            )
+            db.add(
+                db_models.AccountResource(
+                    id=credential_skip_public_account_id,
+                    provider_id=credential_skip_provider_id,
+                    label="Public Credential Smoke",
+                    credential_ref="public://credential-skip-smoke",
+                    supported_operations_json=dumps(["text_to_image"]),
+                    supported_provider_models_json=dumps([credential_skip_provider_model]),
+                    quota_buckets_json=dumps([{"type": "credits", "remaining_estimate": 10, "confidence": 1}]),
+                    concurrency_limit=1,
+                    current_leases=0,
+                    health_score=0.1,
+                    failure_score=0.0,
+                    status="active",
+                )
+            )
+            db.add(
+                db_models.MediaJob(
+                    id=credential_skip_job_id,
+                    user_id="usr_admin",
+                    api_key_id=api_keys["data"][0]["id"],
+                    operation="text_to_image",
+                    logical_model=credential_skip_model_id,
+                    normalized_params_json=dumps({"prompt": "credential skip smoke"}),
+                    input_asset_ids_json=dumps([]),
+                    output_asset_ids_json=dumps([]),
+                    status="leasing_account",
+                    cost_estimate=1,
+                )
+            )
+            db.commit()
+            mapping = db.get(db_models.ProviderModelMapping, credential_skip_mapping_id)
+            router = ModelRouter()
+            candidates = router.candidate_mappings(db, credential_skip_model_id, "text_to_image", {})
+            assert [item.id for item in candidates] == [credential_skip_mapping_id], candidates
+            assert router.explain_last(mapping)["available_accounts"] == 1, router.explain_last(mapping)
+            scheduler = AccountScheduler()
+            lease = scheduler.acquire(db, credential_skip_job_id, mapping, "text_to_image")
+            assert lease.account_id == credential_skip_public_account_id, lease.account_id
+            assert db.get(db_models.AccountResource, credential_skip_missing_account_id).current_leases == 0
+            assert db.get(db_models.AccountResource, credential_skip_public_account_id).current_leases == 1
+            scheduler.release(db, lease, success=False, neutral=True)
+            db.commit()
+        isolation_breaker = assert_ok(
+            client.post(
+                "/v1/admin/circuit-breakers",
+                headers=headers,
+                json={
+                    "id": f"cb_public_alert_isolation_{suffix}",
+                    "scope": "provider",
+                    "target_id": f"provider_public_alert_isolation_{suffix}",
+                    "status": "open",
+                    "reason": "public alert isolation smoke",
+                    "error_code": "SMOKE_ISOLATION",
+                    "enabled": True,
+                },
+            )
+        )
+        public_alerts = assert_ok(client.get("/v1/alerts?status=open", headers=smoke_key_headers))
+        assert all(item["user_id"] == key_user_id for item in public_alerts["data"]), public_alerts
+        assert all(item["dimensions"].get("target_id") != isolation_breaker["target_id"] for item in public_alerts["data"]), public_alerts
+        non_admin_page = client.get(f"/admin?admin_key={created_key['api_key']}")
+        assert non_admin_page.status_code == 403 and "Admin access required" in non_admin_page.text, non_admin_page.text
+        disabled_key = assert_ok(client.patch(f"/v1/admin/api-keys/{created_key['id']}", headers=headers, json={"status": "disabled", "name": "key-smoke-disabled"}))
+        assert disabled_key["status"] == "disabled" and disabled_key["name"] == "key-smoke-disabled", disabled_key
+        disabled_key_call = client.get("/v1/models", headers=smoke_key_headers)
+        assert disabled_key_call.status_code == 401 and disabled_key_call.json()["code"] == "INVALID_API_KEY", disabled_key_call.text
+        restored_key = assert_ok(client.patch(f"/v1/admin/api-keys/{created_key['id']}", headers=headers, json={"status": "active"}))
+        assert restored_key["status"] == "active", restored_key
+        assert_ok(client.get("/v1/models", headers=smoke_key_headers))
+        revoked_key = assert_ok(client.delete(f"/v1/admin/api-keys/{created_key['id']}", headers=headers))
+        assert revoked_key["revoked"] is True, revoked_key
+        revoked_key_call = client.get("/v1/models", headers=smoke_key_headers)
+        assert revoked_key_call.status_code == 401 and revoked_key_call.json()["code"] == "INVALID_API_KEY", revoked_key_call.text
+        secret_id = f"secret_smoke_{suffix}"
+        secret = assert_ok(
+            client.post(
+                "/v1/admin/credential-secrets",
+                headers=headers,
+                json={
+                    "id": secret_id,
+                    "name": "Smoke Credential",
+                    "value": "sk-smoke-secret-value",
+                    "kind": "api_key",
+                    "provider_id": "mock",
+                    "metadata": {"scope": "smoke"},
+                },
+            )
+        )
+        assert secret["ref"] == f"secret://{secret_id}" and secret["preview"] == "sk-s...alue" and "value" not in secret
+        secret_list = assert_ok(client.get("/v1/admin/credential-secrets?provider_id=mock", headers=headers))
+        assert any(item["id"] == secret_id for item in secret_list["data"]), secret_list
+        secret_patch = assert_ok(client.patch(f"/v1/admin/credential-secrets/{secret_id}", headers=headers, json={"notes": "patched", "status": "disabled"}))
+        assert secret_patch["status"] == "disabled" and secret_patch["notes"] == "patched", secret_patch
+        secret_deleted = assert_ok(client.delete(f"/v1/admin/credential-secrets/{secret_id}", headers=headers))
+        assert secret_deleted["deleted"] is True, secret_deleted
+        bulk_account_id = f"acct_bulk_{suffix}"
+        bulk_secret_id = f"secret_bulk_{suffix}"
+        bulk = assert_ok(
+            client.post(
+                "/v1/admin/accounts/bulk-upsert",
+                headers=headers,
+                json={
+                    "accounts": [
+                        {
+                            "id": bulk_account_id,
+                            "provider_id": "mock",
+                            "label": "Bulk Smoke Account",
+                            "credential_value": "bulk-smoke-secret",
+                            "credential_secret_id": bulk_secret_id,
+                            "credential_kind": "api_key",
+                            "supported_operations": ["text_to_image"],
+                            "supported_provider_models": ["mock-image-fast"],
+                            "quota_buckets": [{"type": "credits", "operation": "text_to_image", "remaining_estimate": 100, "confidence": 1}],
+                            "concurrency_limit": 3,
+                            "region": "smoke",
+                            "plan": "bulk",
+                        }
+                    ]
+                },
+            )
+        )
+        assert bulk["created_accounts"] == 1 and not bulk["errors"], bulk
+        assert bulk["data"][0]["account"]["credential_ref"] == f"secret://{bulk_secret_id}" and "value" not in bulk["data"][0]["secret"]
+        inline_account_id = f"acct_inline_{suffix}"
+        inline_account = assert_ok(
+            client.post(
+                "/v1/admin/accounts",
+                headers=headers,
+                json={
+                    "id": inline_account_id,
+                    "provider_id": "mock",
+                    "label": "Inline Credential Smoke",
+                    "credential_ref": "bearer://inline-secret-should-not-leak",
+                    "supported_operations": ["text_to_image"],
+                    "supported_provider_models": ["mock-image-fast"],
+                    "quota_buckets": [{"type": "credits", "remaining_estimate": 1, "confidence": 1}],
+                    "concurrency_limit": 1,
+                    "status": "disabled",
+                },
+            )
+        )
+        assert inline_account["credential_ref"] == f"secret://secret_{inline_account_id}" and inline_account["credential_ref_type"] == "secret", inline_account
+        assert inline_account["secret"]["ref"] == f"secret://secret_{inline_account_id}" and "value" not in inline_account["secret"], inline_account
+        account_list_after_inline = assert_ok(client.get("/v1/accounts", headers=headers))
+        serialized_inline = [item for item in account_list_after_inline["data"] if item["id"] == inline_account_id][0]
+        assert "inline-secret-should-not-leak" not in str(serialized_inline) and serialized_inline["credential_ref"] == f"secret://secret_{inline_account_id}", serialized_inline
+        credential_migration = assert_ok(client.post("/v1/admin/accounts/migrate-inline-credentials", headers=headers))
+        assert credential_migration["object"] == "account_credential_migration" and not credential_migration["errors"], credential_migration
+        config_snapshot = assert_ok(client.get("/v1/admin/config-export", headers=headers))
+        assert config_snapshot["object"] == "media2api.config_snapshot" and config_snapshot["counts"]["providers"] >= 1, config_snapshot
+        assert "inline-secret-should-not-leak" not in str(config_snapshot) and "bulk-smoke-secret" not in str(config_snapshot), config_snapshot
+        exported_pollinations = [item for item in config_snapshot["sections"]["providers"] if item["id"] == "pollinations"]
+        if exported_pollinations:
+            pollinations_ref = exported_pollinations[0]["base_config"].get("api_key_ref")
+            assert (
+                pollinations_ref in {None, "public://pollinations", "env://POLLINATIONS_KEY"}
+                or str(pollinations_ref).startswith("secret://")
+            ) and pollinations_ref != "[redacted]", exported_pollinations[0]
+        config_import_plan = assert_ok(client.post("/v1/admin/config-import", headers=headers, json={"snapshot": config_snapshot, "dry_run": True}))
+        assert config_import_plan["object"] == "media2api.config_import" and config_import_plan["status"] == "planned", config_import_plan
+        assert config_import_plan["summary"]["dry_run"] is True and not config_import_plan["summary"]["errors"], config_import_plan
+        contract_suite = assert_ok(
+            client.post(
+                "/v1/admin/provider-contract-suite",
+                headers=headers,
+                json={"provider_ids": ["mock"], "operations": ["text_to_image"], "active_only": False, "run_submit": False},
+            )
+        )
+        assert contract_suite["object"] == "media2api.provider_contract_suite" and contract_suite["status"] == "passed", contract_suite
+        assert contract_suite["summary"]["passed"] >= 1 and contract_suite["summary"]["failed"] == 0 and contract_suite["summary"]["errors"] == 0, contract_suite
+        acceptance_report = assert_ok(client.get("/v1/admin/acceptance-report", headers=headers))
+        assert acceptance_report["object"] == "media2api.acceptance_report" and acceptance_report["core_ready"] is True, acceptance_report
+        assert acceptance_report["summary"]["core_required_failed"] == 0, acceptance_report
+        assert any(check["name"] == "required_routes" and check["ok"] for check in acceptance_report["checks"]), acceptance_report
+        assert any(check["name"] == "provider_contract_tests" and check["ok"] for check in acceptance_report["checks"]), acceptance_report
+        import_provider_id = f"provider_config_import_{suffix}"
+        import_model_id = f"model_config_import_{suffix}"
+        import_mapping_id = f"mapping_config_import_{suffix}"
+        import_account_id = f"acct_config_import_{suffix}"
+        import_rule_id = f"price_config_import_{suffix}"
+        import_inline_secret_value = f"config-import-inline-secret-{suffix}"
+        minimal_snapshot = {
+            "object": "media2api.config_snapshot",
+            "schema_version": 1,
+            "sections": {
+                "logical_models": [
+                    {
+                        "id": import_model_id,
+                        "display_name": "Config Import Smoke Model",
+                        "operations": ["text_to_image"],
+                        "constraints": {"max_prompt_length": 64},
+                        "default_params": {"quality": "standard"},
+                        "billing_class": "config_import",
+                        "enabled": False,
+                    }
+                ],
+                "providers": [
+                    {
+                        "id": import_provider_id,
+                        "name": "Config Import Smoke Provider",
+                        "adapter_type": "http_adapter",
+                        "status": "disabled",
+                        "base_config": {"base_url": "http://127.0.0.1:1", "api_key_ref": "env://CONFIG_IMPORT_SMOKE_KEY"},
+                        "notes": "created by smoke config import",
+                    }
+                ],
+                "provider_model_mappings": [
+                    {
+                        "id": import_mapping_id,
+                        "logical_model": import_model_id,
+                        "provider_id": import_provider_id,
+                        "provider_model": "config-import-model",
+                        "operations": ["text_to_image"],
+                        "priority": 999,
+                        "weight": 1,
+                        "cost_score": 0.5,
+                        "speed_score": 0.5,
+                        "quality_score": 0.5,
+                        "reliability_score": 0.5,
+                        "enabled": False,
+                    }
+                ],
+                "accounts": [
+                    {
+                        "id": import_account_id,
+                        "provider_id": import_provider_id,
+                        "label": "Config Import Smoke Account",
+                        "credential_ref": f"plain://{import_inline_secret_value}",
+                        "supported_operations": ["text_to_image"],
+                        "supported_provider_models": ["config-import-model"],
+                        "quota_buckets": [{"type": "credits", "remaining_estimate": 5, "confidence": 1}],
+                        "concurrency_limit": 1,
+                        "region": "smoke",
+                        "plan": "config-import",
+                        "status": "disabled",
+                    }
+                ],
+                "pricing_rules": [
+                    {
+                        "id": import_rule_id,
+                        "name": "Config Import Smoke Price",
+                        "logical_model": import_model_id,
+                        "billing_class": "config_import",
+                        "operation": "text_to_image",
+                        "unit": "image",
+                        "base_amount": 0,
+                        "unit_amount": 1,
+                        "input_asset_amount": 0,
+                        "provider_cost_base": 0,
+                        "provider_cost_unit": 1,
+                        "provider_cost_input_asset": 0,
+                        "quality_multipliers": {},
+                        "currency": "credits",
+                        "enabled": False,
+                    }
+                ],
+            },
+        }
+        import_dry_run = assert_ok(client.post("/v1/admin/config-import", headers=headers, json={"snapshot": minimal_snapshot, "dry_run": True}))
+        assert import_dry_run["status"] == "planned" and import_dry_run["summary"]["created"] >= 5 and not import_dry_run["summary"]["errors"], import_dry_run
+        import_apply = assert_ok(client.post("/v1/admin/config-import", headers=headers, json={"snapshot": minimal_snapshot, "dry_run": False}))
+        assert import_apply["status"] == "applied" and import_apply["summary"]["applied"] is True and not import_apply["summary"]["errors"], import_apply
+        imported_models = assert_ok(client.get("/v1/admin/logical-models", headers=headers))
+        assert any(item["id"] == import_model_id and item["enabled"] is False for item in imported_models["data"]), imported_models
+        imported_providers = assert_ok(client.get("/v1/providers", headers=headers))
+        assert any(item["id"] == import_provider_id and item["status"] == "disabled" for item in imported_providers["data"]), imported_providers
+        with SessionLocal() as db:
+            imported_account = db.get(db_models.AccountResource, import_account_id)
+            imported_secret = db.get(db_models.CredentialSecret, f"secret_{import_account_id}")
+            assert imported_account and imported_account.credential_ref == f"secret://secret_{import_account_id}", imported_account.credential_ref if imported_account else None
+            assert imported_secret and imported_secret.account_id == import_account_id and imported_secret.provider_id == import_provider_id, imported_secret
+        post_import_snapshot = assert_ok(client.get("/v1/admin/config-export", headers=headers))
+        assert import_inline_secret_value not in str(post_import_snapshot), post_import_snapshot
+        matrix = assert_ok(client.get("/v1/admin/compatibility-matrix?logical_model=t2i-fast&provider_id=mock&operation=text_to_image", headers=headers))
+        matrix_accounts = [account for row in matrix["data"] for account in row["accounts"] if account["id"] == bulk_account_id]
+        assert matrix_accounts and matrix_accounts[0]["credential"]["type"] == "secret" and matrix_accounts[0]["available"] is True, matrix
+        assert matrix_accounts[0]["available_capacity"] == 3, matrix_accounts[0]
+        assert all("constraints" in item and "default_params" in item for item in models["data"]), models
+        disabled_model_id = f"model_disabled_{suffix}"
+        disabled_model = assert_ok(
+            client.post(
+                "/v1/admin/logical-models",
+                headers=headers,
+                json={
+                    "id": disabled_model_id,
+                    "display_name": "Disabled Smoke Model",
+                    "operations": ["text_to_image"],
+                    "constraints": {"max_prompt_length": 16},
+                    "default_params": {"quality": "standard"},
+                    "billing_class": "image_fast",
+                    "enabled": False,
+                },
+            )
+        )
+        assert disabled_model["id"] == disabled_model_id and disabled_model["enabled"] is False
+        all_models = assert_ok(client.get("/v1/admin/logical-models", headers=headers))
+        assert any(item["id"] == disabled_model_id for item in all_models["data"])
+        public_models = assert_ok(client.get("/v1/models", headers=headers))
+        assert all(item["id"] != disabled_model_id for item in public_models["data"])
+        disabled_create = client.post(
+            "/v1/images/generations",
+            headers=headers,
+            json={"model": disabled_model_id, "prompt": "disabled model should reject", "n": 1},
+        )
+        assert disabled_create.status_code == 403 and disabled_create.json()["code"] == "LOGICAL_MODEL_DISABLED", disabled_create.text
+
+        constrained_model_id = f"model_constrained_{suffix}"
+        constrained_model = assert_ok(
+            client.post(
+                "/v1/admin/logical-models",
+                headers=headers,
+                json={
+                    "id": constrained_model_id,
+                    "display_name": "Constrained Smoke Model",
+                    "operations": ["text_to_image"],
+                    "constraints": {"max_prompt_length": 4, "max_n": 1, "allowed_quality": ["standard"]},
+                    "default_params": {"quality": "standard"},
+                    "billing_class": "image_fast",
+                    "enabled": True,
+                },
+            )
+        )
+        assert constrained_model["constraints"]["max_prompt_length"] == 4
+        too_long_prompt = client.post(
+            "/v1/images/generations",
+            headers=headers,
+            json={"model": constrained_model_id, "prompt": "12345", "n": 1},
+        )
+        assert too_long_prompt.status_code == 400 and too_long_prompt.json()["code"] == "INVALID_INPUT", too_long_prompt.text
+        bad_operation_preview = client.post(
+            "/v1/router/preview",
+            headers=headers,
+            json={"model": constrained_model_id, "operation": "image_to_video", "params": {"prompt": "ok"}},
+        )
+        assert bad_operation_preview.status_code == 400 and bad_operation_preview.json()["code"] == "OPERATION_NOT_SUPPORTED", bad_operation_preview.text
+        patched_model = assert_ok(client.patch(f"/v1/admin/logical-models/{constrained_model_id}", headers=headers, json={"enabled": False}))
+        assert patched_model["enabled"] is False
+        governance_user = f"usr_governance_{suffix}"
+        assert_ok(client.post("/v1/admin/users", headers=headers, json={"id": governance_user, "email": f"{governance_user}@media2api.local", "wallet_balance": 100000}))
+        governance_key = assert_ok(client.post("/v1/admin/api-keys", headers=headers, json={"user_id": governance_user, "name": "governance-smoke"}))["api_key"]
+        governance_headers = {"Authorization": f"Bearer {governance_key}"}
+        limit_policy = assert_ok(
+            client.post(
+                "/v1/admin/user-limit-policies",
+                headers=headers,
+                json={
+                    "id": f"limit_governance_{suffix}",
+                    "name": "Governance Smoke Limit",
+                    "user_id": governance_user,
+                    "requests_per_minute": 60,
+                    "daily_job_limit": 1,
+                    "concurrent_job_limit": 1,
+                    "allowed_models": ["t2i-fast"],
+                    "high_cost_models": ["i2v-pro"],
+                    "high_cost_allowed": False,
+                },
+            )
+        )
+        assert limit_policy["user_id"] == governance_user and limit_policy["daily_job_limit"] == 1
+        own_limits = assert_ok(client.get("/v1/governance/limits", headers=governance_headers))
+        assert own_limits["policy"]["policy_id"] == f"limit_governance_{suffix}", own_limits
+        first_limited_job = assert_ok(
+            client.post(
+                "/v1/images/generations",
+                headers=governance_headers,
+                json={"model": "t2i-fast", "prompt": "first limited governance image", "n": 1},
+            )
+        )
+        assert first_limited_job["job_id"]
+        second_limited_job = client.post(
+            "/v1/images/generations",
+            headers=governance_headers,
+            json={"model": "t2i-fast", "prompt": "second limited governance image", "n": 1},
+        )
+        assert second_limited_job.status_code == 429 and second_limited_job.json()["code"] == "DAILY_JOB_LIMIT_EXCEEDED", second_limited_job.text
+        high_cost_user = f"usr_highcost_{suffix}"
+        assert_ok(client.post("/v1/admin/users", headers=headers, json={"id": high_cost_user, "email": f"{high_cost_user}@media2api.local", "wallet_balance": 100000}))
+        high_cost_key = assert_ok(client.post("/v1/admin/api-keys", headers=headers, json={"user_id": high_cost_user, "name": "highcost-smoke"}))["api_key"]
+        assert_ok(
+            client.post(
+                "/v1/admin/user-limit-policies",
+                headers=headers,
+                json={
+                    "id": f"limit_highcost_{suffix}",
+                    "name": "High Cost Smoke Limit",
+                    "user_id": high_cost_user,
+                    "requests_per_minute": 60,
+                    "daily_job_limit": 10,
+                    "concurrent_job_limit": 10,
+                    "high_cost_models": ["i2v-pro"],
+                    "high_cost_allowed": False,
+                },
+            )
+        )
+        high_cost_block = client.post(
+            "/v1/media-jobs",
+            headers={"Authorization": f"Bearer {high_cost_key}"},
+            json={"operation": "image_to_video", "model": "i2v-pro", "prompt": "should require whitelist", "wait": False},
+        )
+        assert high_cost_block.status_code == 403 and high_cost_block.json()["code"] == "MODEL_REQUIRES_WHITELIST", high_cost_block.text
+        rate_user = f"usr_rate_{suffix}"
+        assert_ok(client.post("/v1/admin/users", headers=headers, json={"id": rate_user, "email": f"{rate_user}@media2api.local", "wallet_balance": 100000}))
+        rate_key = assert_ok(client.post("/v1/admin/api-keys", headers=headers, json={"user_id": rate_user, "name": "rate-smoke"}))["api_key"]
+        assert_ok(
+            client.post(
+                "/v1/admin/user-limit-policies",
+                headers=headers,
+                json={
+                    "id": f"limit_rate_{suffix}",
+                    "name": "Rate Smoke Limit",
+                    "user_id": rate_user,
+                    "requests_per_minute": 1,
+                    "daily_job_limit": 10,
+                    "concurrent_job_limit": 10,
+                },
+            )
+        )
+        rate_headers = {"Authorization": f"Bearer {rate_key}"}
+        assert_ok(client.get("/v1/models", headers=rate_headers))
+        rate_limited = client.get("/v1/models", headers=rate_headers)
+        assert rate_limited.status_code == 429 and rate_limited.json()["code"] == "RATE_LIMITED", rate_limited.text
+        breaker = assert_ok(
+            client.post(
+                "/v1/admin/circuit-breakers",
+                headers=headers,
+                json={
+                    "id": f"cb_model_t2i_pro_{suffix}",
+                    "scope": "model",
+                    "target_id": "t2i-pro",
+                    "status": "open",
+                    "reason": "smoke model circuit",
+                    "error_code": "SMOKE_CIRCUIT",
+                    "block_minutes": 5,
+                },
+            )
+        )
+        assert breaker["scope"] == "model" and breaker["status"] == "open"
+        circuit_block = client.post(
+            "/v1/images/generations",
+            headers=headers,
+            json={"model": "t2i-pro", "prompt": "blocked by smoke circuit", "n": 1},
+        )
+        circuit_body = circuit_block.json()
+        assert circuit_block.status_code == 429 and circuit_body["code"] == "CIRCUIT_OPEN" and circuit_body["job_id"], circuit_block.text
+        failed_events = assert_ok(client.get(f"/v1/media-jobs/{circuit_body['job_id']}/events", headers=headers))
+        assert any(item["event_type"] == "governance_rejected" for item in failed_events["data"]), failed_events
+        closed_breaker = assert_ok(client.patch(f"/v1/admin/circuit-breakers/{breaker['id']}", headers=headers, json={"status": "closed", "clear_block_until": True}))
+        assert closed_breaker["status"] == "closed"
+        retried_job = assert_ok(client.post(f"/v1/media-jobs/{circuit_body['job_id']}/retry", headers=headers, json={"wait": True}))
+        assert retried_job["id"] == circuit_body["job_id"] and retried_job["status"] == "completed", retried_job
+        retried_events = assert_ok(client.get(f"/v1/admin/media-jobs/{circuit_body['job_id']}/events", headers=headers))
+        event_types = [item["event_type"] for item in retried_events["data"]]
+        assert "retry_requested" in event_types and "completed" in event_types, retried_events
+        admin_jobs = assert_ok(client.get(f"/v1/admin/jobs?status=completed&logical_model=t2i-pro", headers=headers))
+        assert any(item["id"] == circuit_body["job_id"] for item in admin_jobs["data"]), admin_jobs
+        job_event_metrics = client.get("/metrics")
+        assert job_event_metrics.status_code == 200 and "media2api_job_events_total" in job_event_metrics.text
+        breaker_list = assert_ok(client.get("/v1/admin/circuit-breakers", headers=headers))
+        assert any(item["id"] == breaker["id"] for item in breaker_list["data"])
+
+        expired_job_id = f"job_expired_lease_{suffix}"
+        expired_attempt_id = f"attempt_expired_lease_{suffix}"
+        expired_lease_id = f"lease_expired_{suffix}"
+        with SessionLocal() as db:
+            account = db.get(db_models.AccountResource, "acct_mock_default")
+            assert account is not None
+            account.current_leases += 1
+            db.add(
+                db_models.MediaJob(
+                    id=expired_job_id,
+                    user_id="usr_admin",
+                    api_key_id=api_keys["data"][0]["id"],
+                    operation="text_to_image",
+                    logical_model="t2i-fast",
+                    normalized_params_json=dumps({"model": "t2i-fast", "prompt": "stuck lease", "n": 1}),
+                    input_asset_ids_json=dumps([]),
+                    output_asset_ids_json=dumps([]),
+                    provider_id="mock",
+                    provider_model="mock-image-fast",
+                    account_id=account.id,
+                    provider_task_id="stuck_provider_task",
+                    status="submitting",
+                    cost_estimate=1,
+                )
+            )
+            db.flush()
+            db.add(
+                db_models.MediaJobAttempt(
+                    id=expired_attempt_id,
+                    job_id=expired_job_id,
+                    provider_id="mock",
+                    account_id=account.id,
+                    provider_model="mock-image-fast",
+                    provider_task_id="stuck_provider_task",
+                    status="submitting",
+                )
+            )
+            db.add(
+                db_models.AccountLease(
+                    id=expired_lease_id,
+                    job_id=expired_job_id,
+                    account_id=account.id,
+                    provider_id="mock",
+                    provider_model="mock-image-fast",
+                    expires_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1),
+                    status="active",
+                )
+            )
+            db.commit()
+        lease_sweep = assert_ok(client.post("/v1/admin/account-leases/release-expired", headers=headers))
+        assert lease_sweep["expired_leases"] >= 1, lease_sweep
+        expired_leases = assert_ok(client.get(f"/v1/admin/account-leases?job_id={expired_job_id}", headers=headers))
+        assert expired_leases["data"] and expired_leases["data"][0]["status"] == "expired", expired_leases
+        expired_job = assert_ok(client.get(f"/v1/media-jobs/{expired_job_id}", headers=headers))
+        assert expired_job["status"] == "expired" and expired_job["error"]["code"] == "LEASE_EXPIRED", expired_job
+        expired_attempts = assert_ok(client.get(f"/v1/media-jobs/{expired_job_id}/attempts", headers=headers))
+        assert expired_attempts["data"][0]["status"] == "expired" and expired_attempts["data"][0]["error_code"] == "LEASE_EXPIRED", expired_attempts
+        expired_accounts = assert_ok(client.get("/v1/accounts", headers=headers))
+        expired_account = [item for item in expired_accounts["data"] if item["id"] == "acct_mock_default"][0]
+        assert expired_account["last_error_code"] == "LEASE_EXPIRED" and expired_account["last_failed_at"], expired_account
+        account_diagnostics = assert_ok(client.get("/v1/admin/accounts/acct_mock_default/diagnostics?limit=10", headers=headers))
+        assert account_diagnostics["object"] == "media2api.account_diagnostics", account_diagnostics
+        assert account_diagnostics["summary"]["last_error_code"] == "LEASE_EXPIRED", account_diagnostics
+        assert account_diagnostics["recent_attempts"] and account_diagnostics["recent_leases"], account_diagnostics
+        assert any(item["check"] == "last_account_error" for item in account_diagnostics["action_items"]), account_diagnostics
+        expired_events = assert_ok(client.get(f"/v1/media-jobs/{expired_job_id}/events", headers=headers))
+        assert any(item["event_type"] == "lease_expired" for item in expired_events["data"]), expired_events
+        retried_expired = assert_ok(client.post(f"/v1/media-jobs/{expired_job_id}/retry", headers=headers, json={"wait": True}))
+        assert retried_expired["id"] == expired_job_id and retried_expired["status"] == "completed", retried_expired
+        lease_metrics = client.get("/metrics")
+        assert lease_metrics.status_code == 200 and "media2api_account_leases_total" in lease_metrics.text and "expired" in lease_metrics.text
+
+        cancel_job_id = f"job_cancel_active_{suffix}"
+        cancel_attempt_id = f"attempt_cancel_active_{suffix}"
+        cancel_lease_id = f"lease_cancel_active_{suffix}"
+        with SessionLocal() as db:
+            account = db.get(db_models.AccountResource, "acct_mock_default")
+            assert account is not None
+            account.current_leases += 1
+            db.add(
+                db_models.MediaJob(
+                    id=cancel_job_id,
+                    user_id="usr_admin",
+                    api_key_id=api_keys["data"][0]["id"],
+                    operation="text_to_image",
+                    logical_model="t2i-fast",
+                    normalized_params_json=dumps({"model": "t2i-fast", "prompt": "cancel active lease", "n": 1}),
+                    input_asset_ids_json=dumps([]),
+                    output_asset_ids_json=dumps([]),
+                    provider_id="mock",
+                    provider_model="mock-image-fast",
+                    account_id=account.id,
+                    provider_task_id="cancel_provider_task",
+                    status="submitting",
+                    cost_estimate=1,
+                )
+            )
+            db.flush()
+            db.add(
+                db_models.MediaJobAttempt(
+                    id=cancel_attempt_id,
+                    job_id=cancel_job_id,
+                    provider_id="mock",
+                    account_id=account.id,
+                    provider_model="mock-image-fast",
+                    provider_task_id="cancel_provider_task",
+                    status="submitting",
+                )
+            )
+            db.add(
+                db_models.AccountLease(
+                    id=cancel_lease_id,
+                    job_id=cancel_job_id,
+                    account_id=account.id,
+                    provider_id="mock",
+                    provider_model="mock-image-fast",
+                    expires_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30),
+                    status="active",
+                )
+            )
+            db.commit()
+        cancelled = assert_ok(client.post(f"/v1/admin/media-jobs/{cancel_job_id}/cancel", headers=headers))
+        assert cancelled["status"] == "cancelled" and cancelled["error"]["code"] == "CANCELLED", cancelled
+        cancel_leases = assert_ok(client.get(f"/v1/admin/account-leases?job_id={cancel_job_id}", headers=headers))
+        assert cancel_leases["data"] and cancel_leases["data"][0]["status"] == "released", cancel_leases
+        cancel_attempts = assert_ok(client.get(f"/v1/media-jobs/{cancel_job_id}/attempts", headers=headers))
+        assert cancel_attempts["data"][0]["status"] == "cancelled" and cancel_attempts["data"][0]["error_code"] == "CANCELLED", cancel_attempts
+        cancel_events = assert_ok(client.get(f"/v1/media-jobs/{cancel_job_id}/events", headers=headers))
+        cancelled_event = [item for item in cancel_events["data"] if item["event_type"] == "cancelled"]
+        assert cancelled_event and cancelled_event[0]["metadata"]["provider_cancel"]["status"] == "not_supported", cancel_events
+        pricing = assert_ok(client.get("/v1/billing/pricing-rules", headers=headers))
+        assert any(item["logical_model"] == "t2i-fast" for item in pricing["data"])
+        pricing_payload = {
+            "id": "price_smoke_disabled",
+            "name": "Smoke Disabled Rule",
+            "logical_model": "t2i-fast",
+            "operation": "text_to_image",
+            "unit": "image",
+            "unit_amount": 99,
+            "provider_cost_unit": 9,
+            "enabled": False,
+        }
+        pricing_resp = client.post("/v1/admin/pricing-rules", headers=headers, json=pricing_payload)
+        if pricing_resp.status_code == 409:
+            created_pricing = assert_ok(client.patch("/v1/admin/pricing-rules/price_smoke_disabled", headers=headers, json={"enabled": False, "unit_amount": 99}))
+        else:
+            created_pricing = assert_ok(pricing_resp)
+        assert created_pricing["id"] == "price_smoke_disabled" and created_pricing["enabled"] is False
+        alert_rules = assert_ok(client.get("/v1/admin/alert-rules", headers=headers))
+        assert any(item["id"] == "alert_account_rate_limited" for item in alert_rules["data"])
+        custom_alert = {
+            "id": "alert_smoke_disabled",
+            "name": "Smoke Disabled Alert",
+            "event_type": "job_failed",
+            "severity": "warning",
+            "condition": {"error_codes": ["SMOKE"]},
+            "enabled": False,
+        }
+        alert_resp = client.post("/v1/admin/alert-rules", headers=headers, json=custom_alert)
+        if alert_resp.status_code == 409:
+            created_alert = assert_ok(client.patch("/v1/admin/alert-rules/alert_smoke_disabled", headers=headers, json={"enabled": False}))
+        else:
+            created_alert = assert_ok(alert_resp)
+        assert created_alert["id"] == "alert_smoke_disabled" and created_alert["enabled"] is False
+        assert any(item["id"] == "alert_usage_anomaly" for item in alert_rules["data"])
+        fail_model_id = f"anomaly_fail_{suffix}"
+        video_model_id = f"anomaly_video_{suffix}"
+        with SessionLocal() as db:
+            api_key_id = api_keys["data"][0]["id"]
+            now = datetime.now(UTC).replace(tzinfo=None)
+            db.add(
+                db_models.LogicalModel(
+                    id=fail_model_id,
+                    display_name="Anomaly Failure Smoke",
+                    operations_json=dumps(["text_to_image"]),
+                    constraints_json=dumps({}),
+                    default_params_json=dumps({}),
+                    billing_class="image_fast",
+                    enabled=True,
+                )
+            )
+            db.add(
+                db_models.LogicalModel(
+                    id=video_model_id,
+                    display_name="Anomaly Video Smoke",
+                    operations_json=dumps(["image_to_video"]),
+                    constraints_json=dumps({}),
+                    default_params_json=dumps({}),
+                    billing_class="video_fast",
+                    enabled=True,
+                )
+            )
+            for index in range(3):
+                db.add(
+                    db_models.MediaJob(
+                        id=f"job_anomaly_fail_{suffix}_{index}",
+                        user_id="usr_admin",
+                        api_key_id=api_key_id,
+                        operation="text_to_image",
+                        logical_model=fail_model_id,
+                        normalized_params_json=dumps({"prompt": "anomaly failure"}),
+                        input_asset_ids_json=dumps([]),
+                        output_asset_ids_json=dumps([]),
+                        provider_id=f"anomaly_provider_{suffix}",
+                        provider_model="anomaly-failure-model",
+                        status="failed",
+                        cost_estimate=1,
+                        final_cost=0,
+                        error_code="PROVIDER_FAILED",
+                        error_message="Synthetic anomaly failure.",
+                        created_at=now - timedelta(minutes=1),
+                        updated_at=now - timedelta(minutes=1),
+                    )
+                )
+            for index in range(2):
+                db.add(
+                    db_models.MediaJob(
+                        id=f"job_anomaly_video_{suffix}_{index}",
+                        user_id="usr_admin",
+                        api_key_id=api_key_id,
+                        operation="image_to_video",
+                        logical_model=video_model_id,
+                        normalized_params_json=dumps({"prompt": "anomaly video", "duration": 3}),
+                        input_asset_ids_json=dumps([]),
+                        output_asset_ids_json=dumps([]),
+                        provider_id=f"anomaly_video_provider_{suffix}",
+                        provider_model="anomaly-video-model",
+                        account_id=f"acct_anomaly_video_{suffix}",
+                        status="completed",
+                        cost_estimate=250,
+                        final_cost=250,
+                        created_at=now - timedelta(minutes=1),
+                        updated_at=now - timedelta(minutes=1),
+                    )
+                )
+            db.commit()
+        anomaly_scan = assert_ok(client.post("/v1/admin/anomaly-scan?lookback_minutes=120", headers=headers))
+        anomaly_types = [item["dimensions"]["anomaly_type"] for item in anomaly_scan["data"]]
+        assert "failure_spike" in anomaly_types and "high_cost_video_burst" in anomaly_types, anomaly_scan
+        anomaly_alerts = assert_ok(client.get("/v1/admin/alerts?status=open", headers=headers))
+        assert any(item["event_type"] == "usage_anomaly" and item["dimensions"].get("logical_model") == fail_model_id for item in anomaly_alerts["data"]), anomaly_alerts
+        assert any(item["event_type"] == "usage_anomaly" and item["dimensions"].get("logical_model") == video_model_id for item in anomaly_alerts["data"]), anomaly_alerts
+        safety_policies = assert_ok(client.get("/v1/admin/safety-policies", headers=headers))
+        assert any(item["id"] == "safety_block_smoke_marker" for item in safety_policies["data"])
+        custom_safety = {
+            "id": "safety_smoke_audit_disabled",
+            "name": "Smoke Disabled Safety Policy",
+            "scope": "global",
+            "action": "audit",
+            "severity": "info",
+            "terms": ["media2api_disabled_safety_marker"],
+            "enabled": False,
+        }
+        safety_resp = client.post("/v1/admin/safety-policies", headers=headers, json=custom_safety)
+        if safety_resp.status_code == 409:
+            created_safety = assert_ok(client.patch("/v1/admin/safety-policies/safety_smoke_audit_disabled", headers=headers, json={"enabled": False}))
+        else:
+            created_safety = assert_ok(safety_resp)
+        assert created_safety["id"] == "safety_smoke_audit_disabled" and created_safety["enabled"] is False
+        platforms = assert_ok(client.get("/v1/target-platforms", headers=headers))
+        required_platforms = {
+            "openai_image",
+            "gemini",
+            "grok",
+            "qwen",
+            "jimeng",
+            "kling",
+            "luma",
+            "runway",
+            "midjourney",
+            "pollinations",
+            "openrouter_image",
+            "fal_replicate",
+            "seedream_proxy",
+            "amux_qwen",
+            "flux_stability",
+        }
+        assert required_platforms.issubset({item["provider_id"] for item in platforms["data"]}), platforms
+        templates = assert_ok(client.get("/v1/provider-templates", headers=headers))
+        assert required_platforms.issubset({item["id"] for item in templates["data"]}), templates
+        pollinations_external_plan = assert_ok(
+            client.post(
+                "/v1/admin/provider-templates/pollinations/external-acceptance",
+                headers=headers,
+                json={"dry_run": True, "operations": ["text_to_image"], "run_samples": False},
+            )
+        )
+        assert pollinations_external_plan["status"] == "planned", pollinations_external_plan
+        assert pollinations_external_plan["activation"]["plan"]["credential_ref"] == "env://POLLINATIONS_KEY", pollinations_external_plan
+        missing_external = assert_ok(
+            client.post(
+                "/v1/admin/provider-templates/pollinations/external-acceptance",
+                headers=headers,
+                json={
+                    "credential_ref": f"env://MEDIA2API_MISSING_EXTERNAL_ACCEPTANCE_{suffix}",
+                    "operations": ["text_to_image"],
+                    "run_samples": True,
+                    "max_samples": 1,
+                },
+            )
+        )
+        assert missing_external["status"] == "action_required" and missing_external["error"] == "CREDENTIAL_UNAVAILABLE", missing_external
+        mock_caps = assert_ok(client.get("/v1/admin/providers/mock/capabilities", headers=headers))
+        assert "text_to_image" in mock_caps["operations"] and "mock-image-fast" in mock_caps["models"], mock_caps
+        assert mock_caps["operation_capabilities"]["text_to_image"]["output_kind"] == "image", mock_caps
+        assert mock_caps["accounts"]["available_capacity"] >= 1, mock_caps
+        caps_list = assert_ok(client.get("/v1/admin/provider-capabilities?provider_id=mock", headers=headers))
+        assert caps_list["data"] and caps_list["data"][0]["provider_id"] == "mock", caps_list
+        installed = assert_ok(
+            client.post(
+                "/v1/admin/provider-templates/pollinations/install",
+                headers=headers,
+                json={
+                    "base_url": "http://127.0.0.1:19999",
+                    "status": "disabled",
+                    "account_id": "acct_pollinations_template_smoke",
+                    "enable_mappings": False,
+                },
+            )
+        )
+        assert installed["provider"]["id"] == "pollinations"
+        assert installed["account"]["id"] == "acct_pollinations_template_smoke"
+        assert installed["mappings"] and not installed["mappings"][0]["enabled"]
+        connector_base_url = f"http://127.0.0.1:{server.server_port}"
+        activated = assert_ok(
+            client.post(
+                "/v1/admin/provider-templates/openai_image/activate",
+                headers=headers,
+                json={
+                    "base_url": connector_base_url,
+                    "status": "active",
+                    "account_id": "acct_template_activate_smoke",
+                    "credential_value": "template-activate-secret",
+                    "credential_secret_id": "secret_template_activate_smoke",
+                    "contract_operations": ["text_to_image"],
+                    "run_contract_tests": True,
+                    "contract_run_submit": False,
+                    "run_quota_sync": False,
+                },
+            )
+        )
+        assert activated["object"] == "provider_template.activation" and activated["ok"] is True and activated["status"] == "activated", activated
+        assert activated["install"]["account"]["credential_ref"] == "secret://secret_template_activate_smoke", activated
+        assert "template-activate-secret" not in str(activated), activated
+        assert activated["health_check"]["status"] == "ok", activated["health_check"]
+        assert activated["contract_tests"] and activated["contract_tests"][0]["status"] == "passed", activated["contract_tests"]
+        assert activated["compatibility"]["data"] and activated["capabilities"]["provider_id"] == "openai_image", activated
+        for mapping in activated["install"]["mappings"]:
+            assert_ok(client.patch(f"/v1/admin/model-mappings/{mapping['id']}", headers=headers, json={"enabled": False}))
+        assert_ok(client.patch("/v1/admin/accounts/acct_template_activate_smoke", headers=headers, json={"status": "disabled", "concurrency_limit": 0}))
+        assert_ok(client.patch("/v1/admin/providers/openai_image", headers=headers, json={"status": "disabled"}))
+        bad_auth = client.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+        assert bad_auth.status_code == 401 and bad_auth.json()["code"] == "INVALID_API_KEY"
+        low_user_resp = client.post(
+            "/v1/admin/users",
+            headers=headers,
+            json={"id": "usr_low_balance_smoke", "email": "low-balance-smoke@media2api.local", "wallet_balance": 1},
+        )
+        if low_user_resp.status_code == 409:
+            assert_ok(client.patch("/v1/admin/users/usr_low_balance_smoke", headers=headers, json={"wallet_balance": 1, "status": "active"}))
+        else:
+            assert_ok(low_user_resp)
+        low_key = assert_ok(client.post("/v1/admin/api-keys", headers=headers, json={"user_id": "usr_low_balance_smoke", "name": "low-balance-smoke"}))["api_key"]
+        low_balance = client.post(
+            "/v1/images/generations",
+            headers={"Authorization": f"Bearer {low_key}"},
+            json={"model": "t2i-fast", "prompt": "should be rejected", "n": 1},
+        )
+        assert low_balance.status_code == 402 and low_balance.json()["code"] == "INSUFFICIENT_BALANCE"
+        blocked = client.post(
+            "/v1/images/generations",
+            headers={**headers, "X-Request-ID": "req_smoke_safety_block"},
+            json={"model": "t2i-fast", "prompt": "please trigger media2api_forbidden_test", "n": 1},
+        )
+        blocked_body = blocked.json()
+        assert blocked.status_code == 400 and blocked_body["code"] == "SAFETY_REJECTED", blocked_body
+        assert blocked_body["job_id"] and blocked_body["policy_id"] == "safety_block_smoke_marker", blocked_body
+        blocked_job = assert_ok(client.get(f"/v1/media-jobs/{blocked_body['job_id']}", headers=headers))
+        assert blocked_job["status"] == "failed" and blocked_job["final_cost"] == 0, blocked_job
+        safety_events = assert_ok(client.get(f"/v1/admin/safety-events?job_id={blocked_body['job_id']}", headers=headers))
+        assert safety_events["data"] and safety_events["data"][0]["matched_terms"] == ["media2api_forbidden_test"], safety_events
+        own_safety_events = assert_ok(client.get(f"/v1/safety-events?job_id={blocked_body['job_id']}", headers=headers))
+        assert own_safety_events["data"] and own_safety_events["data"][0]["status"] == "blocked"
+        safety_request_log = assert_ok(client.get("/v1/admin/request-logs?request_id=req_smoke_safety_block", headers=headers))
+        assert safety_request_log["data"] and safety_request_log["data"][0]["job_id"] == blocked_body["job_id"], safety_request_log
+        assert safety_request_log["data"][0]["standard_error_code"] == "SAFETY_REJECTED" and safety_request_log["data"][0]["logical_model"] == "t2i-fast", safety_request_log
+        safety_metrics = client.get("/metrics")
+        assert safety_metrics.status_code == 200 and "media2api_safety_events_total" in safety_metrics.text
+
+        uploaded = assert_ok(
+            client.post(
+                "/v1/assets",
+                headers=headers,
+                json={"b64_json": base64.b64encode(tiny_png_bytes()).decode("ascii"), "filename": "base64.png", "kind": "image", "purpose": "reference"},
+            )
+        )
+        direct_content = client.get(f"/v1/assets/{uploaded['id']}/content")
+        assert direct_content.status_code == 403
+        parsed = urlparse(uploaded["url"])
+        content = client.get(f"{parsed.path}?{parsed.query}")
+        assert content.status_code == 200 and content.headers["content-type"].startswith("image/png")
+        admin_uploaded_asset = assert_ok(client.get(f"/v1/admin/assets/{uploaded['id']}", headers=headers))
+        assert admin_uploaded_asset["id"] == uploaded["id"] and admin_uploaded_asset["user_id"] == "usr_admin" and admin_uploaded_asset["provider_meta"] == {}, admin_uploaded_asset
+        invalid_image = client.post(
+            "/v1/assets",
+            headers=headers,
+            json={"b64_json": base64.b64encode(b"not-an-image").decode("ascii"), "filename": "broken.png", "kind": "image", "purpose": "reference", "mime_type": "image/png"},
+        )
+        assert invalid_image.status_code == 400 and invalid_image.json()["code"] == "ASSET_IMAGE_INVALID", invalid_image.text
+        asset_failure_metrics = client.get("/metrics")
+        assert asset_failure_metrics.status_code == 200 and 'asset_ingest_failed_total{' in asset_failure_metrics.text and "mime_type=" in asset_failure_metrics.text
+
+        uploaded_alt = assert_ok(
+            client.post(
+                "/v1/assets",
+                headers=headers,
+                json={"b64_json": base64.b64encode(tiny_png_bytes()).decode("ascii"), "filename": "base64-alt.png", "kind": "image", "purpose": "reference"},
+            )
+        )
+        native_complex_image = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={
+                    "operation": "image_edit",
+                    "model": "image-edit",
+                    "prompt": "native rich parameter image edit",
+                    "image": uploaded["id"],
+                    "images": [uploaded["id"], uploaded_alt["id"]],
+                    "mask": uploaded["id"],
+                    "seed": 12345,
+                    "size": "1024x1024",
+                    "quality": "high",
+                    "negative_prompt": "low quality",
+                    "route_policy": "best_quality",
+                    "cost_policy": "max_cost:100000",
+                    "provider_preference": ["mock"],
+                    "providers": ["mock"],
+                    "provider_models": ["mock-image-edit"],
+                    "wait": True,
+                },
+            )
+        )
+        assert native_complex_image["status"] == "completed" and native_complex_image["operation"] == "image_edit", native_complex_image
+        assert {uploaded["id"], uploaded_alt["id"]}.issubset(set(native_complex_image["input_asset_ids"])), native_complex_image
+        native_image_params = native_complex_image["params"]
+        assert native_image_params["images"] == [uploaded["id"], uploaded_alt["id"]], native_image_params
+        assert native_image_params["mask"] == uploaded["id"] and native_image_params["seed"] == 12345, native_image_params
+        assert native_image_params["quality"] == "high" and native_image_params["negative_prompt"] == "low quality", native_image_params
+        assert native_image_params["route_policy"] == "best_quality" and native_image_params["cost_policy"] == "max_cost:100000", native_image_params
+        assert native_complex_image["outputs"] and native_complex_image["outputs"][0]["kind"] == "image", native_complex_image
+        native_complex_video = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={
+                    "operation": "image_to_video",
+                    "model": "i2v-fast",
+                    "prompt": "native rich parameter i2v",
+                    "first_frame": uploaded["id"],
+                    "last_frame": uploaded_alt["id"],
+                    "duration": 3,
+                    "aspect_ratio": "16:9",
+                    "quality": "standard",
+                    "seed": 54321,
+                    "negative_prompt": "jitter",
+                    "providers": ["mock"],
+                    "provider_preference": ["mock"],
+                    "provider_models": ["mock-video-fast"],
+                    "max_cost": 100000,
+                    "wait": True,
+                },
+            )
+        )
+        assert native_complex_video["status"] == "completed" and native_complex_video["operation"] == "image_to_video", native_complex_video
+        assert {uploaded["id"], uploaded_alt["id"]}.issubset(set(native_complex_video["input_asset_ids"])), native_complex_video
+        native_video_params = native_complex_video["params"]
+        assert native_video_params["first_frame"] == uploaded["id"] and native_video_params["last_frame"] == uploaded_alt["id"], native_video_params
+        assert native_video_params["aspect_ratio"] == "16:9" and native_video_params["seed"] == 54321, native_video_params
+        assert native_complex_video["outputs"] and native_complex_video["outputs"][0]["kind"] == "video", native_complex_video
+        frame_api_video = assert_ok(
+            client.post(
+                "/v1/videos/generations",
+                headers=headers,
+                json={
+                    "model": "i2v-fast",
+                    "prompt": "openai compatible first last frame i2v",
+                    "first_frame": uploaded["id"],
+                    "last_frame": uploaded_alt["id"],
+                    "duration": 3,
+                    "aspect_ratio": "16:9",
+                    "provider_preference": ["mock"],
+                    "providers": ["mock"],
+                    "provider_models": ["mock-video-fast"],
+                },
+            )
+        )
+        frame_api_job = None
+        for _ in range(20):
+            frame_api_job = assert_ok(client.get(f"/v1/media-jobs/{frame_api_video['id']}", headers=headers))
+            if frame_api_job["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.1)
+        assert frame_api_job and frame_api_job["status"] == "completed", frame_api_job
+        assert {uploaded["id"], uploaded_alt["id"]}.issubset(set(frame_api_job["input_asset_ids"])), frame_api_job
+        assert frame_api_job["params"]["first_frame"] == uploaded["id"] and frame_api_job["params"]["last_frame"] == uploaded_alt["id"], frame_api_job
+
+        asset_limited_model_id = f"model_asset_limited_{suffix}"
+        limited_model = assert_ok(
+            client.post(
+                "/v1/admin/logical-models",
+                headers=headers,
+                json={
+                    "id": asset_limited_model_id,
+                    "display_name": "Asset Limited Smoke Model",
+                    "operations": ["image_to_video"],
+                    "constraints": {"max_input_image_width": 8},
+                    "default_params": {"duration": 3, "quality": "standard"},
+                    "billing_class": "video_fast",
+                    "enabled": True,
+                },
+            )
+        )
+        assert limited_model["constraints"]["max_input_image_width"] == 8
+        oversized_input = client.post(
+            "/v1/media-jobs",
+            headers=headers,
+            json={"operation": "image_to_video", "model": asset_limited_model_id, "prompt": "reject large input image", "image": uploaded["id"], "wait": True},
+        )
+        assert oversized_input.status_code == 400 and oversized_input.json()["code"] == "ASSET_IMAGE_WIDTH_TOO_LARGE", oversized_input.text
+
+        original_allowed_hosts = set(settings.asset_remote_url_allowed_hosts)
+        original_allow_private = settings.asset_remote_url_allow_private
+        settings.asset_remote_url_allowed_hosts = set()
+        settings.asset_remote_url_allow_private = False
+        try:
+            bad_scheme_asset = client.post(
+                "/v1/assets",
+                headers=headers,
+                json={"url": "file:///etc/passwd", "filename": "remote.png", "kind": "image", "purpose": "reference"},
+            )
+            assert bad_scheme_asset.status_code == 400 and bad_scheme_asset.json()["code"] == "REMOTE_URL_SCHEME_UNSUPPORTED", bad_scheme_asset.text
+            private_remote_asset = client.post(
+                "/v1/assets",
+                headers=headers,
+                json={"url": f"http://127.0.0.1:{server.server_port}/remote.png", "filename": "remote.png", "kind": "image", "purpose": "reference"},
+            )
+            assert private_remote_asset.status_code == 400 and private_remote_asset.json()["code"] == "REMOTE_URL_PRIVATE_ADDRESS_BLOCKED", private_remote_asset.text
+
+            settings.asset_remote_url_allowed_hosts = {"127.0.0.1"}
+            remote_asset = assert_ok(
+                client.post(
+                    "/v1/assets",
+                    headers=headers,
+                    json={"url": f"http://127.0.0.1:{server.server_port}/remote.png", "filename": "remote.png", "kind": "image", "purpose": "reference"},
+                )
+            )
+            assert remote_asset["source"] == "remote_url" if "source" in remote_asset else remote_asset["id"]
+            asset_list = assert_ok(client.get("/v1/assets?kind=image", headers=headers))
+            assert any(item["id"] == remote_asset["id"] for item in asset_list["data"])
+            deleted = assert_ok(client.delete(f"/v1/assets/{remote_asset['id']}", headers=headers))
+            assert deleted["deleted"] is True
+            assert client.get(f"/v1/assets/{remote_asset['id']}", headers=headers).status_code == 404
+        finally:
+            settings.asset_remote_url_allowed_hosts = original_allowed_hosts
+            settings.asset_remote_url_allow_private = original_allow_private
+
+        image = assert_ok(
+            client.post(
+                "/v1/images/generations",
+                headers={**headers, "X-Request-ID": "req_smoke_image_generation"},
+                json={"model": "t2i-fast", "prompt": "smoke test image", "n": 1},
+            )
+        )
+        assert image["data"][0]["asset_id"]
+        admin_assets = assert_ok(client.get(f"/v1/admin/assets?user_id=usr_admin&kind=image&limit=50", headers=headers))
+        assert any(item["id"] == image["data"][0]["asset_id"] for item in admin_assets["data"]), admin_assets
+        image_b64 = assert_ok(
+            client.post(
+                "/v1/images/generations",
+                headers=headers,
+                json={"model": "t2i-fast", "prompt": "smoke test image b64", "n": 1, "response_format": "b64_json"},
+            )
+        )
+        assert image_b64["data"][0]["asset_id"] and image_b64["data"][0]["mime_type"] == "image/png"
+        assert base64.b64decode(image_b64["data"][0]["b64_json"]).startswith(b"\x89PNG")
+        bad_response_format = client.post(
+            "/v1/images/generations",
+            headers=headers,
+            json={"model": "t2i-fast", "prompt": "bad format", "n": 1, "response_format": "file"},
+        )
+        assert bad_response_format.status_code == 400 and bad_response_format.json()["code"] == "INVALID_RESPONSE_FORMAT", bad_response_format.text
+        image_job = assert_ok(client.get(f"/v1/media-jobs/{image['job_id']}", headers=headers))
+        assert image_job["cost_estimate"] >= 1 and image_job["final_cost"] >= 1
+        image_job_diagnostics = assert_ok(client.get(f"/v1/admin/media-jobs/{image['job_id']}/diagnostics?limit=100", headers=headers))
+        assert image_job_diagnostics["object"] == "media2api.media_job_diagnostics", image_job_diagnostics
+        assert image_job_diagnostics["job"]["id"] == image["job_id"], image_job_diagnostics
+        assert image_job_diagnostics["summary"]["status"] == "completed", image_job_diagnostics
+        assert image_job_diagnostics["summary"]["attempt_count"] >= 1 and image_job_diagnostics["summary"]["lease_count"] >= 1, image_job_diagnostics
+        assert image_job_diagnostics["summary"]["output_asset_count"] >= 1 and image_job_diagnostics["summary"]["settled_usage_amount"] >= 1, image_job_diagnostics
+        assert image_job_diagnostics["attempts"] and image_job_diagnostics["leases"] and image_job_diagnostics["output_assets"], image_job_diagnostics
+        assert image_job_diagnostics["request_logs"], image_job_diagnostics
+        assert image_job_diagnostics["billing"]["holds"] and image_job_diagnostics["billing"]["usage_records"], image_job_diagnostics
+        assert any(item["kind"] == "event" and item.get("event_type") == "completed" for item in image_job_diagnostics["timeline"]), image_job_diagnostics
+        request_logs = assert_ok(client.get("/v1/admin/request-logs?request_id=req_smoke_image_generation", headers=headers))
+        assert request_logs["data"], request_logs
+        request_log = request_logs["data"][0]
+        assert request_log["job_id"] == image["job_id"], request_log
+        assert request_log["user_id"] == "usr_admin" and request_log["api_key_id"], request_log
+        assert request_log["provider_id"] == image_job["provider"] and request_log["account_id"] == image_job["account_id"], request_log
+        assert request_log["logical_model"] == "t2i-fast" and request_log["provider_model"] == image_job["provider_model"], request_log
+        assert request_log["provider_task_id"] and request_log["attempt_id"] and request_log["standard_error_code"] == "", request_log
+        provider_logs = assert_ok(client.get(f"/v1/admin/request-logs?provider_id={image_job['provider']}&logical_model=t2i-fast", headers=headers))
+        assert any(item["job_id"] == image["job_id"] for item in provider_logs["data"]), provider_logs
+        own_logs = assert_ok(client.get("/v1/request-logs?request_id=req_smoke_image_generation", headers=headers))
+        assert own_logs["data"] and own_logs["data"][0]["status_code"] == 200 and own_logs["data"][0]["provider_id"] == image_job["provider"]
+
+        budget_rejected = client.post(
+            "/v1/media-jobs",
+            headers=headers,
+            json={"operation": "text_to_video", "model": "t2v-general", "prompt": "budget rejected smoke", "duration": 3, "max_cost": 1, "wait": True},
+        )
+        assert budget_rejected.status_code == 402 and budget_rejected.json()["code"] == "COST_POLICY_REJECTED", budget_rejected.text
+        rejected_job_id = budget_rejected.json()["job_id"]
+        rejected_job = assert_ok(client.get(f"/v1/media-jobs/{rejected_job_id}", headers=headers))
+        assert rejected_job["status"] == "failed" and rejected_job["final_cost"] == 0, rejected_job
+        rejected_logs = assert_ok(client.get(f"/v1/admin/request-logs?job_id={rejected_job_id}&error_code=COST_POLICY_REJECTED", headers=headers))
+        assert rejected_logs["data"] and rejected_logs["data"][0]["standard_error_code"] == "COST_POLICY_REJECTED", rejected_logs
+        rejected_events = assert_ok(client.get(f"/v1/media-jobs/{rejected_job_id}/events", headers=headers))
+        assert any(item["event_type"] == "cost_policy_rejected" for item in rejected_events["data"]), rejected_events
+        budget_allowed = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={"operation": "text_to_image", "model": "t2i-fast", "prompt": "budget allowed smoke", "max_cost": 100, "wait": True},
+            )
+        )
+        assert budget_allowed["status"] == "completed" and budget_allowed["cost_estimate"] <= 100, budget_allowed
+        targeted_account_job = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={
+                    "operation": "text_to_image",
+                    "model": "t2i-fast",
+                    "prompt": "target a specific account for acceptance smoke",
+                    "preferred_account_id": bulk_account_id,
+                    "wait": True,
+                },
+            )
+        )
+        assert targeted_account_job["status"] == "completed" and targeted_account_job["account_id"] == bulk_account_id, targeted_account_job
+        assert targeted_account_job["params"]["preferred_account_id"] == bulk_account_id, targeted_account_job
+        account_acceptance = assert_ok(
+            client.post(
+                f"/v1/admin/accounts/{bulk_account_id}/external-acceptance",
+                headers=headers,
+                json={
+                    "operations": ["text_to_image"],
+                    "run_health_check": True,
+                    "run_contract_tests": True,
+                    "run_quota_sync": True,
+                    "run_samples": True,
+                    "max_samples": 1,
+                    "require_production_ready": False,
+                },
+            )
+        )
+        assert account_acceptance["status"] == "passed" and account_acceptance["ok"] is True, account_acceptance
+        assert account_acceptance["samples"] and account_acceptance["samples"][0]["account_id"] == bulk_account_id, account_acceptance
+        account_acceptance_suite = assert_ok(
+            client.post(
+                "/v1/admin/account-acceptance-suite",
+                headers=headers,
+                json={
+                    "account_ids": [bulk_account_id],
+                    "external_only": False,
+                    "operations": ["text_to_image"],
+                    "run_health_check": True,
+                    "run_contract_tests": True,
+                    "run_quota_sync": True,
+                    "run_samples": True,
+                    "max_samples": 1,
+                    "max_accounts": 1,
+                    "require_production_ready": False,
+                    "dry_run": False,
+                },
+            )
+        )
+        assert account_acceptance_suite["status"] == "passed" and account_acceptance_suite["summary"]["passed"] == 1, account_acceptance_suite
+        assert account_acceptance_suite["results"][0]["samples"][0]["account_id"] == bulk_account_id, account_acceptance_suite
+
+        edit = assert_ok(
+            client.post(
+                "/v1/images/edits",
+                headers=headers,
+                json={"model": "image-edit", "prompt": "mock edit", "image": image["data"][0]["asset_id"]},
+            )
+        )
+        assert edit["data"][0]["asset_id"]
+        edit_b64 = assert_ok(
+            client.post(
+                "/v1/images/edits",
+                headers=headers,
+                json={"model": "image-edit", "prompt": "mock edit b64", "image": image["data"][0]["asset_id"], "response_format": "b64_json"},
+            )
+        )
+        assert edit_b64["data"][0]["asset_id"] and base64.b64decode(edit_b64["data"][0]["b64_json"]).startswith(b"\x89PNG")
+
+        native_edit = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={
+                    "operation": "image_edit",
+                    "model": "image-edit",
+                    "prompt": "native edit with mask and seed",
+                    "image": image["data"][0]["asset_id"],
+                    "mask": uploaded["id"],
+                    "seed": 12345,
+                    "negative_prompt": "low quality",
+                    "size": "1024x1024",
+                    "route_policy": "fastest",
+                    "provider_preference": ["mock"],
+                    "wait": True,
+                },
+            )
+        )
+        assert native_edit["status"] == "completed", native_edit
+        assert image["data"][0]["asset_id"] in native_edit["input_asset_ids"] and uploaded["id"] in native_edit["input_asset_ids"], native_edit
+        assert native_edit["params"]["seed"] == 12345 and native_edit["params"]["negative_prompt"] == "low quality", native_edit
+        assert native_edit["params"]["route_policy"] == "fastest" and native_edit["params"]["provider_preference"] == ["mock"], native_edit
+        native_i2i = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={
+                    "operation": "image_to_image",
+                    "model": "image-variation",
+                    "prompt": "native image variation",
+                    "image": image["data"][0]["asset_id"],
+                    "seed": 23456,
+                    "quality": "standard",
+                    "wait": True,
+                },
+            )
+        )
+        assert native_i2i["status"] == "completed" and native_i2i["operation"] == "image_to_image", native_i2i
+        assert image["data"][0]["asset_id"] in native_i2i["input_asset_ids"], native_i2i
+        assert native_i2i["outputs"] and native_i2i["outputs"][0]["kind"] == "image", native_i2i
+
+        bad_native_asset = client.post(
+            "/v1/media-jobs",
+            headers=headers,
+            json={"operation": "image_edit", "model": "image-edit", "prompt": "bad asset", "image": "asset_missing_native", "wait": True},
+        )
+        assert bad_native_asset.status_code == 404 and bad_native_asset.json()["code"] == "ASSET_NOT_FOUND", bad_native_asset.text
+
+        native_i2v = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={
+                    "operation": "image_to_video",
+                    "model": "i2v-fast",
+                    "prompt": "native i2v first and last frame",
+                    "first_frame": image["data"][0]["asset_id"],
+                    "last_frame": uploaded["id"],
+                    "duration": 3,
+                    "aspect_ratio": "16:9",
+                    "quality": "standard",
+                    "cost_policy": "balanced",
+                    "wait": True,
+                },
+            )
+        )
+        assert native_i2v["status"] == "completed", native_i2v
+        assert image["data"][0]["asset_id"] in native_i2v["input_asset_ids"] and uploaded["id"] in native_i2v["input_asset_ids"], native_i2v
+        assert native_i2v["params"]["first_frame"] == image["data"][0]["asset_id"] and native_i2v["params"]["last_frame"] == uploaded["id"], native_i2v
+
+        video = assert_ok(
+            client.post(
+                "/v1/videos/generations",
+                headers=headers,
+                json={"model": "i2v-fast", "prompt": "mock video", "image": image["data"][0]["asset_id"], "duration": 3},
+            )
+        )
+        job_id = video["id"]
+        final = None
+        for _ in range(20):
+            final = assert_ok(client.get(f"/v1/media-jobs/{job_id}", headers=headers))
+            if final["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.1)
+        assert final and final["status"] == "completed", final
+        assert final["outputs"][0]["asset_id"] if "asset_id" in final["outputs"][0] else final["outputs"][0]["id"]
+        video_output = final["outputs"][0]
+        assert video_output["kind"] == "video" and video_output["thumbnail_asset_id"], video_output
+        extended_video = assert_ok(
+            client.post(
+                "/v1/media-jobs",
+                headers=headers,
+                json={
+                    "operation": "video_extend",
+                    "model": "video-extend",
+                    "prompt": "native video extend",
+                    "video": video_output["id"],
+                    "duration": 2,
+                    "quality": "standard",
+                    "wait": True,
+                },
+            )
+        )
+        assert extended_video["status"] == "completed" and extended_video["operation"] == "video_extend", extended_video
+        assert video_output["id"] in extended_video["input_asset_ids"], extended_video
+        assert extended_video["outputs"] and extended_video["outputs"][0]["kind"] == "video", extended_video
+        thumb = assert_ok(client.get(f"/v1/assets/{video_output['thumbnail_asset_id']}", headers=headers))
+        assert thumb["kind"] == "thumbnail" and thumb["parent_asset_id"] == video_output["id"], thumb
+        thumb_url = urlparse(video_output["thumbnail_url"])
+        thumb_content = client.get(f"{thumb_url.path}?{thumb_url.query}")
+        assert thumb_content.status_code == 200 and thumb_content.headers["content-type"].startswith("image/png")
+        attempts = assert_ok(client.get(f"/v1/media-jobs/{job_id}/attempts", headers=headers))
+        assert attempts["data"] and attempts["data"][0]["status"] == "completed"
+        assert attempts["data"][0]["started_at"] and attempts["data"][0]["finished_at"], attempts
+        health = assert_ok(client.post("/v1/admin/providers/mock/health-check", headers=headers))
+        assert health["status"] == "ok"
+        health_list = assert_ok(client.get("/v1/admin/provider-health", headers=headers))
+        assert any(item["provider_id"] == "mock" for item in health_list["data"])
+        jobs = assert_ok(client.get("/v1/jobs", headers=headers))
+        assert any(job["id"] == job_id for job in jobs["data"])
+        usage = assert_ok(client.get("/v1/billing/usage", headers=headers))
+        assert len(usage["data"]) >= 1
+        summary = assert_ok(client.get("/v1/billing/summary", headers=headers))
+        assert summary["settled_usage_amount"] >= 1 and summary["provider_cost_amount"] >= 1
+        invoice = assert_ok(client.get("/v1/billing/invoice", headers=headers))
+        assert invoice["object"] == "billing.invoice" and invoice["user_id"] == "usr_admin", invoice
+        assert invoice["totals"]["settled_usage_amount"] >= 1 and invoice["totals"]["provider_cost_amount"] >= 1, invoice
+        assert any(item["type"] == "usage" and item["logical_model"] == "t2i-fast" for item in invoice["line_items"]), invoice
+        invoice_csv = client.get("/v1/billing/invoice?format=csv", headers=headers)
+        assert invoice_csv.status_code == 200 and invoice_csv.headers["content-type"].startswith("text/csv") and "invoice_id" in invoice_csv.text, invoice_csv.text
+        provider_costs = assert_ok(client.get("/v1/admin/provider-costs", headers=headers))
+        assert provider_costs["data"]
+        admin_invoice = assert_ok(client.get("/v1/admin/billing-invoices", headers=headers))
+        assert admin_invoice["object"] == "billing.invoice" and admin_invoice["user_id"] is None, admin_invoice
+        assert admin_invoice["totals"]["settled_usage_amount"] >= invoice["totals"]["settled_usage_amount"], admin_invoice
+        scoped_admin_invoice = assert_ok(client.get("/v1/admin/billing-invoices?user_id=usr_admin", headers=headers))
+        assert scoped_admin_invoice["user_id"] == "usr_admin" and scoped_admin_invoice["totals"]["settled_usage_amount"] == invoice["totals"]["settled_usage_amount"], scoped_admin_invoice
+        admin_invoice_csv = client.get("/v1/admin/billing-invoices?format=csv&user_id=usr_admin", headers=headers)
+        assert admin_invoice_csv.status_code == 200 and "provider_cost" in admin_invoice_csv.text, admin_invoice_csv.text
+        analytics = assert_ok(client.get("/v1/admin/analytics?group_by=provider_id,logical_model", headers=headers))
+        assert analytics["object"] == "admin.analytics" and analytics["totals"]["jobs"] >= 1, analytics
+        assert any(row["dimensions"].get("provider_id") == image_job["provider"] and row["dimensions"].get("logical_model") == "t2i-fast" for row in analytics["data"]), analytics
+        account_analytics = assert_ok(client.get(f"/v1/admin/analytics?group_by=account_id&account_id={image_job['account_id']}", headers=headers))
+        assert account_analytics["data"] and account_analytics["data"][0]["dimensions"]["account_id"] == image_job["account_id"], account_analytics
+        assert account_analytics["data"][0]["revenue_amount"] >= 1 and account_analytics["data"][0]["provider_cost_amount"] >= 1, account_analytics
+        failure_analytics = assert_ok(client.get("/v1/admin/analytics?group_by=status&status=failed", headers=headers))
+        assert any(row["error_codes"] for row in failure_analytics["data"]), failure_analytics
+        invalid_analytics = client.get("/v1/admin/analytics?group_by=provider_id,bad_dimension", headers=headers)
+        assert invalid_analytics.status_code == 400 and invalid_analytics.json()["code"] == "INVALID_ANALYTICS_DIMENSION", invalid_analytics.text
+        holds = assert_ok(client.get("/v1/admin/billing-holds", headers=headers))
+        assert holds["data"]
+        print("smoke ok")
+    finally:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

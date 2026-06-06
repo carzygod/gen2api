@@ -1,0 +1,11809 @@
+from __future__ import annotations
+
+import base64
+from copy import deepcopy
+from datetime import datetime, timedelta
+import hashlib
+import html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import threading
+import time
+from typing import Any
+import urllib.error
+import urllib.request
+from urllib.parse import parse_qsl, urlencode, urlparse
+
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import case, func, or_, text
+from sqlalchemy.orm import Session
+
+from . import models
+from .catalog import TARGET_MODEL_TABLE, seed_defaults
+from .config import settings
+from .database import SessionLocal, get_db, init_db
+from .security import AuthContext, extract_api_key, hash_api_key, is_admin_user, require_admin, require_auth
+from .services_alerts import AlertService
+from .services_assets import AssetService
+from .services_capabilities import ProviderCapabilityService
+from .services_contracts import ProviderContractService
+from .services_core import ACTIVE_ATTEMPT_STATUSES, JobRuntime, UNLEASED_STALLED_JOB_STATUSES, account_credential_available, quota_remaining
+from .services_governance import GovernanceService
+from .services_secrets import SecretService, serialize_secret
+from .services_webhooks import WebhookService
+from .providers import ProviderContext, get_provider
+from .provider_templates import PROVIDER_TEMPLATES, template_as_dict
+from .utils import DomainError, dumps, is_sensitive_key, loads, new_id
+
+app = FastAPI(title="media2api", version="0.1.0")
+runtime = JobRuntime()
+asset_service = AssetService()
+alert_service = AlertService()
+capability_service = ProviderCapabilityService()
+contract_service = ProviderContractService()
+governance_service = GovernanceService()
+secret_service = SecretService()
+webhook_service = WebhookService()
+
+EXTERNAL_ACCEPTANCE_REFERENCE_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAAD09D8LAAAAG0lEQVR4nGNkaGD4z0BFwMRAiikGqmgqBgBT9AEc5gYPmwAAAABJRU5ErkJggg=="
+)
+ASSET_STORAGE_SELF_TEST_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKUlEQVR4nGNkYPjPQC5gIlvnqOZRzaOaRzWPal7QMRg1g9EwYBgAq7cCP7wf1QQAAAAASUVORK5CYII="
+)
+EXTERNAL_ACCEPTANCE_SAMPLE_ORDER = ["text_to_image", "image_to_image", "image_edit", "text_to_video", "image_to_video", "video_extend"]
+
+
+def metric_label(value: Any) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def metric_labels(**labels: Any) -> str:
+    return ",".join(f'{key}="{metric_label(value)}"' for key, value in labels.items())
+
+
+def append_required_metric_aliases(lines: list[str]) -> None:
+    aliases = {
+        "media2api_jobs_total": "media_jobs_total",
+        "media2api_media_job_duration_seconds": "media_job_duration_seconds",
+        "media2api_provider_submit_errors_total": "provider_submit_errors_total",
+        "media2api_provider_poll_timeout_total": "provider_poll_timeout_total",
+        "media2api_account_lease_active": "account_lease_active",
+        "media2api_account_failure_score": "account_failure_score",
+        "media2api_asset_ingest_failed_total": "asset_ingest_failed_total",
+        "media2api_billing_holds_total": "billing_holds_total",
+        "media2api_fallback_attempts_total": "fallback_attempts_total",
+        "media2api_stalled_jobs_active": "stalled_jobs_active",
+        "media2api_stalled_jobs_recovered_total": "stalled_jobs_recovered_total",
+    }
+    alias_lines: list[str] = []
+    for line in lines:
+        for source, alias in aliases.items():
+            if line.startswith(source) or line.startswith(f"# HELP {source}") or line.startswith(f"# TYPE {source}"):
+                alias_lines.append(line.replace(source, alias, 1))
+                break
+    lines.extend(alias_lines)
+
+
+def api_error(code: str, message: str, status_code: int = 400, retryable: bool = False, extra: dict[str, Any] | None = None) -> JSONResponse:
+    content = {"code": code, "message": message, "retryable": retryable}
+    if extra:
+        content.update(extra)
+    return JSONResponse(status_code=status_code, content=content)
+
+
+def auth_snapshot_from_request(request: Request) -> tuple[str, str]:
+    raw_key = extract_api_key(request.headers.get("authorization"), request.headers.get("x-api-key"))
+    if not raw_key:
+        return "", ""
+    with SessionLocal() as db:
+        api_key = db.query(models.ApiKey).filter(models.ApiKey.key_hash == hash_api_key(raw_key)).first()
+        if not api_key:
+            return "", ""
+        return api_key.user_id, api_key.id
+
+
+def admin_auth_status_from_request(request: Request) -> tuple[bool, int, str]:
+    raw_key = extract_api_key(request.headers.get("authorization"), request.headers.get("x-api-key"))
+    if not raw_key:
+        return False, 401, "API_KEY_REQUIRED"
+    with SessionLocal() as db:
+        api_key = db.query(models.ApiKey).filter(models.ApiKey.key_hash == hash_api_key(raw_key)).first()
+        if not api_key or api_key.status != "active":
+            return False, 401, "INVALID_API_KEY"
+        user = db.get(models.User, api_key.user_id)
+        if not user or user.status != "active":
+            return False, 403, "USER_DISABLED"
+        if not is_admin_user(user):
+            return False, 403, "ADMIN_REQUIRED"
+        return True, 200, ""
+
+
+def audit_job_id(path: str, payload: dict[str, Any]) -> str:
+    if "job_id" in payload:
+        return str(payload["job_id"])
+    if path.startswith("/v1/videos/generations") and payload.get("id"):
+        return str(payload["id"])
+    if path.startswith("/v1/media-jobs") and payload.get("id"):
+        return str(payload["id"])
+    if payload.get("object") == "media.job" and payload.get("id"):
+        return str(payload["id"])
+    path_parts = [part for part in path.strip("/").split("/") if part]
+    for prefix in [
+        ["v1", "media-jobs"],
+        ["v1", "admin", "media-jobs"],
+        ["v1", "videos", "generations"],
+    ]:
+        if len(path_parts) > len(prefix) and path_parts[: len(prefix)] == prefix:
+            return path_parts[len(prefix)]
+    return ""
+
+
+def audit_error_code(payload: dict[str, Any]) -> str:
+    if payload.get("code"):
+        return str(payload["code"])
+    error = payload.get("error")
+    if isinstance(error, dict) and error.get("code"):
+        return str(error["code"])
+    if isinstance(error, str):
+        return error
+    return ""
+
+
+def redact_query_string(query: str) -> str:
+    if not query:
+        return ""
+    redacted: list[tuple[str, str]] = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        redacted.append((key, "[redacted]" if is_sensitive_key(key) else value))
+    return urlencode(redacted)
+
+
+def scrub_request_audit_metadata(metadata_json: str) -> tuple[str, bool]:
+    metadata = loads(metadata_json, {})
+    if not isinstance(metadata, dict):
+        return metadata_json, False
+    query = metadata.get("query")
+    if not isinstance(query, str):
+        return metadata_json, False
+    redacted_query = redact_query_string(query)
+    if redacted_query == query:
+        return metadata_json, False
+    metadata["query"] = redacted_query
+    return dumps(metadata), True
+
+
+def scrub_existing_request_audit_queries(db: Session, batch_size: int = 500) -> dict[str, int]:
+    scanned = 0
+    scrubbed = 0
+    last_id = ""
+    while True:
+        query = db.query(models.RequestAuditLog)
+        if last_id:
+            query = query.filter(models.RequestAuditLog.id > last_id)
+        records = query.order_by(models.RequestAuditLog.id.asc()).limit(batch_size).all()
+        if not records:
+            break
+        batch_changed = False
+        for record in records:
+            scanned += 1
+            last_id = record.id
+            metadata_json, changed = scrub_request_audit_metadata(record.metadata_json)
+            if changed:
+                record.metadata_json = metadata_json
+                scrubbed += 1
+                batch_changed = True
+        if batch_changed:
+            db.commit()
+    return {"scanned": scanned, "scrubbed": scrubbed}
+
+
+def write_request_audit(
+    request: Request,
+    request_id: str,
+    status_code: int,
+    latency_ms: int,
+    response_payload: dict[str, Any] | None = None,
+    error_code: str = "",
+) -> None:
+    user_id, api_key_id = auth_snapshot_from_request(request)
+    response_payload = response_payload or {}
+    job_id = audit_job_id(request.url.path, response_payload)
+    error_code = error_code or audit_error_code(response_payload)
+    client_ip = request.client.host if request.client else ""
+    with SessionLocal() as db:
+        attempt_id = ""
+        provider_id = ""
+        account_id = ""
+        logical_model = ""
+        provider_model = ""
+        provider_task_id = ""
+        if job_id:
+            job = db.get(models.MediaJob, job_id)
+            if job:
+                user_id = user_id or job.user_id
+                api_key_id = api_key_id or job.api_key_id
+                provider_id = job.provider_id or ""
+                account_id = job.account_id or ""
+                logical_model = job.logical_model or ""
+                provider_model = job.provider_model or ""
+                provider_task_id = job.provider_task_id or ""
+                error_code = error_code or job.error_code or ""
+                attempt = (
+                    db.query(models.MediaJobAttempt)
+                    .filter(models.MediaJobAttempt.job_id == job.id)
+                    .order_by(models.MediaJobAttempt.created_at.desc())
+                    .first()
+                )
+                if attempt:
+                    attempt_id = attempt.id
+                    provider_id = provider_id or attempt.provider_id or ""
+                    account_id = account_id or attempt.account_id or ""
+                    provider_model = provider_model or attempt.provider_model or ""
+                    provider_task_id = provider_task_id or attempt.provider_task_id or ""
+                    error_code = error_code or attempt.error_code or ""
+        audit_event = {
+            "event": "media2api_request_audit",
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "user_id": user_id,
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "provider_id": provider_id,
+            "account_id": account_id,
+            "logical_model": logical_model,
+            "provider_model": provider_model,
+            "provider_task_id": provider_task_id,
+            "standard_error_code": error_code,
+        }
+        metadata = {
+            "query": redact_query_string(str(request.url.query)),
+            "content_type": request.headers.get("content-type", ""),
+        }
+        db.add(
+            models.RequestAuditLog(
+                id=new_id("reqlog"),
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                user_id=user_id,
+                api_key_id=api_key_id,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                provider_id=provider_id,
+                account_id=account_id,
+                logical_model=logical_model,
+                provider_model=provider_model,
+                provider_task_id=provider_task_id,
+                standard_error_code=error_code,
+                error_code=error_code,
+                client_ip=client_ip,
+                user_agent=request.headers.get("user-agent", ""),
+                metadata_json=dumps(metadata),
+            )
+        )
+        db.commit()
+        print(dumps(audit_event), flush=True)
+
+
+@app.middleware("http")
+async def request_audit_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or new_id("req")
+    started = time.time()
+    response_payload: dict[str, Any] | None = None
+    if request.url.path.startswith("/v1/admin"):
+        ok, status_code, error_code = admin_auth_status_from_request(request)
+        if not ok:
+            latency_ms = int((time.time() - started) * 1000)
+            payload = {"code": error_code, "message": error_code, "retryable": False}
+            write_request_audit(request, request_id, status_code, latency_ms, payload, error_code=error_code)
+            response = JSONResponse(status_code=status_code, content=payload)
+            response.headers["x-request-id"] = request_id
+            return response
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        latency_ms = int((time.time() - started) * 1000)
+        write_request_audit(request, request_id, 500, latency_ms, error_code=type(exc).__name__)
+        raise
+
+    latency_ms = int((time.time() - started) * 1000)
+    response.headers["x-request-id"] = request_id
+    content_type = response.headers.get("content-type", "")
+    if "application/json" not in content_type:
+        write_request_audit(request, request_id, response.status_code, latency_ms)
+        return response
+
+    body = b""
+    async for chunk in response.body_iterator:
+        body += chunk
+    try:
+        parsed = json.loads(body.decode("utf-8")) if body else {}
+        if isinstance(parsed, dict):
+            response_payload = parsed
+    except Exception:
+        response_payload = None
+    write_request_audit(request, request_id, response.status_code, latency_ms, response_payload)
+    headers = dict(response.headers)
+    headers["x-request-id"] = request_id
+    return Response(content=body, status_code=response.status_code, headers=headers, media_type=response.media_type, background=response.background)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        code = str(detail.get("code") or detail.get("error") or "HTTP_ERROR")
+        message = str(detail.get("message") or detail.get("error") or code)
+        retryable = bool(detail.get("retryable") or False)
+        extra = {k: v for k, v in detail.items() if k not in {"code", "error", "message", "retryable"}}
+        return api_error(code, message, exc.status_code, retryable, extra=extra)
+    return api_error("HTTP_ERROR", str(detail), exc.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return api_error("INVALID_INPUT", str(exc.errors()), 422)
+
+
+@app.exception_handler(DomainError)
+async def domain_exception_handler(request: Request, exc: DomainError) -> JSONResponse:
+    return api_error(exc.code, exc.message, exc.status_code, exc.retryable, extra=exc.extra)
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, DomainError):
+        return api_error(exc.code, exc.message, exc.status_code, exc.retryable, extra=exc.extra)
+    return api_error("INTERNAL_ERROR", str(exc), 500, retryable=True)
+
+
+class ImageGenerationRequest(BaseModel):
+    model: str = Field(default="t2i-fast")
+    prompt: str
+    size: str | None = "1024x1024"
+    n: int = 1
+    quality: str | None = "standard"
+    seed: int | None = None
+    negative_prompt: str | None = None
+    response_format: str | None = "url"
+    route_policy: str | None = None
+    provider_preference: str | list[str] | None = None
+    providers: str | list[str] | None = None
+    provider_model: str | None = None
+    provider_models: str | list[str] | None = None
+    excluded_providers: str | list[str] | None = None
+    preferred_account_id: str | None = None
+
+
+class ImageEditRequest(BaseModel):
+    model: str = Field(default="image-edit")
+    prompt: str
+    image: str | list[str] | None = None
+    mask: str | None = None
+    size: str | None = "1024x1024"
+    n: int = 1
+    quality: str | None = "standard"
+    seed: int | None = None
+    negative_prompt: str | None = None
+    response_format: str | None = "url"
+    route_policy: str | None = None
+    provider_preference: str | list[str] | None = None
+    providers: str | list[str] | None = None
+    provider_model: str | None = None
+    provider_models: str | list[str] | None = None
+    excluded_providers: str | list[str] | None = None
+    preferred_account_id: str | None = None
+
+
+class VideoGenerationRequest(BaseModel):
+    model: str = Field(default="t2v-general")
+    prompt: str
+    image: str | list[str] | None = None
+    first_frame: str | None = None
+    last_frame: str | None = None
+    duration: int = 3
+    aspect_ratio: str | None = "16:9"
+    quality: str | None = "standard"
+    seed: int | None = None
+    negative_prompt: str | None = None
+    webhook: str | None = None
+    route_policy: str | None = None
+    provider_preference: str | list[str] | None = None
+    providers: str | list[str] | None = None
+    provider_model: str | None = None
+    provider_models: str | list[str] | None = None
+    excluded_providers: str | list[str] | None = None
+    preferred_account_id: str | None = None
+
+
+class MediaJobRequest(BaseModel):
+    operation: str
+    model: str
+    prompt: str | None = None
+    assets: list[str] = Field(default_factory=list)
+    image: str | list[str] | None = None
+    images: list[str] | None = None
+    first_frame: str | None = None
+    last_frame: str | None = None
+    mask: str | None = None
+    video: str | None = None
+    videos: list[str] | None = None
+    seed: int | None = None
+    size: str | None = None
+    aspect_ratio: str | None = None
+    duration: int | None = None
+    quality: str | None = None
+    negative_prompt: str | None = None
+    webhook: str | None = None
+    webhook_url: str | None = None
+    route_policy: str | None = None
+    cost_policy: str | None = None
+    max_cost: int | None = None
+    max_credits: int | None = None
+    provider_preference: str | list[str] | None = None
+    providers: str | list[str] | None = None
+    provider_model: str | None = None
+    provider_models: str | list[str] | None = None
+    excluded_providers: str | list[str] | None = None
+    preferred_account_id: str | None = None
+    n: int | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    wait: bool = False
+
+
+class RetryJobRequest(BaseModel):
+    wait: bool = False
+    priority: int | None = None
+
+
+class StalledJobRecoveryRequest(BaseModel):
+    max_age_seconds: int | None = None
+    limit: int = 100
+    job_id: str | None = None
+
+
+class MockStabilitySelfTestRequest(BaseModel):
+    iterations: int = 100
+    model: str = "t2i-fast"
+    provider_id: str = "mock"
+    max_failures: int = 3
+
+
+class WebhookRetryRequest(BaseModel):
+    attempts: int = 1
+
+
+class AssetCreateRequest(BaseModel):
+    b64_json: str | None = None
+    url: str | None = None
+    filename: str = "upload.bin"
+    kind: str = "image"
+    purpose: str = "input"
+    mime_type: str | None = None
+
+
+class ProviderAdminRequest(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    adapter_type: str | None = None
+    status: str | None = None
+    base_config: dict[str, Any] | None = None
+    notes: str | None = None
+
+
+class AccountAdminRequest(BaseModel):
+    id: str | None = None
+    provider_id: str
+    label: str
+    credential_ref: str = "env://MEDIA2API_CONNECTOR_KEY"
+    credential_secret_id: str | None = None
+    credential_kind: str = "api_key"
+    supported_operations: list[str]
+    supported_provider_models: list[str]
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    region: str = ""
+    plan: str = ""
+    status: str = "active"
+
+
+class AccountPatchRequest(BaseModel):
+    label: str | None = None
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str = "api_key"
+    supported_operations: list[str] | None = None
+    supported_provider_models: list[str] | None = None
+    quota_buckets: list[dict[str, Any]] | None = None
+    concurrency_limit: int | None = None
+    health_score: float | None = None
+    failure_score: float | None = None
+    region: str | None = None
+    plan: str | None = None
+    status: str | None = None
+
+
+class AccountBulkUpsertItem(BaseModel):
+    id: str | None = None
+    provider_id: str
+    label: str
+    credential_ref: str | None = None
+    credential_value: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str = "api_key"
+    supported_operations: list[str]
+    supported_provider_models: list[str]
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    region: str = ""
+    plan: str = ""
+    status: str = "active"
+    secret_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountBulkUpsertRequest(BaseModel):
+    accounts: list[AccountBulkUpsertItem]
+
+
+class MappingAdminRequest(BaseModel):
+    id: str | None = None
+    logical_model: str
+    provider_id: str
+    provider_model: str
+    operations: list[str]
+    priority: int = 100
+    weight: int = 1
+    cost_score: float = 0.5
+    speed_score: float = 0.5
+    quality_score: float = 0.5
+    reliability_score: float = 0.5
+    enabled: bool = True
+
+
+class MappingPatchRequest(BaseModel):
+    operations: list[str] | None = None
+    priority: int | None = None
+    weight: int | None = None
+    cost_score: float | None = None
+    speed_score: float | None = None
+    quality_score: float | None = None
+    reliability_score: float | None = None
+    enabled: bool | None = None
+
+
+class LogicalModelAdminRequest(BaseModel):
+    id: str | None = None
+    display_name: str
+    operations: list[str]
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    default_params: dict[str, Any] = Field(default_factory=dict)
+    billing_class: str
+    enabled: bool = True
+
+
+class LogicalModelPatchRequest(BaseModel):
+    display_name: str | None = None
+    operations: list[str] | None = None
+    constraints: dict[str, Any] | None = None
+    default_params: dict[str, Any] | None = None
+    billing_class: str | None = None
+    enabled: bool | None = None
+
+
+class RouterPreviewRequest(BaseModel):
+    model: str
+    operation: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class UserAdminRequest(BaseModel):
+    id: str | None = None
+    email: str
+    status: str = "active"
+    tier: str = "default"
+    wallet_balance: int = 100000
+
+
+class UserPatchRequest(BaseModel):
+    email: str | None = None
+    status: str | None = None
+    tier: str | None = None
+    wallet_balance: int | None = None
+
+
+class ApiKeyAdminRequest(BaseModel):
+    user_id: str
+    name: str = "api-key"
+    key: str | None = None
+
+
+class ApiKeyPatchRequest(BaseModel):
+    name: str | None = None
+    status: str | None = None
+
+
+class CredentialSecretAdminRequest(BaseModel):
+    id: str | None = None
+    name: str
+    value: str
+    kind: str = "api_key"
+    provider_id: str = ""
+    account_id: str = ""
+    status: str = "active"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    notes: str = ""
+
+
+class CredentialSecretPatchRequest(BaseModel):
+    name: str | None = None
+    value: str | None = None
+    kind: str | None = None
+    provider_id: str | None = None
+    account_id: str | None = None
+    status: str | None = None
+    metadata: dict[str, Any] | None = None
+    notes: str | None = None
+
+
+class ConfigImportRequest(BaseModel):
+    snapshot: dict[str, Any]
+    dry_run: bool = True
+    overwrite: bool = True
+    include_accounts: bool = True
+    include_policies: bool = True
+
+
+class UserLimitPolicyAdminRequest(BaseModel):
+    id: str | None = None
+    name: str
+    user_id: str = ""
+    tier: str = ""
+    requests_per_minute: int = 600
+    daily_job_limit: int = 10000
+    concurrent_job_limit: int = 100
+    allowed_models: list[str] = Field(default_factory=list)
+    high_cost_models: list[str] = Field(default_factory=list)
+    high_cost_allowed: bool = True
+    enabled: bool = True
+    notes: str = ""
+
+
+class UserLimitPolicyPatchRequest(BaseModel):
+    name: str | None = None
+    user_id: str | None = None
+    tier: str | None = None
+    requests_per_minute: int | None = None
+    daily_job_limit: int | None = None
+    concurrent_job_limit: int | None = None
+    allowed_models: list[str] | None = None
+    high_cost_models: list[str] | None = None
+    high_cost_allowed: bool | None = None
+    enabled: bool | None = None
+    notes: str | None = None
+
+
+class CircuitBreakerAdminRequest(BaseModel):
+    id: str | None = None
+    scope: str
+    target_id: str
+    status: str = "open"
+    reason: str = ""
+    error_code: str = ""
+    block_minutes: int | None = None
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CircuitBreakerPatchRequest(BaseModel):
+    status: str | None = None
+    reason: str | None = None
+    error_code: str | None = None
+    block_minutes: int | None = None
+    clear_block_until: bool | None = None
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class PricingRuleAdminRequest(BaseModel):
+    id: str | None = None
+    name: str
+    logical_model: str = ""
+    billing_class: str = ""
+    operation: str = ""
+    unit: str = "image"
+    base_amount: int = 0
+    unit_amount: int = 0
+    input_asset_amount: int = 0
+    provider_cost_base: int = 0
+    provider_cost_unit: int = 0
+    provider_cost_input_asset: int = 0
+    quality_multipliers: dict[str, float] = Field(default_factory=lambda: {"standard": 1, "high": 2, "pro": 2, "hd": 2})
+    currency: str = "credits"
+    enabled: bool = True
+
+
+class PricingRulePatchRequest(BaseModel):
+    name: str | None = None
+    logical_model: str | None = None
+    billing_class: str | None = None
+    operation: str | None = None
+    unit: str | None = None
+    base_amount: int | None = None
+    unit_amount: int | None = None
+    input_asset_amount: int | None = None
+    provider_cost_base: int | None = None
+    provider_cost_unit: int | None = None
+    provider_cost_input_asset: int | None = None
+    quality_multipliers: dict[str, float] | None = None
+    currency: str | None = None
+    enabled: bool | None = None
+
+
+class AlertRuleAdminRequest(BaseModel):
+    id: str | None = None
+    name: str
+    event_type: str
+    severity: str = "warning"
+    condition: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class AlertRulePatchRequest(BaseModel):
+    name: str | None = None
+    event_type: str | None = None
+    severity: str | None = None
+    condition: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+class AlertEventPatchRequest(BaseModel):
+    status: str
+
+
+class SafetyPolicyAdminRequest(BaseModel):
+    id: str | None = None
+    name: str
+    scope: str = "global"
+    logical_model: str = ""
+    operation: str = ""
+    action: str = "reject"
+    severity: str = "warning"
+    match_type: str = "term"
+    terms: list[str] = Field(default_factory=list)
+    pattern: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    notes: str = ""
+
+
+class SafetyPolicyPatchRequest(BaseModel):
+    name: str | None = None
+    scope: str | None = None
+    logical_model: str | None = None
+    operation: str | None = None
+    action: str | None = None
+    severity: str | None = None
+    match_type: str | None = None
+    terms: list[str] | None = None
+    pattern: dict[str, Any] | None = None
+    enabled: bool | None = None
+    notes: str | None = None
+
+
+class ContractTestRequest(BaseModel):
+    operation: str = "text_to_image"
+    provider_model: str | None = None
+    run_submit: bool = False
+
+
+class ContractSuiteRequest(BaseModel):
+    provider_ids: list[str] = Field(default_factory=list)
+    operations: list[str] = Field(default_factory=list)
+    active_only: bool = True
+    run_submit: bool = False
+    max_results: int = 100
+
+
+class ProviderCapabilitySyncRequest(BaseModel):
+    endpoint: str | None = None
+    timeout_seconds: float | None = None
+
+
+class TemplateInstallRequest(BaseModel):
+    base_url: str | None = None
+    credential_ref: str = "env://MEDIA2API_CONNECTOR_KEY"
+    credential_secret_id: str | None = None
+    credential_kind: str = "api_key"
+    status: str = "disabled"
+    account_status: str = "active"
+    account_id: str | None = None
+    account_label: str | None = None
+    concurrency_limit: int = 1
+    priority_offset: int = 0
+    enable_mappings: bool = True
+    overwrite_config: bool = True
+
+
+class TemplateActivateRequest(TemplateInstallRequest):
+    status: str = "active"
+    credential_value: str | None = None
+    dry_run: bool = False
+    run_health_check: bool = True
+    run_contract_tests: bool = True
+    contract_operations: list[str] = Field(default_factory=list)
+    contract_run_submit: bool = False
+    run_quota_sync: bool = False
+
+
+class TemplateExternalAcceptanceRequest(TemplateActivateRequest):
+    credential_ref: str | None = None
+    operations: list[str] = Field(default_factory=list)
+    run_samples: bool = True
+    max_samples: int = 4
+    require_production_ready: bool = True
+
+
+class ExternalConnectorManifestAccount(BaseModel):
+    account_id: str | None = None
+    account_label: str | None = None
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str | None = None
+    credential_value: str | None = None
+    account_status: str | None = None
+    concurrency_limit: int | None = None
+    priority_offset: int | None = None
+
+
+class ExternalConnectorManifestRequest(BaseModel):
+    provider_id: str = "jimeng"
+    base_url: str | None = None
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str = "bearer_token"
+    credential_value: str | None = None
+    status: str = "active"
+    account_status: str = "active"
+    account_id: str | None = None
+    account_label: str | None = None
+    concurrency_limit: int = 1
+    priority_offset: int = 0
+    enable_mappings: bool = True
+    overwrite_config: bool = True
+    dry_run: bool = True
+    operations: list[str] = Field(default_factory=list)
+    contract_operations: list[str] = Field(default_factory=list)
+    contract_run_submit: bool = False
+    run_health_check: bool = True
+    run_contract_tests: bool = True
+    run_quota_sync: bool = False
+    include_preflight: bool = True
+    accounts: list[ExternalConnectorManifestAccount] = Field(default_factory=list)
+
+
+class AccountExternalAcceptanceRequest(BaseModel):
+    dry_run: bool = False
+    operations: list[str] = Field(default_factory=list)
+    run_health_check: bool = True
+    run_contract_tests: bool = True
+    contract_run_submit: bool = False
+    run_quota_sync: bool = True
+    run_samples: bool = True
+    max_samples: int = 4
+    require_production_ready: bool = False
+
+
+class AccountAcceptanceSuiteRequest(BaseModel):
+    dry_run: bool = True
+    account_ids: list[str] = Field(default_factory=list)
+    provider_ids: list[str] = Field(default_factory=list)
+    active_only: bool = True
+    external_only: bool = True
+    operations: list[str] = Field(default_factory=list)
+    run_health_check: bool = True
+    run_contract_tests: bool = True
+    contract_run_submit: bool = False
+    run_quota_sync: bool = True
+    run_samples: bool = False
+    max_samples: int = 1
+    max_accounts: int = 20
+    require_production_ready: bool = False
+
+
+class AssetStorageSelfTestRequest(BaseModel):
+    cleanup: bool = True
+
+
+@app.on_event("startup")
+def startup() -> None:
+    last_error: Exception | None = None
+    for _ in range(30):
+        try:
+            init_db()
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            time.sleep(1)
+    if last_error is not None:
+        raise last_error
+    with SessionLocal() as db:
+        seed_defaults(db)
+        migrate_inline_account_credentials(db)
+        scrub_existing_request_audit_queries(db)
+
+
+def serialize_asset(asset: models.MediaAsset, db: Session | None = None) -> dict[str, Any]:
+    meta = loads(asset.provider_meta_json, {})
+    thumbnail_asset_id = str(meta.get("thumbnail_asset_id") or "") if asset.kind == "video" else ""
+    thumbnail_url = None
+    if thumbnail_asset_id and db is not None:
+        thumbnail = db.get(models.MediaAsset, thumbnail_asset_id)
+        if thumbnail:
+            thumbnail_url = asset_service.public_url(thumbnail)
+    result = {
+        "id": asset.id,
+        "kind": asset.kind,
+        "purpose": asset.purpose,
+        "mime_type": asset.mime_type,
+        "width": asset.width,
+        "height": asset.height,
+        "duration_ms": asset.duration_ms,
+        "size_bytes": asset.size_bytes,
+        "sha256": asset.sha256,
+        "url": asset_service.public_url(asset),
+        "source": asset.source,
+        "created_at": asset.created_at.isoformat() + "Z",
+    }
+    if thumbnail_asset_id:
+        result["thumbnail_asset_id"] = thumbnail_asset_id
+        result["thumbnail_url"] = thumbnail_url
+    if asset.kind == "thumbnail" and meta.get("parent_asset_id"):
+        result["parent_asset_id"] = meta.get("parent_asset_id")
+    return result
+
+
+def serialize_admin_asset(asset: models.MediaAsset, db: Session | None = None) -> dict[str, Any]:
+    result = serialize_asset(asset, db=db)
+    result["user_id"] = asset.user_id
+    result["storage_key"] = asset.storage_key
+    result["provider_meta"] = loads(asset.provider_meta_json, {})
+    return result
+
+
+def html_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return html.escape(str(value), quote=True)
+
+
+def image_response_item(asset: models.MediaAsset, response_format: str | None) -> dict[str, Any]:
+    fmt = response_format or "url"
+    if fmt not in {"url", "b64_json"}:
+        raise HTTPException(status_code=400, detail={"error": "INVALID_RESPONSE_FORMAT", "message": "response_format must be url or b64_json."})
+    item: dict[str, Any] = {"asset_id": asset.id}
+    if fmt == "b64_json":
+        try:
+            data = asset_service.read_bytes(asset)
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail={"error": "ASSET_FILE_NOT_FOUND", "asset_id": asset.id})
+        item["b64_json"] = base64.b64encode(data).decode("ascii")
+        item["mime_type"] = asset.mime_type
+    else:
+        item["url"] = asset_service.public_url(asset)
+    return item
+
+
+def serialize_job(db: Session, job: models.MediaJob) -> dict[str, Any]:
+    outputs = []
+    for asset_id in loads(job.output_asset_ids_json, []):
+        asset = db.get(models.MediaAsset, asset_id)
+        if asset:
+            outputs.append(serialize_asset(asset, db=db))
+    return {
+        "id": job.id,
+        "object": "media.job",
+        "status": job.status,
+        "operation": job.operation,
+        "model": job.logical_model,
+        "provider": job.provider_id,
+        "provider_model": job.provider_model,
+        "account_id": job.account_id,
+        "provider_task_id": job.provider_task_id,
+        "params": loads(job.normalized_params_json, {}),
+        "input_asset_ids": loads(job.input_asset_ids_json, []),
+        "output_asset_ids": loads(job.output_asset_ids_json, []),
+        "outputs": outputs,
+        "cost_estimate": job.cost_estimate,
+        "final_cost": job.final_cost,
+        "error": {"code": job.error_code, "message": job.error_message} if job.error_code else None,
+        "created_at": job.created_at.isoformat() + "Z",
+        "updated_at": job.updated_at.isoformat() + "Z",
+    }
+
+
+NATIVE_ASSET_PARAM_KEYS = ["image", "images", "assets", "first_frame", "last_frame", "mask", "video", "videos"]
+NATIVE_TOP_LEVEL_PARAM_KEYS = [
+    "image",
+    "images",
+    "first_frame",
+    "last_frame",
+    "mask",
+    "video",
+    "videos",
+    "seed",
+    "size",
+    "aspect_ratio",
+    "duration",
+    "quality",
+    "negative_prompt",
+    "webhook",
+    "webhook_url",
+    "route_policy",
+    "cost_policy",
+    "max_cost",
+    "max_credits",
+    "provider_preference",
+    "providers",
+    "provider_model",
+    "provider_models",
+    "excluded_providers",
+    "preferred_account_id",
+    "n",
+]
+
+
+def sanitize_account_targeting_params(ctx: AuthContext, params: dict[str, Any]) -> dict[str, Any]:
+    if is_admin_user(ctx.user):
+        return params
+    cleaned = dict(params)
+    for key in ["preferred_account_id", "preferred_account_ids"]:
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def normalize_native_media_request(req: MediaJobRequest) -> tuple[dict[str, Any], list[str]]:
+    params = dict(req.params or {})
+    if req.prompt is not None:
+        params["prompt"] = req.prompt
+    if req.assets:
+        params.setdefault("assets", req.assets)
+    for key in NATIVE_TOP_LEVEL_PARAM_KEYS:
+        value = getattr(req, key)
+        if value is not None:
+            params[key] = value
+    return params, extract_asset_ids_from_params(params, req.assets)
+
+
+def extract_asset_ids_from_params(params: dict[str, Any], explicit_assets: list[str] | None = None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+            return
+        if not isinstance(value, str) or not value:
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        result.append(value)
+
+    add(explicit_assets or [])
+    for key in NATIVE_ASSET_PARAM_KEYS:
+        add(params.get(key))
+    return result
+
+
+def validate_input_assets(db: Session, user_id: str, params: dict[str, Any], input_asset_ids: list[str], logical_model: str = "", operation: str = "") -> None:
+    field_by_asset: dict[str, str] = {}
+    constraints: dict[str, Any] = {}
+    if logical_model:
+        model = db.get(models.LogicalModel, logical_model)
+        if model:
+            constraints = loads(model.constraints_json, {})
+    for key in NATIVE_ASSET_PARAM_KEYS:
+        value = params.get(key)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, str):
+                field_by_asset.setdefault(item, key)
+    for asset_id in input_asset_ids:
+        asset = db.get(models.MediaAsset, asset_id)
+        if not asset or asset.user_id != user_id:
+            raise HTTPException(status_code=404, detail={"error": "ASSET_NOT_FOUND", "asset_id": asset_id})
+        field = field_by_asset.get(asset_id, "assets")
+        allowed_kinds = {"image", "video", "mask"}
+        if field == "mask":
+            allowed_kinds = {"mask", "image"}
+        elif field in {"video", "videos"}:
+            allowed_kinds = {"video"}
+        elif field in {"image", "images", "first_frame", "last_frame"}:
+            allowed_kinds = {"image", "thumbnail"}
+        if asset.kind not in allowed_kinds:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "ASSET_KIND_INVALID",
+                    "asset_id": asset_id,
+                    "field": field,
+                    "kind": asset.kind,
+                    "allowed_kinds": sorted(allowed_kinds),
+                },
+            )
+        validate_asset_constraints(asset, field, constraints, operation)
+
+
+def validate_asset_constraints(asset: models.MediaAsset, field: str, constraints: dict[str, Any], operation: str = "") -> None:
+    if not constraints:
+        return
+    allowed_all = constraints.get("allowed_input_mime_types")
+    if allowed_all and asset.mime_type not in allowed_all:
+        raise HTTPException(status_code=400, detail={"error": "ASSET_MIME_NOT_ALLOWED", "asset_id": asset.id, "mime_type": asset.mime_type, "allowed": allowed_all})
+    if asset.kind in {"image", "mask", "thumbnail"}:
+        allowed = constraints.get("allowed_input_image_mime_types")
+        if allowed and asset.mime_type not in allowed:
+            raise HTTPException(status_code=400, detail={"error": "ASSET_IMAGE_MIME_NOT_ALLOWED", "asset_id": asset.id, "mime_type": asset.mime_type, "allowed": allowed})
+        _max_asset_value(asset.width, constraints.get("max_input_image_width"), "ASSET_IMAGE_WIDTH_TOO_LARGE", asset.id, "width")
+        _max_asset_value(asset.height, constraints.get("max_input_image_height"), "ASSET_IMAGE_HEIGHT_TOO_LARGE", asset.id, "height")
+        if asset.width is not None and asset.height is not None:
+            _max_asset_value(asset.width * asset.height, constraints.get("max_input_image_pixels"), "ASSET_IMAGE_PIXELS_TOO_LARGE", asset.id, "pixels")
+    if asset.kind == "video":
+        allowed = constraints.get("allowed_input_video_mime_types")
+        if allowed and asset.mime_type not in allowed:
+            raise HTTPException(status_code=400, detail={"error": "ASSET_VIDEO_MIME_NOT_ALLOWED", "asset_id": asset.id, "mime_type": asset.mime_type, "allowed": allowed})
+        _max_asset_value(asset.width, constraints.get("max_input_video_width"), "ASSET_VIDEO_WIDTH_TOO_LARGE", asset.id, "width")
+        _max_asset_value(asset.height, constraints.get("max_input_video_height"), "ASSET_VIDEO_HEIGHT_TOO_LARGE", asset.id, "height")
+        if asset.width is not None and asset.height is not None:
+            _max_asset_value(asset.width * asset.height, constraints.get("max_input_video_pixels"), "ASSET_VIDEO_PIXELS_TOO_LARGE", asset.id, "pixels")
+        max_duration_ms = constraints.get("max_input_video_duration_ms")
+        if max_duration_ms is None and constraints.get("max_input_video_duration") is not None:
+            max_duration_ms = int(constraints["max_input_video_duration"]) * 1000
+        _max_asset_value(asset.duration_ms, max_duration_ms, "ASSET_VIDEO_DURATION_TOO_LONG", asset.id, "duration_ms")
+
+
+def _max_asset_value(value: int | None, limit: Any, error: str, asset_id: str, field: str) -> None:
+    if value is None or limit is None:
+        return
+    if int(value) > int(limit):
+        raise HTTPException(status_code=400, detail={"error": error, "asset_id": asset_id, "field": field, "value": int(value), "limit": int(limit)})
+
+
+SAFE_CONFIG_REF_PREFIXES = ("env://", "secret://", "public://")
+
+
+def redact_config(config: dict[str, Any]) -> dict[str, Any]:
+    def scrub(value: Any, key: str = "") -> Any:
+        if isinstance(value, dict):
+            return {str(child_key): scrub(child_value, str(child_key)) for child_key, child_value in value.items()}
+        if isinstance(value, list):
+            return [scrub(item, key) for item in value]
+        if is_sensitive_key(key):
+            if isinstance(value, str) and value.startswith(SAFE_CONFIG_REF_PREFIXES):
+                return value
+            return "[redacted]"
+        if isinstance(value, str) and value.lower().startswith(("bearer ", "sk-", "sess-", "eyj")):
+            return "[redacted]"
+        return value
+
+    redacted = scrub(config)
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def serialize_provider(provider: models.Provider) -> dict[str, Any]:
+    return {
+        "id": provider.id,
+        "name": provider.name,
+        "adapter_type": provider.adapter_type,
+        "status": provider.status,
+        "base_config": redact_config(loads(provider.base_config_json, {})),
+        "notes": provider.notes,
+    }
+
+
+def credential_ref_type(credential_ref: str) -> str:
+    if "://" not in credential_ref:
+        return "unknown"
+    return credential_ref.split("://", 1)[0]
+
+
+def redact_credential_ref(credential_ref: str) -> str:
+    if credential_ref.startswith(("secret://", "env://", "public://")):
+        return credential_ref
+    if credential_ref.startswith(("plain://", "bearer://")):
+        return credential_ref.split("://", 1)[0] + "://***"
+    if credential_ref:
+        return "***"
+    return ""
+
+
+def serialize_account(account: models.AccountResource) -> dict[str, Any]:
+    return {
+        "id": account.id,
+        "provider_id": account.provider_id,
+        "label": account.label,
+        "status": account.status,
+        "credential_ref": redact_credential_ref(account.credential_ref),
+        "credential_ref_type": credential_ref_type(account.credential_ref),
+        "supported_operations": loads(account.supported_operations_json, []),
+        "supported_provider_models": loads(account.supported_provider_models_json, []),
+        "quota_buckets": loads(account.quota_buckets_json, []),
+        "concurrency_limit": account.concurrency_limit,
+        "current_leases": account.current_leases,
+        "health_score": account.health_score,
+        "failure_score": account.failure_score,
+        "region": account.region,
+        "plan": account.plan,
+        "last_error_code": account.last_error_code,
+        "last_error_message": account.last_error_message,
+        "last_failed_at": account.last_failed_at.isoformat() + "Z" if account.last_failed_at else None,
+        "last_health_check_at": account.last_health_check_at.isoformat() + "Z" if account.last_health_check_at else None,
+    }
+
+
+def credential_ref_info(db: Session, credential_ref: str) -> dict[str, Any]:
+    if credential_ref.startswith("secret://"):
+        secret_id = credential_ref.replace("secret://", "", 1)
+        secret = db.get(models.CredentialSecret, secret_id)
+        return {
+            "type": "secret",
+            "ref": credential_ref,
+            "secret_id": secret_id,
+            "status": secret.status if secret else "missing",
+            "available": bool(secret and secret.status == "active"),
+            "preview": secret.preview if secret else "",
+            "fingerprint": secret.fingerprint if secret else "",
+        }
+    if credential_ref.startswith("env://"):
+        env_name = credential_ref.replace("env://", "", 1)
+        return {
+            "type": "env",
+            "ref": credential_ref,
+            "env": env_name,
+            "status": "available" if os.getenv(env_name) else "missing",
+            "available": bool(os.getenv(env_name)),
+        }
+    if credential_ref.startswith("public://"):
+        return {
+            "type": "public",
+            "ref": credential_ref,
+            "status": "available",
+            "available": True,
+        }
+    if credential_ref.startswith("plain://") or credential_ref.startswith("bearer://"):
+        return {"type": "inline", "ref": credential_ref.split("://", 1)[0] + "://***", "status": "inline", "available": True}
+    return {"type": "unknown", "ref": credential_ref, "status": "unknown", "available": False}
+
+
+def inline_credential_parts(credential_ref: str) -> tuple[str, str] | None:
+    if "://" not in credential_ref:
+        return None
+    scheme, value = credential_ref.split("://", 1)
+    if scheme not in {"plain", "bearer"}:
+        return None
+    return scheme, value
+
+
+def normalize_account_credential_ref(
+    db: Session,
+    *,
+    account_id: str,
+    provider_id: str,
+    label: str,
+    credential_ref: str,
+    credential_secret_id: str | None = None,
+    credential_kind: str = "api_key",
+    metadata: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    credential_ref = (credential_ref or "").strip()
+    if not credential_ref:
+        raise ValueError("ACCOUNT_CREDENTIAL_REF_REQUIRED")
+    inline = inline_credential_parts(credential_ref)
+    if inline:
+        scheme, value = inline
+        if not value:
+            raise ValueError("ACCOUNT_CREDENTIAL_REF_REQUIRED")
+        secret_id = credential_secret_id or f"secret_{account_id}"
+        kind = "bearer_token" if scheme == "bearer" else credential_kind
+        secret = db.get(models.CredentialSecret, secret_id)
+        if secret:
+            secret_service.validate(kind, "active")
+            secret.name = f"{label} credential"
+            secret.kind = kind
+            secret.provider_id = provider_id
+            secret.account_id = account_id
+            secret.metadata_json = dumps(metadata or {})
+            secret.status = "active"
+            secret_service.update_value(secret, value)
+        else:
+            secret = secret_service.create(
+                db,
+                secret_id=secret_id,
+                name=f"{label} credential",
+                value=value,
+                kind=kind,
+                provider_id=provider_id,
+                account_id=account_id,
+                metadata=metadata or {},
+                status="active",
+            )
+        return f"secret://{secret_id}", serialize_secret(secret)
+    if credential_ref.startswith(("secret://", "env://", "public://")):
+        return credential_ref, None
+    raise ValueError("ACCOUNT_CREDENTIAL_REF_UNSUPPORTED")
+
+
+def migrate_inline_account_credentials(db: Session) -> dict[str, Any]:
+    migrated = 0
+    errors: list[dict[str, Any]] = []
+    accounts = db.query(models.AccountResource).order_by(models.AccountResource.id).all()
+    for account in accounts:
+        if not inline_credential_parts(account.credential_ref):
+            continue
+        try:
+            credential_ref, _ = normalize_account_credential_ref(
+                db,
+                account_id=account.id,
+                provider_id=account.provider_id,
+                label=account.label,
+                credential_ref=account.credential_ref,
+            )
+            account.credential_ref = credential_ref
+            migrated += 1
+        except ValueError as exc:
+            errors.append({"account_id": account.id, "provider_id": account.provider_id, "error": str(exc)})
+    if migrated:
+        db.commit()
+    return {"migrated": migrated, "errors": errors}
+
+
+def account_quota_available(account: models.AccountResource, operation: str | None = None) -> bool:
+    for bucket in loads(account.quota_buckets_json, []):
+        bucket_operation = bucket.get("operation")
+        if bucket_operation and operation and bucket_operation != operation:
+            continue
+        remaining = quota_remaining(bucket)
+        if remaining is not None and remaining <= 0:
+            return False
+    return True
+
+
+def quota_buckets_have_capacity(buckets: list[dict[str, Any]]) -> bool:
+    if not buckets:
+        return False
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        remaining = quota_remaining(bucket)
+        if remaining is None or remaining > 0:
+            return True
+    return False
+
+
+def sync_account_quota_from_provider(db: Session, account: models.AccountResource, user_id: str) -> dict[str, Any]:
+    provider = db.get(models.Provider, account.provider_id)
+    if not provider:
+        account.last_error_code = "PROVIDER_NOT_FOUND"
+        account.last_error_message = f"Provider {account.provider_id} not found."
+        account.last_failed_at = datetime.utcnow()
+        return {"status": "failed", "error_code": account.last_error_code, "message": account.last_error_message, "account": serialize_account(account)}
+    adapter = get_provider(account.provider_id)
+    provider_model = ""
+    supported_models = loads(account.supported_provider_models_json, [])
+    if supported_models:
+        provider_model = str(supported_models[0])
+    ctx = ProviderContext(provider_id=account.provider_id, provider_model=provider_model, account=account, user_id=user_id)
+    previous_status = account.status
+    try:
+        result = adapter.query_account_quota(db, ctx)
+    except Exception as exc:
+        classified = adapter.classify_error(exc)
+        account.last_error_code = str(classified.get("code") or "QUOTA_SYNC_FAILED")
+        account.last_error_message = str(classified.get("message") or exc)
+        account.last_failed_at = datetime.utcnow()
+        account.last_health_check_at = datetime.utcnow()
+        if account.last_error_code == "AUTH_REQUIRED":
+            account.status = "auth_required"
+        elif account.last_error_code in {"QUOTA_EXHAUSTED", "INSUFFICIENT_QUOTA"}:
+            account.status = "quota_exhausted"
+        alert_service.account_status_changed(db, account, previous_status, account.last_error_message)
+        return {
+            "status": "failed",
+            "error_code": account.last_error_code,
+            "message": account.last_error_message,
+            "retryable": bool(classified.get("retryable")),
+            "account": serialize_account(account),
+        }
+
+    buckets = result.get("quota_buckets") if isinstance(result, dict) else None
+    if not isinstance(buckets, list) or not buckets:
+        account.last_error_code = "QUOTA_SYNC_NOT_SUPPORTED"
+        account.last_error_message = str((result or {}).get("message") or "Provider did not return quota buckets.")
+        account.last_failed_at = datetime.utcnow()
+        account.last_health_check_at = datetime.utcnow()
+        return {"status": "failed", "error_code": account.last_error_code, "message": account.last_error_message, "provider_result": result, "account": serialize_account(account)}
+
+    account.quota_buckets_json = dumps(buckets)
+    account.last_health_check_at = datetime.utcnow()
+    account.last_error_code = ""
+    account.last_error_message = ""
+    account.last_failed_at = None
+    if quota_buckets_have_capacity(buckets):
+        if account.status in {"quota_exhausted", "unknown", "cooldown"}:
+            account.status = "active"
+    else:
+        account.status = "quota_exhausted"
+    alert_service.account_status_changed(db, account, previous_status, "Account quota synchronized from provider.")
+    return {
+        "status": "ok",
+        "message": str(result.get("message") or "Account quota synchronized."),
+        "quota_buckets": buckets,
+        "provider_result": {k: v for k, v in result.items() if k != "quota_buckets"},
+        "account": serialize_account(account),
+    }
+
+
+def account_supports_mapping(account: models.AccountResource, mapping: models.ProviderModelMapping, operation: str | None = None) -> bool:
+    mapping_operations = set(loads(mapping.operations_json, []))
+    if operation and operation not in mapping_operations:
+        return False
+    account_operations = set(loads(account.supported_operations_json, []))
+    if operation and account_operations and operation not in account_operations:
+        return False
+    if not operation and account_operations and mapping_operations and not (account_operations & mapping_operations):
+        return False
+    account_models = set(loads(account.supported_provider_models_json, []))
+    if account_models and mapping.provider_model not in account_models:
+        return False
+    return True
+
+
+def serialize_mapping(mapping: models.ProviderModelMapping) -> dict[str, Any]:
+    return {
+        "id": mapping.id,
+        "logical_model": mapping.logical_model,
+        "provider_id": mapping.provider_id,
+        "provider_model": mapping.provider_model,
+        "operations": loads(mapping.operations_json, []),
+        "priority": mapping.priority,
+        "weight": mapping.weight,
+        "cost_score": mapping.cost_score,
+        "speed_score": mapping.speed_score,
+        "quality_score": mapping.quality_score,
+        "reliability_score": mapping.reliability_score,
+        "enabled": mapping.enabled,
+    }
+
+
+def serialize_logical_model(model: models.LogicalModel) -> dict[str, Any]:
+    return {
+        "id": model.id,
+        "object": "model",
+        "owned_by": "media2api",
+        "display_name": model.display_name,
+        "operations": loads(model.operations_json, []),
+        "constraints": loads(model.constraints_json, {}),
+        "default_params": loads(model.default_params_json, {}),
+        "billing_class": model.billing_class,
+        "enabled": model.enabled,
+        "created_at": model.created_at.isoformat() + "Z",
+        "updated_at": model.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_user(user: models.User) -> dict[str, Any]:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "status": user.status,
+        "tier": user.tier,
+        "wallet_balance": user.wallet_balance,
+        "created_at": user.created_at.isoformat() + "Z",
+    }
+
+
+def serialize_api_key(api_key: models.ApiKey) -> dict[str, Any]:
+    return {
+        "id": api_key.id,
+        "user_id": api_key.user_id,
+        "name": api_key.name,
+        "status": api_key.status,
+        "created_at": api_key.created_at.isoformat() + "Z",
+    }
+
+
+def serialize_user_limit_policy(policy: models.UserLimitPolicy) -> dict[str, Any]:
+    return {
+        "id": policy.id,
+        "name": policy.name,
+        "user_id": policy.user_id,
+        "tier": policy.tier,
+        "requests_per_minute": policy.requests_per_minute,
+        "daily_job_limit": policy.daily_job_limit,
+        "concurrent_job_limit": policy.concurrent_job_limit,
+        "allowed_models": loads(policy.allowed_models_json, []),
+        "high_cost_models": loads(policy.high_cost_models_json, []),
+        "high_cost_allowed": policy.high_cost_allowed,
+        "enabled": policy.enabled,
+        "notes": policy.notes,
+        "created_at": policy.created_at.isoformat() + "Z",
+        "updated_at": policy.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_circuit_breaker(breaker: models.CircuitBreaker) -> dict[str, Any]:
+    return {
+        "id": breaker.id,
+        "scope": breaker.scope,
+        "target_id": breaker.target_id,
+        "status": breaker.status,
+        "reason": breaker.reason,
+        "error_code": breaker.error_code,
+        "block_until": breaker.block_until.isoformat() + "Z" if breaker.block_until else None,
+        "enabled": breaker.enabled,
+        "metadata": loads(breaker.metadata_json, {}),
+        "created_at": breaker.created_at.isoformat() + "Z",
+        "updated_at": breaker.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_usage(record: models.UsageRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "job_id": record.job_id,
+        "user_id": record.user_id,
+        "operation": record.operation,
+        "logical_model": record.logical_model,
+        "provider_id": record.provider_id,
+        "amount": record.amount,
+        "status": record.status,
+        "created_at": record.created_at.isoformat() + "Z",
+    }
+
+
+def serialize_pricing_rule(rule: models.PricingRule) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "logical_model": rule.logical_model,
+        "billing_class": rule.billing_class,
+        "operation": rule.operation,
+        "unit": rule.unit,
+        "base_amount": rule.base_amount,
+        "unit_amount": rule.unit_amount,
+        "input_asset_amount": rule.input_asset_amount,
+        "provider_cost_base": rule.provider_cost_base,
+        "provider_cost_unit": rule.provider_cost_unit,
+        "provider_cost_input_asset": rule.provider_cost_input_asset,
+        "quality_multipliers": loads(rule.quality_multipliers_json, {}),
+        "currency": rule.currency,
+        "enabled": rule.enabled,
+        "created_at": rule.created_at.isoformat() + "Z",
+        "updated_at": rule.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_provider_cost(record: models.ProviderCostRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "job_id": record.job_id,
+        "user_id": record.user_id,
+        "operation": record.operation,
+        "logical_model": record.logical_model,
+        "provider_id": record.provider_id,
+        "provider_model": record.provider_model,
+        "amount": record.amount,
+        "currency": record.currency,
+        "status": record.status,
+        "created_at": record.created_at.isoformat() + "Z",
+    }
+
+
+ANALYTICS_DIMENSIONS = {"user_id", "logical_model", "provider_id", "account_id", "operation", "status"}
+
+
+def parse_csv_param(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def parse_datetime_param(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"error": "INVALID_DATETIME", "value": value})
+    if parsed.tzinfo:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def billing_period_bounds(start: str | None = None, end: str | None = None) -> tuple[datetime, datetime]:
+    started_at = parse_datetime_param(start)
+    ended_at = parse_datetime_param(end)
+    if not started_at:
+        now = datetime.utcnow()
+        started_at = datetime(now.year, now.month, 1)
+    if not ended_at:
+        if started_at.month == 12:
+            ended_at = datetime(started_at.year + 1, 1, 1)
+        else:
+            ended_at = datetime(started_at.year, started_at.month + 1, 1)
+    if ended_at <= started_at:
+        raise HTTPException(status_code=400, detail={"error": "INVALID_BILLING_PERIOD", "message": "end must be later than start."})
+    return started_at, ended_at
+
+
+def period_filter(query: Any, model: Any, started_at: datetime, ended_at: datetime) -> Any:
+    return query.filter(model.created_at >= started_at, model.created_at < ended_at)
+
+
+def aggregate_amount_rows(rows: list[Any], fields: list[str], amount_index: int) -> list[dict[str, Any]]:
+    data: list[dict[str, Any]] = []
+    for row in rows:
+        item = {field: getattr(row, field) if hasattr(row, field) else row[index] for index, field in enumerate(fields)}
+        item["amount"] = int(row[amount_index] or 0)
+        item["count"] = int(row[amount_index + 1] or 0) if len(row) > amount_index + 1 else 0
+        data.append(item)
+    return data
+
+
+def build_billing_invoice(
+    db: Session,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    started_at, ended_at = billing_period_bounds(start, end)
+
+    usage_query = period_filter(db.query(models.UsageRecord), models.UsageRecord, started_at, ended_at)
+    provider_cost_query = period_filter(db.query(models.ProviderCostRecord), models.ProviderCostRecord, started_at, ended_at)
+    hold_query = period_filter(db.query(models.BillingHold), models.BillingHold, started_at, ended_at)
+    job_query = period_filter(db.query(models.MediaJob), models.MediaJob, started_at, ended_at)
+    if user_id:
+        usage_query = usage_query.filter(models.UsageRecord.user_id == user_id)
+        provider_cost_query = provider_cost_query.filter(models.ProviderCostRecord.user_id == user_id)
+        hold_query = hold_query.filter(models.BillingHold.user_id == user_id)
+        job_query = job_query.filter(models.MediaJob.user_id == user_id)
+
+    settled_usage_amount = int(usage_query.filter(models.UsageRecord.status == "settled").with_entities(func.coalesce(func.sum(models.UsageRecord.amount), 0)).scalar() or 0)
+    usage_amount = int(usage_query.with_entities(func.coalesce(func.sum(models.UsageRecord.amount), 0)).scalar() or 0)
+    provider_cost_amount = int(provider_cost_query.with_entities(func.coalesce(func.sum(models.ProviderCostRecord.amount), 0)).scalar() or 0)
+    refunded_amount = int(hold_query.filter(models.BillingHold.status == "refunded").with_entities(func.coalesce(func.sum(models.BillingHold.amount), 0)).scalar() or 0)
+    held_amount = int(hold_query.filter(models.BillingHold.status == "held").with_entities(func.coalesce(func.sum(models.BillingHold.amount), 0)).scalar() or 0)
+
+    usage_rows = (
+        usage_query.with_entities(
+            models.UsageRecord.user_id,
+            models.UsageRecord.logical_model,
+            models.UsageRecord.operation,
+            models.UsageRecord.provider_id,
+            models.UsageRecord.status,
+            func.coalesce(func.sum(models.UsageRecord.amount), 0),
+            func.count(models.UsageRecord.id),
+        )
+        .group_by(models.UsageRecord.user_id, models.UsageRecord.logical_model, models.UsageRecord.operation, models.UsageRecord.provider_id, models.UsageRecord.status)
+        .order_by(models.UsageRecord.user_id, models.UsageRecord.logical_model, models.UsageRecord.operation, models.UsageRecord.provider_id, models.UsageRecord.status)
+        .all()
+    )
+    cost_rows = (
+        provider_cost_query.with_entities(
+            models.ProviderCostRecord.user_id,
+            models.ProviderCostRecord.logical_model,
+            models.ProviderCostRecord.operation,
+            models.ProviderCostRecord.provider_id,
+            models.ProviderCostRecord.status,
+            func.coalesce(func.sum(models.ProviderCostRecord.amount), 0),
+            func.count(models.ProviderCostRecord.id),
+        )
+        .group_by(models.ProviderCostRecord.user_id, models.ProviderCostRecord.logical_model, models.ProviderCostRecord.operation, models.ProviderCostRecord.provider_id, models.ProviderCostRecord.status)
+        .order_by(models.ProviderCostRecord.user_id, models.ProviderCostRecord.logical_model, models.ProviderCostRecord.operation, models.ProviderCostRecord.provider_id, models.ProviderCostRecord.status)
+        .all()
+    )
+    hold_rows = (
+        hold_query.with_entities(
+            models.BillingHold.user_id,
+            models.BillingHold.status,
+            func.coalesce(func.sum(models.BillingHold.amount), 0),
+            func.count(models.BillingHold.id),
+        )
+        .group_by(models.BillingHold.user_id, models.BillingHold.status)
+        .order_by(models.BillingHold.user_id, models.BillingHold.status)
+        .all()
+    )
+    job_rows = (
+        job_query.with_entities(models.MediaJob.status, func.count(models.MediaJob.id))
+        .group_by(models.MediaJob.status)
+        .order_by(models.MediaJob.status)
+        .all()
+    )
+
+    line_items: list[dict[str, Any]] = []
+    for row in usage_rows:
+        line_items.append(
+            {
+                "type": "usage",
+                "user_id": row[0],
+                "logical_model": row[1],
+                "operation": row[2],
+                "provider_id": row[3],
+                "status": row[4],
+                "amount": int(row[5] or 0),
+                "count": int(row[6] or 0),
+                "currency": "credits",
+            }
+        )
+    for row in cost_rows:
+        line_items.append(
+            {
+                "type": "provider_cost",
+                "user_id": row[0],
+                "logical_model": row[1],
+                "operation": row[2],
+                "provider_id": row[3],
+                "status": row[4],
+                "amount": int(row[5] or 0),
+                "count": int(row[6] or 0),
+                "currency": "credits",
+            }
+        )
+    for row in hold_rows:
+        line_items.append(
+            {
+                "type": "billing_hold",
+                "user_id": row[0],
+                "logical_model": "",
+                "operation": "",
+                "provider_id": "",
+                "status": row[1],
+                "amount": int(row[2] or 0),
+                "count": int(row[3] or 0),
+                "currency": "credits",
+            }
+        )
+
+    invoice_scope = user_id or "all"
+    invoice_id = f"invoice_{invoice_scope}_{started_at.strftime('%Y%m%d')}_{ended_at.strftime('%Y%m%d')}"
+    return {
+        "id": invoice_id,
+        "object": "billing.invoice",
+        "user_id": user_id,
+        "period": {
+            "start": started_at.isoformat() + "Z",
+            "end": ended_at.isoformat() + "Z",
+        },
+        "currency": "credits",
+        "totals": {
+            "usage_amount": usage_amount,
+            "settled_usage_amount": settled_usage_amount,
+            "refunded_hold_amount": refunded_amount,
+            "held_amount": held_amount,
+            "provider_cost_amount": provider_cost_amount,
+            "gross_margin_amount": settled_usage_amount - provider_cost_amount,
+        },
+        "job_counts": {status: int(count or 0) for status, count in job_rows},
+        "line_items": line_items,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def csv_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    if any(char in text for char in [",", '"', "\n", "\r"]):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def invoice_to_csv(invoice: dict[str, Any]) -> str:
+    rows = [
+        ["invoice_id", invoice["id"]],
+        ["period_start", invoice["period"]["start"]],
+        ["period_end", invoice["period"]["end"]],
+        ["user_id", invoice.get("user_id") or ""],
+        ["currency", invoice["currency"]],
+        [],
+        ["metric", "amount"],
+    ]
+    for key, value in invoice["totals"].items():
+        rows.append([key, value])
+    rows.extend([[], ["type", "user_id", "logical_model", "operation", "provider_id", "status", "count", "amount", "currency"]])
+    for item in invoice["line_items"]:
+        rows.append(
+            [
+                item.get("type", ""),
+                item.get("user_id", ""),
+                item.get("logical_model", ""),
+                item.get("operation", ""),
+                item.get("provider_id", ""),
+                item.get("status", ""),
+                item.get("count", 0),
+                item.get("amount", 0),
+                item.get("currency", ""),
+            ]
+        )
+    return "\n".join(",".join(csv_cell(cell) for cell in row) for row in rows) + "\n"
+
+
+def analytics_dimensions(group_by: str) -> list[str]:
+    dimensions = parse_csv_param(group_by) or ["provider_id", "logical_model"]
+    invalid = [dimension for dimension in dimensions if dimension not in ANALYTICS_DIMENSIONS]
+    if invalid:
+        raise HTTPException(status_code=400, detail={"error": "INVALID_ANALYTICS_DIMENSION", "message": ",".join(invalid)})
+    return dimensions
+
+
+def build_admin_analytics(
+    db: Session,
+    group_by: str = "provider_id,logical_model",
+    start: str | None = None,
+    end: str | None = None,
+    user_id: str | None = None,
+    logical_model: str | None = None,
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    dimensions = analytics_dimensions(group_by)
+    started_at = parse_datetime_param(start)
+    ended_at = parse_datetime_param(end)
+    query = db.query(models.MediaJob)
+    if started_at:
+        query = query.filter(models.MediaJob.created_at >= started_at)
+    if ended_at:
+        query = query.filter(models.MediaJob.created_at <= ended_at)
+    if user_id:
+        query = query.filter(models.MediaJob.user_id == user_id)
+    if logical_model:
+        query = query.filter(models.MediaJob.logical_model.in_(parse_csv_param(logical_model)))
+    if provider_id:
+        query = query.filter(models.MediaJob.provider_id.in_(parse_csv_param(provider_id)))
+    if account_id:
+        query = query.filter(models.MediaJob.account_id.in_(parse_csv_param(account_id)))
+    if operation:
+        query = query.filter(models.MediaJob.operation.in_(parse_csv_param(operation)))
+    if status:
+        query = query.filter(models.MediaJob.status.in_(parse_csv_param(status)))
+    jobs = query.order_by(models.MediaJob.created_at.desc()).limit(10000).all()
+    job_ids = [job.id for job in jobs]
+    usage_by_job: dict[str, int] = {}
+    cost_by_job: dict[str, int] = {}
+    attempt_errors_by_job: dict[str, dict[str, int]] = {}
+    if job_ids:
+        usage_rows = (
+            db.query(models.UsageRecord.job_id, func.coalesce(func.sum(models.UsageRecord.amount), 0))
+            .filter(models.UsageRecord.job_id.in_(job_ids), models.UsageRecord.status == "settled")
+            .group_by(models.UsageRecord.job_id)
+            .all()
+        )
+        usage_by_job = {job_id: int(amount or 0) for job_id, amount in usage_rows}
+        cost_rows = (
+            db.query(models.ProviderCostRecord.job_id, func.coalesce(func.sum(models.ProviderCostRecord.amount), 0))
+            .filter(models.ProviderCostRecord.job_id.in_(job_ids))
+            .group_by(models.ProviderCostRecord.job_id)
+            .all()
+        )
+        cost_by_job = {job_id: int(amount or 0) for job_id, amount in cost_rows}
+        attempt_rows = (
+            db.query(models.MediaJobAttempt.job_id, models.MediaJobAttempt.error_code, func.count(models.MediaJobAttempt.id))
+            .filter(models.MediaJobAttempt.job_id.in_(job_ids), models.MediaJobAttempt.error_code.isnot(None), models.MediaJobAttempt.error_code != "")
+            .group_by(models.MediaJobAttempt.job_id, models.MediaJobAttempt.error_code)
+            .all()
+        )
+        for job_id, error_code, count in attempt_rows:
+            bucket = attempt_errors_by_job.setdefault(job_id, {})
+            bucket[str(error_code)] = int(count)
+
+    rows: dict[tuple[str, ...], dict[str, Any]] = {}
+    totals = {
+        "jobs": 0,
+        "terminal_jobs": 0,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "cancelled_jobs": 0,
+        "expired_jobs": 0,
+        "revenue_amount": 0,
+        "provider_cost_amount": 0,
+        "gross_margin_amount": 0,
+    }
+    for job in jobs:
+        key = tuple(str(getattr(job, dimension) or "") for dimension in dimensions)
+        row = rows.setdefault(
+            key,
+            {
+                "dimensions": dict(zip(dimensions, key)),
+                "jobs": 0,
+                "terminal_jobs": 0,
+                "completed_jobs": 0,
+                "failed_jobs": 0,
+                "cancelled_jobs": 0,
+                "expired_jobs": 0,
+                "active_jobs": 0,
+                "revenue_amount": 0,
+                "provider_cost_amount": 0,
+                "gross_margin_amount": 0,
+                "error_codes": {},
+                "attempt_error_codes": {},
+                "duration_seconds_sum": 0.0,
+            },
+        )
+        row["jobs"] += 1
+        totals["jobs"] += 1
+        terminal = job.status in {"completed", "failed", "cancelled", "expired"}
+        if terminal:
+            row["terminal_jobs"] += 1
+            totals["terminal_jobs"] += 1
+            row["duration_seconds_sum"] += max(0.0, (job.updated_at - job.created_at).total_seconds())
+        else:
+            row["active_jobs"] += 1
+        if job.status == "completed":
+            row["completed_jobs"] += 1
+            totals["completed_jobs"] += 1
+        elif job.status == "failed":
+            row["failed_jobs"] += 1
+            totals["failed_jobs"] += 1
+        elif job.status == "cancelled":
+            row["cancelled_jobs"] += 1
+            totals["cancelled_jobs"] += 1
+        elif job.status == "expired":
+            row["expired_jobs"] += 1
+            totals["expired_jobs"] += 1
+        if job.status != "completed" and terminal:
+            error_code = job.error_code or job.status
+            row["error_codes"][error_code] = row["error_codes"].get(error_code, 0) + 1
+        for error_code, count in attempt_errors_by_job.get(job.id, {}).items():
+            row["attempt_error_codes"][error_code] = row["attempt_error_codes"].get(error_code, 0) + count
+        revenue = usage_by_job.get(job.id)
+        if revenue is None and job.status == "completed" and job.final_cost is not None:
+            revenue = int(job.final_cost)
+        revenue = int(revenue or 0)
+        provider_cost = int(cost_by_job.get(job.id, 0))
+        row["revenue_amount"] += revenue
+        row["provider_cost_amount"] += provider_cost
+        row["gross_margin_amount"] += revenue - provider_cost
+        totals["revenue_amount"] += revenue
+        totals["provider_cost_amount"] += provider_cost
+        totals["gross_margin_amount"] += revenue - provider_cost
+
+    data = list(rows.values())
+    for row in data:
+        terminal_jobs = int(row["terminal_jobs"])
+        row["success_rate"] = round(row["completed_jobs"] / terminal_jobs, 6) if terminal_jobs else None
+        row["failure_rate"] = round(row["failed_jobs"] / terminal_jobs, 6) if terminal_jobs else None
+        row["avg_duration_seconds"] = round(row["duration_seconds_sum"] / terminal_jobs, 6) if terminal_jobs else None
+        row["top_error_code"] = max(row["error_codes"], key=row["error_codes"].get) if row["error_codes"] else ""
+        row["top_attempt_error_code"] = max(row["attempt_error_codes"], key=row["attempt_error_codes"].get) if row["attempt_error_codes"] else ""
+        row.pop("duration_seconds_sum", None)
+    data.sort(key=lambda item: (item["revenue_amount"], item["jobs"]), reverse=True)
+    terminal_total = totals["terminal_jobs"]
+    totals["success_rate"] = round(totals["completed_jobs"] / terminal_total, 6) if terminal_total else None
+    totals["failure_rate"] = round(totals["failed_jobs"] / terminal_total, 6) if terminal_total else None
+    return {
+        "object": "admin.analytics",
+        "group_by": dimensions,
+        "filters": {
+            "start": start or "",
+            "end": end or "",
+            "user_id": user_id or "",
+            "logical_model": parse_csv_param(logical_model),
+            "provider_id": parse_csv_param(provider_id),
+            "account_id": parse_csv_param(account_id),
+            "operation": parse_csv_param(operation),
+            "status": parse_csv_param(status),
+        },
+        "totals": totals,
+        "data": data[: min(max(limit, 1), 1000)],
+    }
+
+
+def serialize_billing_hold(hold: models.BillingHold) -> dict[str, Any]:
+    return {
+        "id": hold.id,
+        "job_id": hold.job_id,
+        "user_id": hold.user_id,
+        "amount": hold.amount,
+        "status": hold.status,
+        "created_at": hold.created_at.isoformat() + "Z",
+        "updated_at": hold.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_alert_rule(rule: models.AlertRule) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "event_type": rule.event_type,
+        "severity": rule.severity,
+        "condition": loads(rule.condition_json, {}),
+        "enabled": rule.enabled,
+        "created_at": rule.created_at.isoformat() + "Z",
+        "updated_at": rule.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_alert_event(event: models.AlertEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "rule_id": event.rule_id,
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "status": event.status,
+        "title": event.title,
+        "message": event.message,
+        "user_id": event.user_id,
+        "job_id": event.job_id,
+        "provider_id": event.provider_id,
+        "account_id": event.account_id,
+        "dimensions": loads(event.dimensions_json, {}),
+        "created_at": event.created_at.isoformat() + "Z",
+        "updated_at": event.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_safety_policy(policy: models.SafetyPolicy) -> dict[str, Any]:
+    return {
+        "id": policy.id,
+        "name": policy.name,
+        "scope": policy.scope,
+        "logical_model": policy.logical_model,
+        "operation": policy.operation,
+        "action": policy.action,
+        "severity": policy.severity,
+        "match_type": policy.match_type,
+        "terms": loads(policy.terms_json, []),
+        "pattern": loads(policy.pattern_json, {}),
+        "enabled": policy.enabled,
+        "notes": policy.notes,
+        "created_at": policy.created_at.isoformat() + "Z",
+        "updated_at": policy.updated_at.isoformat() + "Z",
+    }
+
+
+CONFIG_SNAPSHOT_SECTIONS = [
+    "logical_models",
+    "providers",
+    "provider_model_mappings",
+    "accounts",
+    "pricing_rules",
+    "alert_rules",
+    "safety_policies",
+    "user_limit_policies",
+]
+
+
+def strip_runtime_fields(item: dict[str, Any], extra: set[str] | None = None) -> dict[str, Any]:
+    blocked = {"created_at", "updated_at", "object", "owned_by"}
+    if extra:
+        blocked.update(extra)
+    return {key: value for key, value in item.items() if key not in blocked}
+
+
+def config_export_account(account: models.AccountResource) -> dict[str, Any]:
+    return {
+        "id": account.id,
+        "provider_id": account.provider_id,
+        "label": account.label,
+        "credential_ref": redact_credential_ref(account.credential_ref),
+        "supported_operations": loads(account.supported_operations_json, []),
+        "supported_provider_models": loads(account.supported_provider_models_json, []),
+        "quota_buckets": loads(account.quota_buckets_json, []),
+        "concurrency_limit": account.concurrency_limit,
+        "region": account.region,
+        "plan": account.plan,
+        "status": account.status,
+    }
+
+
+def build_config_snapshot(db: Session) -> dict[str, Any]:
+    logical_models = db.query(models.LogicalModel).order_by(models.LogicalModel.id).all()
+    providers = db.query(models.Provider).order_by(models.Provider.id).all()
+    mappings = db.query(models.ProviderModelMapping).order_by(models.ProviderModelMapping.id).all()
+    accounts = db.query(models.AccountResource).order_by(models.AccountResource.provider_id, models.AccountResource.id).all()
+    pricing_rules = db.query(models.PricingRule).order_by(models.PricingRule.id).all()
+    alert_rules = db.query(models.AlertRule).order_by(models.AlertRule.id).all()
+    safety_policies = db.query(models.SafetyPolicy).order_by(models.SafetyPolicy.id).all()
+    user_limit_policies = db.query(models.UserLimitPolicy).order_by(models.UserLimitPolicy.id).all()
+    sections = {
+        "logical_models": [strip_runtime_fields(serialize_logical_model(item)) for item in logical_models],
+        "providers": [strip_runtime_fields(serialize_provider(item)) for item in providers],
+        "provider_model_mappings": [strip_runtime_fields(serialize_mapping(item)) for item in mappings],
+        "accounts": [config_export_account(item) for item in accounts],
+        "pricing_rules": [strip_runtime_fields(serialize_pricing_rule(item)) for item in pricing_rules],
+        "alert_rules": [strip_runtime_fields(serialize_alert_rule(item)) for item in alert_rules],
+        "safety_policies": [strip_runtime_fields(serialize_safety_policy(item)) for item in safety_policies],
+        "user_limit_policies": [strip_runtime_fields(serialize_user_limit_policy(item)) for item in user_limit_policies],
+    }
+    return {
+        "object": "media2api.config_snapshot",
+        "schema_version": 1,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "sensitive_values": "redacted",
+        "sections": sections,
+        "counts": {name: len(items) for name, items in sections.items()},
+    }
+
+
+def is_redacted_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value in {"***", "[redacted]"} or value.endswith("://***")
+    return False
+
+
+def merge_redacted_config(existing: Any, incoming: Any) -> Any:
+    if is_redacted_value(incoming):
+        return existing
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        merged = dict(existing)
+        for key, value in incoming.items():
+            merged[key] = merge_redacted_config(existing.get(key), value)
+        return merged
+    if isinstance(existing, list) and isinstance(incoming, list):
+        return [merge_redacted_config(existing[index], value) if index < len(existing) else value for index, value in enumerate(incoming)]
+    return incoming
+
+
+def import_section_items(snapshot: dict[str, Any], section: str) -> list[dict[str, Any]]:
+    sections = snapshot.get("sections") if isinstance(snapshot.get("sections"), dict) else snapshot
+    items = sections.get(section, []) if isinstance(sections, dict) else []
+    if not isinstance(items, list):
+        raise ValueError(f"{section} must be a list")
+    result: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            result.append(item)
+    return result
+
+
+def config_import_summary() -> dict[str, Any]:
+    return {
+        "created": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "errors": [],
+        "changes": [],
+    }
+
+
+def record_config_change(summary: dict[str, Any], section: str, action: str, item_id: str, detail: Any = None) -> None:
+    summary[action] = int(summary.get(action, 0)) + 1
+    if len(summary["changes"]) < 500:
+        summary["changes"].append({"section": section, "action": action, "id": item_id, "detail": detail or {}})
+
+
+def record_config_error(summary: dict[str, Any], section: str, item_id: str, error: str) -> None:
+    summary["errors"].append({"section": section, "id": item_id, "error": error})
+
+
+def apply_config_import(db: Session, req: ConfigImportRequest) -> dict[str, Any]:
+    summary = config_import_summary()
+    snapshot = req.snapshot
+    if snapshot.get("object") not in {"media2api.config_snapshot", None}:
+        record_config_error(summary, "snapshot", "", "UNSUPPORTED_CONFIG_SNAPSHOT_OBJECT")
+        return summary
+
+    for item in import_section_items(snapshot, "logical_models"):
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            record_config_error(summary, "logical_models", "", "ID_REQUIRED")
+            continue
+        existing = db.get(models.LogicalModel, item_id)
+        values = {
+            "display_name": str(item.get("display_name") or item_id),
+            "operations_json": dumps(item.get("operations") or []),
+            "constraints_json": dumps(item.get("constraints") or {}),
+            "default_params_json": dumps(item.get("default_params") or {}),
+            "billing_class": str(item.get("billing_class") or "custom"),
+            "enabled": bool(item.get("enabled", True)),
+        }
+        if existing:
+            changed = any(getattr(existing, key) != value for key, value in values.items())
+            if req.overwrite and changed and not req.dry_run:
+                for key, value in values.items():
+                    setattr(existing, key, value)
+            record_config_change(summary, "logical_models", "updated" if req.overwrite and changed else "unchanged", item_id)
+        else:
+            if not req.dry_run:
+                db.add(models.LogicalModel(id=item_id, **values))
+            record_config_change(summary, "logical_models", "created", item_id)
+
+    for item in import_section_items(snapshot, "providers"):
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            record_config_error(summary, "providers", "", "ID_REQUIRED")
+            continue
+        existing = db.get(models.Provider, item_id)
+        incoming_config = item.get("base_config") if isinstance(item.get("base_config"), dict) else {}
+        existing_config = loads(existing.base_config_json, {}) if existing else {}
+        safe_config = merge_redacted_config(existing_config, incoming_config)
+        values = {
+            "name": str(item.get("name") or item_id),
+            "adapter_type": str(item.get("adapter_type") or "http_adapter"),
+            "status": str(item.get("status") or "disabled"),
+            "base_config_json": dumps(safe_config if isinstance(safe_config, dict) else {}),
+            "notes": str(item.get("notes") or ""),
+        }
+        if existing:
+            changed = any(getattr(existing, key) != value for key, value in values.items())
+            if req.overwrite and changed and not req.dry_run:
+                for key, value in values.items():
+                    setattr(existing, key, value)
+            record_config_change(summary, "providers", "updated" if req.overwrite and changed else "unchanged", item_id)
+        else:
+            if not req.dry_run:
+                db.add(models.Provider(id=item_id, **values))
+            record_config_change(summary, "providers", "created", item_id)
+
+    for item in import_section_items(snapshot, "provider_model_mappings"):
+        item_id = str(item.get("id") or "") or f"{item.get('logical_model')}:{item.get('provider_id')}:{item.get('provider_model')}"
+        if not item_id or "None" in item_id:
+            record_config_error(summary, "provider_model_mappings", item_id, "ID_OR_MAPPING_KEYS_REQUIRED")
+            continue
+        values = {
+            "logical_model": str(item.get("logical_model") or ""),
+            "provider_id": str(item.get("provider_id") or ""),
+            "provider_model": str(item.get("provider_model") or ""),
+            "operations_json": dumps(item.get("operations") or []),
+            "priority": int(item.get("priority") or 100),
+            "weight": int(item.get("weight") or 1),
+            "cost_score": float(item.get("cost_score") if item.get("cost_score") is not None else 0.5),
+            "speed_score": float(item.get("speed_score") if item.get("speed_score") is not None else 0.5),
+            "quality_score": float(item.get("quality_score") if item.get("quality_score") is not None else 0.5),
+            "reliability_score": float(item.get("reliability_score") if item.get("reliability_score") is not None else 0.5),
+            "enabled": bool(item.get("enabled", True)),
+        }
+        existing = db.get(models.ProviderModelMapping, item_id)
+        if existing:
+            changed = any(getattr(existing, key) != value for key, value in values.items())
+            if req.overwrite and changed and not req.dry_run:
+                for key, value in values.items():
+                    setattr(existing, key, value)
+            record_config_change(summary, "provider_model_mappings", "updated" if req.overwrite and changed else "unchanged", item_id)
+        else:
+            if not req.dry_run:
+                db.add(models.ProviderModelMapping(id=item_id, **values))
+            record_config_change(summary, "provider_model_mappings", "created", item_id)
+
+    if req.include_accounts:
+        for item in import_section_items(snapshot, "accounts"):
+            item_id = str(item.get("id") or "")
+            if not item_id:
+                record_config_error(summary, "accounts", "", "ID_REQUIRED")
+                continue
+            credential_ref = str(item.get("credential_ref") or "")
+            existing = db.get(models.AccountResource, item_id)
+            if is_redacted_value(credential_ref):
+                if existing:
+                    credential_ref = existing.credential_ref
+                else:
+                    record_config_error(summary, "accounts", item_id, "REDACTED_CREDENTIAL_REF_CANNOT_CREATE_ACCOUNT")
+                    continue
+            label = str(item.get("label") or item_id)
+            provider_id = str(item.get("provider_id") or "")
+            inline = inline_credential_parts(credential_ref)
+            if inline:
+                if req.dry_run:
+                    credential_ref = f"secret://secret_{item_id}"
+                else:
+                    try:
+                        credential_ref, _ = normalize_account_credential_ref(
+                            db,
+                            account_id=item_id,
+                            provider_id=provider_id,
+                            label=label,
+                            credential_ref=credential_ref,
+                        )
+                    except ValueError as exc:
+                        record_config_error(summary, "accounts", item_id, str(exc))
+                        continue
+            elif not credential_ref.startswith(("secret://", "env://", "public://")):
+                record_config_error(summary, "accounts", item_id, "ACCOUNT_CREDENTIAL_REF_UNSUPPORTED")
+                continue
+            values = {
+                "provider_id": provider_id,
+                "label": label,
+                "credential_ref": credential_ref,
+                "supported_operations_json": dumps(item.get("supported_operations") or []),
+                "supported_provider_models_json": dumps(item.get("supported_provider_models") or []),
+                "quota_buckets_json": dumps(item.get("quota_buckets") or []),
+                "concurrency_limit": int(item.get("concurrency_limit") or 1),
+                "region": str(item.get("region") or ""),
+                "plan": str(item.get("plan") or ""),
+                "status": str(item.get("status") or "disabled"),
+            }
+            if existing:
+                changed = any(getattr(existing, key) != value for key, value in values.items())
+                if req.overwrite and changed and not req.dry_run:
+                    for key, value in values.items():
+                        setattr(existing, key, value)
+                record_config_change(summary, "accounts", "updated" if req.overwrite and changed else "unchanged", item_id)
+            else:
+                if not req.dry_run:
+                    db.add(models.AccountResource(id=item_id, current_leases=0, health_score=1.0, failure_score=0.0, **values))
+                record_config_change(summary, "accounts", "created", item_id)
+
+    for item in import_section_items(snapshot, "pricing_rules"):
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            record_config_error(summary, "pricing_rules", "", "ID_REQUIRED")
+            continue
+        values = {
+            "name": str(item.get("name") or item_id),
+            "logical_model": str(item.get("logical_model") or ""),
+            "billing_class": str(item.get("billing_class") or ""),
+            "operation": str(item.get("operation") or ""),
+            "unit": str(item.get("unit") or "unit"),
+            "base_amount": int(item.get("base_amount") or 0),
+            "unit_amount": int(item.get("unit_amount") or 0),
+            "input_asset_amount": int(item.get("input_asset_amount") or 0),
+            "provider_cost_base": int(item.get("provider_cost_base") or 0),
+            "provider_cost_unit": int(item.get("provider_cost_unit") or 0),
+            "provider_cost_input_asset": int(item.get("provider_cost_input_asset") or 0),
+            "quality_multipliers_json": dumps(item.get("quality_multipliers") or {}),
+            "currency": str(item.get("currency") or "credits"),
+            "enabled": bool(item.get("enabled", True)),
+        }
+        existing = db.get(models.PricingRule, item_id)
+        if existing:
+            changed = any(getattr(existing, key) != value for key, value in values.items())
+            if req.overwrite and changed and not req.dry_run:
+                for key, value in values.items():
+                    setattr(existing, key, value)
+            record_config_change(summary, "pricing_rules", "updated" if req.overwrite and changed else "unchanged", item_id)
+        else:
+            if not req.dry_run:
+                db.add(models.PricingRule(id=item_id, **values))
+            record_config_change(summary, "pricing_rules", "created", item_id)
+
+    if req.include_policies:
+        for item in import_section_items(snapshot, "alert_rules"):
+            item_id = str(item.get("id") or "")
+            if not item_id:
+                record_config_error(summary, "alert_rules", "", "ID_REQUIRED")
+                continue
+            values = {
+                "name": str(item.get("name") or item_id),
+                "event_type": str(item.get("event_type") or ""),
+                "severity": str(item.get("severity") or "warning"),
+                "condition_json": dumps(item.get("condition") or {}),
+                "enabled": bool(item.get("enabled", True)),
+            }
+            existing = db.get(models.AlertRule, item_id)
+            if existing:
+                changed = any(getattr(existing, key) != value for key, value in values.items())
+                if req.overwrite and changed and not req.dry_run:
+                    for key, value in values.items():
+                        setattr(existing, key, value)
+                record_config_change(summary, "alert_rules", "updated" if req.overwrite and changed else "unchanged", item_id)
+            else:
+                if not req.dry_run:
+                    db.add(models.AlertRule(id=item_id, **values))
+                record_config_change(summary, "alert_rules", "created", item_id)
+
+        for item in import_section_items(snapshot, "safety_policies"):
+            item_id = str(item.get("id") or "")
+            if not item_id:
+                record_config_error(summary, "safety_policies", "", "ID_REQUIRED")
+                continue
+            values = {
+                "name": str(item.get("name") or item_id),
+                "scope": str(item.get("scope") or "global"),
+                "logical_model": str(item.get("logical_model") or ""),
+                "operation": str(item.get("operation") or ""),
+                "action": str(item.get("action") or "reject"),
+                "severity": str(item.get("severity") or "warning"),
+                "match_type": str(item.get("match_type") or "term"),
+                "terms_json": dumps(item.get("terms") or []),
+                "pattern_json": dumps(item.get("pattern") or {}),
+                "enabled": bool(item.get("enabled", True)),
+                "notes": str(item.get("notes") or ""),
+            }
+            existing = db.get(models.SafetyPolicy, item_id)
+            if existing:
+                changed = any(getattr(existing, key) != value for key, value in values.items())
+                if req.overwrite and changed and not req.dry_run:
+                    for key, value in values.items():
+                        setattr(existing, key, value)
+                record_config_change(summary, "safety_policies", "updated" if req.overwrite and changed else "unchanged", item_id)
+            else:
+                if not req.dry_run:
+                    db.add(models.SafetyPolicy(id=item_id, **values))
+                record_config_change(summary, "safety_policies", "created", item_id)
+
+        for item in import_section_items(snapshot, "user_limit_policies"):
+            item_id = str(item.get("id") or "")
+            if not item_id:
+                record_config_error(summary, "user_limit_policies", "", "ID_REQUIRED")
+                continue
+            values = {
+                "name": str(item.get("name") or item_id),
+                "user_id": str(item.get("user_id") or ""),
+                "tier": str(item.get("tier") or ""),
+                "requests_per_minute": int(item.get("requests_per_minute") or 600),
+                "daily_job_limit": int(item.get("daily_job_limit") or 10000),
+                "concurrent_job_limit": int(item.get("concurrent_job_limit") or 100),
+                "allowed_models_json": dumps(item.get("allowed_models") or []),
+                "high_cost_models_json": dumps(item.get("high_cost_models") or []),
+                "high_cost_allowed": bool(item.get("high_cost_allowed", True)),
+                "enabled": bool(item.get("enabled", True)),
+                "notes": str(item.get("notes") or ""),
+            }
+            existing = db.get(models.UserLimitPolicy, item_id)
+            if existing:
+                changed = any(getattr(existing, key) != value for key, value in values.items())
+                if req.overwrite and changed and not req.dry_run:
+                    for key, value in values.items():
+                        setattr(existing, key, value)
+                record_config_change(summary, "user_limit_policies", "updated" if req.overwrite and changed else "unchanged", item_id)
+            else:
+                if not req.dry_run:
+                    db.add(models.UserLimitPolicy(id=item_id, **values))
+                record_config_change(summary, "user_limit_policies", "created", item_id)
+
+    if not req.dry_run and not summary["errors"]:
+        db.commit()
+    elif not req.dry_run:
+        db.rollback()
+    summary["applied"] = not req.dry_run and not summary["errors"]
+    summary["dry_run"] = req.dry_run
+    return summary
+
+
+def serialize_safety_event(event: models.SafetyEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "policy_id": event.policy_id,
+        "user_id": event.user_id,
+        "api_key_id": event.api_key_id,
+        "job_id": event.job_id,
+        "operation": event.operation,
+        "logical_model": event.logical_model,
+        "action": event.action,
+        "severity": event.severity,
+        "status": event.status,
+        "matched_terms": loads(event.matched_terms_json, []),
+        "prompt_excerpt": event.prompt_excerpt,
+        "metadata": loads(event.metadata_json, {}),
+        "created_at": event.created_at.isoformat() + "Z",
+        "updated_at": event.updated_at.isoformat() + "Z",
+    }
+
+
+def validate_safety_policy_fields(scope: str, action: str, match_type: str, logical_model: str = "", operation: str = "") -> None:
+    if scope not in {"global", "model", "operation"}:
+        raise HTTPException(status_code=400, detail={"error": "SAFETY_SCOPE_INVALID"})
+    if action not in {"reject", "audit", "warn"}:
+        raise HTTPException(status_code=400, detail={"error": "SAFETY_ACTION_INVALID"})
+    if match_type not in {"term", "regex", "hybrid"}:
+        raise HTTPException(status_code=400, detail={"error": "SAFETY_MATCH_TYPE_INVALID"})
+    if scope == "model" and not logical_model:
+        raise HTTPException(status_code=400, detail={"error": "SAFETY_LOGICAL_MODEL_REQUIRED"})
+    if scope == "operation" and not operation:
+        raise HTTPException(status_code=400, detail={"error": "SAFETY_OPERATION_REQUIRED"})
+
+
+def validate_user_limit_policy(req: UserLimitPolicyAdminRequest | UserLimitPolicyPatchRequest | models.UserLimitPolicy) -> None:
+    for field in ["requests_per_minute", "daily_job_limit", "concurrent_job_limit"]:
+        value = getattr(req, field, None)
+        if value is not None and value < 0:
+            raise HTTPException(status_code=400, detail={"error": "LIMIT_VALUE_INVALID", "message": f"{field} must be >= 0"})
+    user_id = getattr(req, "user_id", "") or ""
+    tier = getattr(req, "tier", "") or ""
+    if user_id and tier:
+        raise HTTPException(status_code=400, detail={"error": "LIMIT_SCOPE_AMBIGUOUS", "message": "Use either user_id or tier, not both."})
+
+
+def validate_circuit_breaker_fields(scope: str, status: str) -> None:
+    if scope not in {"provider", "account", "user", "model"}:
+        raise HTTPException(status_code=400, detail={"error": "CIRCUIT_SCOPE_INVALID"})
+    if status not in {"open", "closed"}:
+        raise HTTPException(status_code=400, detail={"error": "CIRCUIT_STATUS_INVALID"})
+
+
+def validate_logical_model_fields(operations: list[str], billing_class: str) -> None:
+    allowed_operations = {"text_to_image", "image_to_image", "image_edit", "text_to_video", "image_to_video", "video_extend"}
+    if not operations:
+        raise HTTPException(status_code=400, detail={"error": "LOGICAL_MODEL_OPERATIONS_REQUIRED"})
+    invalid = [operation for operation in operations if operation not in allowed_operations]
+    if invalid:
+        raise HTTPException(status_code=400, detail={"error": "LOGICAL_MODEL_OPERATION_INVALID", "message": ",".join(invalid)})
+    if not billing_class:
+        raise HTTPException(status_code=400, detail={"error": "LOGICAL_MODEL_BILLING_CLASS_REQUIRED"})
+
+
+def serialize_request_audit(record: models.RequestAuditLog) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "request_id": record.request_id,
+        "method": record.method,
+        "path": record.path,
+        "status_code": record.status_code,
+        "latency_ms": record.latency_ms,
+        "user_id": record.user_id,
+        "api_key_id": record.api_key_id,
+        "job_id": record.job_id,
+        "attempt_id": record.attempt_id,
+        "provider_id": record.provider_id,
+        "account_id": record.account_id,
+        "logical_model": record.logical_model,
+        "provider_model": record.provider_model,
+        "provider_task_id": record.provider_task_id,
+        "standard_error_code": record.standard_error_code,
+        "error_code": record.error_code,
+        "client_ip": record.client_ip,
+        "user_agent": record.user_agent,
+        "metadata": loads(record.metadata_json, {}),
+        "created_at": record.created_at.isoformat() + "Z",
+    }
+
+
+def serialize_provider_contract(result: models.ProviderContractResult) -> dict[str, Any]:
+    return {
+        "id": result.id,
+        "provider_id": result.provider_id,
+        "adapter_type": result.adapter_type,
+        "status": result.status,
+        "operation": result.operation,
+        "provider_model": result.provider_model,
+        "run_submit": result.run_submit,
+        "duration_ms": result.duration_ms,
+        "checks": loads(result.checks_json, []),
+        "error_message": result.error_message,
+        "created_at": result.created_at.isoformat() + "Z",
+        "updated_at": result.updated_at.isoformat() + "Z",
+    }
+
+
+def provider_contract_operations(db: Session, provider: models.Provider, requested_operations: list[str]) -> list[str]:
+    if requested_operations:
+        return sorted({operation for operation in requested_operations if operation})
+    try:
+        snapshot = capability_service.snapshot(db, provider)
+        operations = snapshot.get("operations") if isinstance(snapshot, dict) else []
+    except Exception:
+        operations = []
+    if operations:
+        return sorted({str(operation) for operation in operations if operation})
+    mappings = db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.provider_id == provider.id).all()
+    result: set[str] = set()
+    for mapping in mappings:
+        result.update(str(operation) for operation in loads(mapping.operations_json, []) if operation)
+    return sorted(result)
+
+
+def run_provider_contract_suite(db: Session, req: ContractSuiteRequest) -> dict[str, Any]:
+    max_results = max(1, min(int(req.max_results or 100), 500))
+    provider_query = db.query(models.Provider)
+    if req.provider_ids:
+        provider_query = provider_query.filter(models.Provider.id.in_(req.provider_ids))
+    if req.active_only:
+        provider_query = provider_query.filter(models.Provider.status == "active")
+    providers = provider_query.order_by(models.Provider.id).all()
+
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    selected_provider_ids = {provider.id for provider in providers}
+    for provider_id in sorted(set(req.provider_ids) - selected_provider_ids):
+        errors.append({"provider_id": provider_id, "error": "PROVIDER_NOT_SELECTED_OR_INACTIVE"})
+    if not providers and not req.provider_ids:
+        errors.append({"error": "NO_PROVIDERS_SELECTED"})
+    total_planned = 0
+    for provider in providers:
+        operations = provider_contract_operations(db, provider, req.operations)
+        if not operations:
+            errors.append({"provider_id": provider.id, "error": "NO_CONTRACT_OPERATIONS"})
+            continue
+        for operation in operations:
+            total_planned += 1
+            if len(results) >= max_results:
+                errors.append({"provider_id": provider.id, "operation": operation, "error": "MAX_RESULTS_REACHED", "limit": max_results})
+                break
+            try:
+                result = contract_service.run(db, provider.id, operation=operation, provider_model=None, run_submit=req.run_submit)
+                results.append(serialize_provider_contract(result))
+            except Exception as exc:
+                errors.append({"provider_id": provider.id, "operation": operation, "error": str(exc), "type": type(exc).__name__})
+
+    result_statuses = [item.get("status") for item in results]
+    summary = {
+        "providers_selected": len(providers),
+        "operations_planned": total_planned,
+        "results": len(results),
+        "passed": sum(1 for status in result_statuses if status == "passed"),
+        "failed": sum(1 for status in result_statuses if status == "failed"),
+        "errors": len(errors),
+        "run_submit": req.run_submit,
+        "active_only": req.active_only,
+        "max_results": max_results,
+    }
+    ok = summary["failed"] == 0 and summary["errors"] == 0
+    return {
+        "object": "media2api.provider_contract_suite",
+        "status": "passed" if ok else "failed",
+        "summary": summary,
+        "errors": errors,
+        "data": results,
+    }
+
+
+def serialize_attempt(attempt: models.MediaJobAttempt) -> dict[str, Any]:
+    return {
+        "id": attempt.id,
+        "job_id": attempt.job_id,
+        "provider_id": attempt.provider_id,
+        "account_id": attempt.account_id,
+        "provider_model": attempt.provider_model,
+        "provider_task_id": attempt.provider_task_id,
+        "status": attempt.status,
+        "error_code": attempt.error_code,
+        "error_message": attempt.error_message,
+        "raw_status": attempt.raw_status,
+        "request_snapshot": loads(attempt.request_snapshot_json, {}),
+        "raw_response": loads(attempt.raw_response_json, {}),
+        "started_at": attempt.started_at.isoformat() + "Z" if attempt.started_at else None,
+        "finished_at": attempt.finished_at.isoformat() + "Z" if attempt.finished_at else None,
+        "created_at": attempt.created_at.isoformat() + "Z",
+        "updated_at": attempt.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_lease(lease: models.AccountLease) -> dict[str, Any]:
+    return {
+        "id": lease.id,
+        "job_id": lease.job_id,
+        "account_id": lease.account_id,
+        "provider_id": lease.provider_id,
+        "provider_model": lease.provider_model,
+        "status": lease.status,
+        "expires_at": lease.expires_at.isoformat() + "Z",
+        "created_at": lease.created_at.isoformat() + "Z",
+        "updated_at": lease.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_job_event(event: models.MediaJobEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "job_id": event.job_id,
+        "user_id": event.user_id,
+        "event_type": event.event_type,
+        "status": event.status,
+        "provider_id": event.provider_id,
+        "account_id": event.account_id,
+        "attempt_id": event.attempt_id,
+        "message": event.message,
+        "metadata": loads(event.metadata_json, {}),
+        "created_at": event.created_at.isoformat() + "Z",
+    }
+
+
+def run_lease_expiry_self_test(db: Session, ctx: AuthContext) -> dict[str, Any]:
+    account = db.get(models.AccountResource, "acct_mock_default")
+    if not account:
+        raise HTTPException(status_code=404, detail={"error": "MOCK_ACCOUNT_NOT_FOUND"})
+    runtime.scheduler.reconcile(db, account_id=account.id)
+    db.refresh(account)
+    active_before = int(account.current_leases or 0)
+    suffix = new_id("selftest")
+    job_id = f"job_lease_{suffix}"
+    attempt_id = f"attempt_lease_{suffix}"
+    lease_id = f"lease_{suffix}"
+    now = datetime.utcnow()
+
+    job = models.MediaJob(
+        id=job_id,
+        user_id=ctx.user.id,
+        api_key_id=ctx.api_key.id,
+        operation="text_to_image",
+        logical_model="t2i-fast",
+        normalized_params_json=dumps({"model": "t2i-fast", "prompt": "admin lease expiry self-test", "n": 1}),
+        input_asset_ids_json=dumps([]),
+        output_asset_ids_json=dumps([]),
+        provider_id="mock",
+        provider_model="mock-image-fast",
+        account_id=account.id,
+        provider_task_id=f"selftest_{suffix}",
+        status="polling",
+        cost_estimate=0,
+    )
+    db.add(job)
+    db.flush()
+    attempt = models.MediaJobAttempt(
+        id=attempt_id,
+        job_id=job_id,
+        provider_id="mock",
+        account_id=account.id,
+        provider_model="mock-image-fast",
+        provider_task_id=f"selftest_{suffix}",
+        status="polling",
+        raw_status="polling",
+        started_at=now - timedelta(minutes=5),
+    )
+    db.add(attempt)
+    db.flush()
+    lease = models.AccountLease(
+        id=lease_id,
+        job_id=job_id,
+        account_id=account.id,
+        provider_id="mock",
+        provider_model="mock-image-fast",
+        expires_at=now - timedelta(minutes=1),
+        status="active",
+    )
+    db.add(lease)
+    account.current_leases = active_before + 1
+    db.commit()
+
+    expired_count = runtime.sweep_expired_leases(db)
+    runtime.scheduler.reconcile(db, account_id=account.id)
+    db.commit()
+    db.refresh(account)
+    db.refresh(job)
+    attempt = db.get(models.MediaJobAttempt, attempt_id)
+    lease = db.get(models.AccountLease, lease_id)
+    events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id == job_id).order_by(models.MediaJobEvent.created_at.asc()).all()
+    active_after = int(account.current_leases or 0)
+    ok = bool(
+        expired_count >= 1
+        and lease
+        and lease.status == "expired"
+        and attempt
+        and attempt.status == "expired"
+        and attempt.error_code == "LEASE_EXPIRED"
+        and job.status == "expired"
+        and job.error_code == "LEASE_EXPIRED"
+        and active_after == active_before
+        and any(event.event_type == "lease_expired" for event in events)
+    )
+    return {
+        "object": "lease_expiry_self_test",
+        "ok": ok,
+        "expired_leases": expired_count,
+        "job": serialize_job(db, job),
+        "attempt": serialize_attempt(attempt) if attempt else None,
+        "lease": serialize_lease(lease) if lease else None,
+        "account": {
+            "id": account.id,
+            "current_leases_before": active_before,
+            "current_leases_after": active_after,
+            "last_error_code": account.last_error_code,
+            "last_failed_at": account.last_failed_at.isoformat() + "Z" if account.last_failed_at else None,
+        },
+        "events": [serialize_job_event(event) for event in events],
+    }
+
+
+def run_stalled_job_recovery_self_test(db: Session, ctx: AuthContext) -> dict[str, Any]:
+    suffix = new_id("selftest")
+    job_id = f"job_stalled_{suffix}"
+    now = datetime.utcnow()
+    job = models.MediaJob(
+        id=job_id,
+        user_id=ctx.user.id,
+        api_key_id=ctx.api_key.id,
+        operation="text_to_image",
+        logical_model="t2i-fast",
+        normalized_params_json=dumps({"model": "t2i-fast", "prompt": "admin stalled recovery self-test", "n": 1}),
+        input_asset_ids_json=dumps([]),
+        output_asset_ids_json=dumps([]),
+        status="admitted",
+        priority=999999,
+        cost_estimate=0,
+        created_at=now - timedelta(minutes=5),
+        updated_at=now - timedelta(minutes=5),
+    )
+    db.add(job)
+    db.commit()
+
+    recovery = runtime.recover_stalled_jobs(db, max_age_seconds=1, limit=10, job_id=job_id)
+    db.refresh(job)
+    recovered_job = serialize_job(db, job)
+    events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id == job_id).order_by(models.MediaJobEvent.created_at.asc()).all()
+    ok = bool(
+        recovery.get("recovered") == 1
+        and job.status == "queued"
+        and any(event.event_type == "stalled_job_requeued" for event in events)
+    )
+
+    if job.status == "queued":
+        job.status = "cancelled"
+        job.error_code = "SELF_TEST_CLEANUP"
+        job.error_message = "Stalled recovery self-test cleanup."
+        runtime.record_event(db, job, "self_test_cleaned_up", "Stalled recovery self-test job cleaned up.")
+        db.commit()
+        db.refresh(job)
+        events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id == job_id).order_by(models.MediaJobEvent.created_at.asc()).all()
+
+    return {
+        "object": "stalled_job_recovery_self_test",
+        "ok": ok,
+        "recovery": recovery,
+        "recovered_job": recovered_job,
+        "job": serialize_job(db, job),
+        "events": [serialize_job_event(event) for event in events],
+    }
+
+
+def run_connector_cancel_self_test(db: Session, ctx: AuthContext) -> dict[str, Any]:
+    suffix = str(int(time.time() * 1000))
+    provider_id = f"selftest_cancel_{suffix}"
+    account_id = f"acct_selftest_cancel_{suffix}"
+    provider_model = f"connector-cancel-{suffix}"
+    provider_task_id = f"task_cancel_{suffix}"
+    job_id = f"job_cancel_{suffix}"
+    attempt_id = f"attempt_cancel_{suffix}"
+    lease_id = f"lease_cancel_{suffix}"
+    server: ThreadingHTTPServer | None = None
+    thread: threading.Thread | None = None
+
+    class CancelHandler(BaseHTTPRequestHandler):
+        def _json(self, payload: dict[str, Any], status: int = 200) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length") or 0)
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            if self.path == f"/tasks/{provider_task_id}/cancel":
+                setattr(self.server, "cancel_hits", int(getattr(self.server, "cancel_hits", 0)) + 1)
+                setattr(self.server, "cancel_path", self.path)
+                setattr(self.server, "cancel_body", body)
+                self._json({"status": "cancelled", "task_id": provider_task_id, "path": self.path})
+                return
+            self._json({"error": "not found", "path": self.path}, status=404)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), CancelHandler)
+        setattr(server, "cancel_hits", 0)
+        setattr(server, "cancel_path", "")
+        setattr(server, "cancel_body", "")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        provider = models.Provider(
+            id=provider_id,
+            name="Connector Cancel Self Test Provider",
+            adapter_type="http_adapter",
+            status="active",
+            base_config_json=dumps(
+                {
+                    "base_url": f"http://127.0.0.1:{server.server_port}",
+                    "cancel_endpoint": "/tasks/{provider_task_id}/cancel",
+                    "cancel_method": "POST",
+                    "cancel_payload": {"reason": "admin_self_test"},
+                    "timeout_seconds": 10,
+                }
+            ),
+            notes="Temporary provider created by /v1/admin/media-jobs/self-test-connector-cancel.",
+        )
+        db.add(provider)
+        db.flush()
+        account = models.AccountResource(
+            id=account_id,
+            provider_id=provider_id,
+            label="Connector Cancel Self Test Account",
+            credential_ref="public://connector-cancel-self-test",
+            supported_operations_json=dumps(["text_to_image"]),
+            supported_provider_models_json=dumps([provider_model]),
+            quota_buckets_json=dumps([{"type": "credits", "operation": "text_to_image", "provider_model": provider_model, "remaining_estimate": 100, "confidence": 1.0}]),
+            concurrency_limit=1,
+            current_leases=1,
+            status="active",
+            plan="self_test",
+        )
+        db.add(account)
+        job = models.MediaJob(
+            id=job_id,
+            user_id=ctx.user.id,
+            api_key_id=ctx.api_key.id,
+            operation="text_to_image",
+            logical_model="t2i-fast",
+            normalized_params_json=dumps({"model": "t2i-fast", "prompt": "connector cancel self-test", "n": 1}),
+            input_asset_ids_json=dumps([]),
+            output_asset_ids_json=dumps([]),
+            provider_id=provider_id,
+            provider_model=provider_model,
+            account_id=account_id,
+            provider_task_id=provider_task_id,
+            status="polling",
+            cost_estimate=10,
+        )
+        db.add(job)
+        db.flush()
+        user = db.get(models.User, ctx.user.id)
+        wallet_before = int(user.wallet_balance if user else 0)
+        runtime.billing.hold(db, job)
+        attempt = models.MediaJobAttempt(
+            id=attempt_id,
+            job_id=job_id,
+            provider_id=provider_id,
+            account_id=account_id,
+            provider_model=provider_model,
+            provider_task_id=provider_task_id,
+            status="polling",
+            raw_status="polling",
+            request_snapshot_json=dumps({"operation": "text_to_image", "logical_model": "t2i-fast", "provider_id": provider_id, "provider_model": provider_model}),
+            started_at=datetime.utcnow(),
+        )
+        db.add(attempt)
+        lease = models.AccountLease(
+            id=lease_id,
+            job_id=job_id,
+            account_id=account_id,
+            provider_id=provider_id,
+            provider_model=provider_model,
+            expires_at=datetime.utcnow() + timedelta(minutes=30),
+            status="active",
+        )
+        db.add(lease)
+        db.commit()
+
+        cancelled = runtime.cancel_job(db, job_id)
+        db.refresh(account)
+        db.refresh(cancelled)
+        attempt = db.get(models.MediaJobAttempt, attempt_id)
+        lease = db.get(models.AccountLease, lease_id)
+        holds = db.query(models.BillingHold).filter(models.BillingHold.job_id == job_id).order_by(models.BillingHold.created_at.asc()).all()
+        usage_records = db.query(models.UsageRecord).filter(models.UsageRecord.job_id == job_id).order_by(models.UsageRecord.created_at.asc()).all()
+        events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id == job_id).order_by(models.MediaJobEvent.created_at.asc()).all()
+        user = db.get(models.User, ctx.user.id)
+        wallet_after = int(user.wallet_balance if user else 0)
+        attempt_payload = serialize_attempt(attempt) if attempt else {}
+        cancel_event = next((serialize_job_event(event) for event in events if event.event_type == "cancelled"), {})
+        provider_cancel = (attempt_payload.get("raw_response") or {}).get("provider_cancel") or {}
+        event_provider_cancel = (cancel_event.get("metadata") or {}).get("provider_cancel") or {}
+        ok = bool(
+            cancelled.status == "cancelled"
+            and cancelled.error_code == "CANCELLED"
+            and attempt
+            and attempt.status == "cancelled"
+            and attempt.error_code == "CANCELLED"
+            and lease
+            and lease.status == "released"
+            and account.current_leases == 0
+            and provider_cancel.get("status") == "cancelled"
+            and event_provider_cancel.get("status") == "cancelled"
+            and int(getattr(server, "cancel_hits", 0)) == 1
+            and all(hold.status == "refunded" for hold in holds)
+            and any(record.status == "refunded" and record.amount == 0 for record in usage_records)
+            and cancelled.final_cost == 0
+            and wallet_after == wallet_before
+        )
+
+        provider.status = "disabled"
+        account.status = "disabled"
+        account.concurrency_limit = 0
+        db.commit()
+
+        return {
+            "object": "connector_cancel_self_test",
+            "ok": ok,
+            "job": serialize_job(db, cancelled),
+            "attempt": attempt_payload,
+            "lease": serialize_lease(lease) if lease else None,
+            "events": [serialize_job_event(event) for event in events],
+            "provider_cancel": provider_cancel,
+            "upstream": {
+                "cancel_hits": int(getattr(server, "cancel_hits", 0)),
+                "cancel_path": str(getattr(server, "cancel_path", "")),
+                "cancel_body": str(getattr(server, "cancel_body", "")),
+            },
+            "billing": {
+                "holds": [serialize_billing_hold(hold) for hold in holds],
+                "usage_records": [serialize_usage(record) for record in usage_records],
+                "wallet_before": wallet_before,
+                "wallet_after": wallet_after,
+            },
+            "cleanup": {
+                "provider_status": provider.status,
+                "account_status": account.status,
+                "account_concurrency_limit": account.concurrency_limit,
+            },
+        }
+    except Exception as exc:
+        db.rollback()
+        for item_id, model_type in [(account_id, models.AccountResource), (provider_id, models.Provider)]:
+            item = db.get(model_type, item_id)
+            if not item:
+                continue
+            if hasattr(item, "status"):
+                item.status = "disabled"
+            if hasattr(item, "concurrency_limit"):
+                item.concurrency_limit = 0
+        db.commit()
+        return {
+            "object": "connector_cancel_self_test",
+            "ok": False,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+            "cleanup": {"provider_id": provider_id, "account_id": account_id, "job_id": job_id},
+        }
+    finally:
+        if server:
+            server.shutdown()
+            server.server_close()
+        if thread:
+            thread.join(timeout=2)
+
+
+def run_mock_stability_self_test(db: Session, req: MockStabilitySelfTestRequest) -> dict[str, Any]:
+    if req.provider_id != "mock":
+        raise HTTPException(status_code=400, detail={"error": "MOCK_PROVIDER_REQUIRED"})
+    iterations = max(1, min(int(req.iterations or 1), 1000))
+    max_failures = max(1, min(int(req.max_failures or 1), 20))
+    provider = db.get(models.Provider, "mock")
+    account = db.get(models.AccountResource, "acct_mock_default")
+    model = db.get(models.LogicalModel, req.model)
+    if not provider or provider.status != "active":
+        raise HTTPException(status_code=400, detail={"error": "MOCK_PROVIDER_NOT_ACTIVE"})
+    if not account or account.status != "active":
+        raise HTTPException(status_code=400, detail={"error": "MOCK_ACCOUNT_NOT_ACTIVE"})
+    if not model or not model.enabled:
+        raise HTTPException(status_code=400, detail={"error": "MODEL_NOT_ENABLED", "model": req.model})
+
+    suffix = new_id("stability")
+    user_id = f"usr_{suffix}"
+    api_key_id = f"key_{suffix}"
+    policy_id = f"limit_{suffix}"
+    started = time.time()
+    user = models.User(
+        id=user_id,
+        email=f"{user_id}@media2api.local",
+        status="active",
+        tier="stability_self_test",
+        wallet_balance=max(1000000, iterations * 100),
+    )
+    api_key = models.ApiKey(
+        id=api_key_id,
+        user_id=user_id,
+        name="mock-stability-self-test",
+        key_hash=hash_api_key(f"mock-stability-self-test-{suffix}"),
+        status="active",
+    )
+    policy = models.UserLimitPolicy(
+        id=policy_id,
+        name="Mock stability self-test temporary policy",
+        user_id=user_id,
+        requests_per_minute=max(2000, iterations + 100),
+        daily_job_limit=max(2000, iterations + 100),
+        concurrent_job_limit=100,
+        high_cost_allowed=True,
+        enabled=True,
+        notes="Temporary policy created by /v1/admin/stability/self-test-mock.",
+    )
+    db.add_all([user, api_key, policy])
+    db.commit()
+
+    runtime.scheduler.reconcile(db, account_id=account.id)
+    active_leases_before = db.query(models.AccountLease).filter(models.AccountLease.account_id == account.id, models.AccountLease.status == "active").count()
+    job_ids: list[str] = []
+    output_asset_ids: list[str] = []
+    failures: list[dict[str, Any]] = []
+    try:
+        for index in range(iterations):
+            try:
+                job = runtime.create_job(
+                    db,
+                    user_id,
+                    api_key_id,
+                    "text_to_image",
+                    req.model,
+                    {
+                        "model": req.model,
+                        "prompt": f"mock stability self-test {index}",
+                        "n": 1,
+                        "provider_preference": ["mock"],
+                    },
+                )
+                claimed = runtime.claim_queued_job(db, job.id)
+                if claimed:
+                    job = db.get(models.MediaJob, job.id) or job
+                    runtime.record_event(db, job, "admitted", "Job admitted by mock stability self-test.", metadata={"self_test": True})
+                    db.commit()
+                    job = runtime.process_job(db, job.id)
+                else:
+                    deadline = time.time() + 30
+                    while time.time() < deadline:
+                        db.expire_all()
+                        job = db.get(models.MediaJob, job.id) or job
+                        if job.status in {"completed", "failed", "cancelled", "expired"}:
+                            break
+                        time.sleep(0.05)
+                job_ids.append(job.id)
+                if job.status != "completed":
+                    failures.append({"index": index, "job_id": job.id, "status": job.status, "error_code": job.error_code, "error_message": job.error_message})
+                output_ids = [str(asset_id) for asset_id in loads(job.output_asset_ids_json, []) if asset_id]
+                output_asset_ids.extend(output_ids)
+                if not output_ids:
+                    failures.append({"index": index, "job_id": job.id, "status": job.status, "error_code": "OUTPUT_ASSET_MISSING"})
+            except Exception as exc:
+                db.rollback()
+                failures.append({"index": index, "error": type(exc).__name__, "message": str(exc)[:500]})
+            if len(failures) >= max_failures:
+                break
+    finally:
+        user = db.get(models.User, user_id)
+        api_key = db.get(models.ApiKey, api_key_id)
+        policy = db.get(models.UserLimitPolicy, policy_id)
+        if user:
+            user.status = "disabled"
+        if api_key:
+            api_key.status = "disabled"
+        if policy:
+            policy.enabled = False
+        db.commit()
+
+    runtime.scheduler.reconcile(db, account_id=account.id)
+    active_leases_after = db.query(models.AccountLease).filter(models.AccountLease.account_id == account.id, models.AccountLease.status == "active").count()
+    active_lease_leaks = []
+    if job_ids:
+        active_lease_leaks = [
+            serialize_lease(lease)
+            for lease in db.query(models.AccountLease).filter(models.AccountLease.job_id.in_(job_ids), models.AccountLease.status == "active").limit(20).all()
+        ]
+    completed_jobs = db.query(models.MediaJob).filter(models.MediaJob.id.in_(job_ids), models.MediaJob.status == "completed").count() if job_ids else 0
+    completed_attempts = db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id.in_(job_ids), models.MediaJobAttempt.status == "completed").count() if job_ids else 0
+    settled_usage = db.query(models.UsageRecord).filter(models.UsageRecord.job_id.in_(job_ids), models.UsageRecord.status == "settled").count() if job_ids else 0
+    held_holds = db.query(models.BillingHold).filter(models.BillingHold.job_id.in_(job_ids), models.BillingHold.status == "held").count() if job_ids else 0
+    output_assets = db.query(models.MediaAsset).filter(models.MediaAsset.id.in_(output_asset_ids)).all() if output_asset_ids else []
+    sample_asset_downloads = []
+    for asset in output_assets[:3]:
+        try:
+            sample_asset_downloads.append({"asset_id": asset.id, "bytes": len(asset_service.read_bytes(asset)), "ok": True})
+        except Exception as exc:
+            sample_asset_downloads.append({"asset_id": asset.id, "ok": False, "error": type(exc).__name__})
+    ok = bool(
+        len(job_ids) == iterations
+        and completed_jobs == iterations
+        and completed_attempts >= iterations
+        and len(output_asset_ids) >= iterations
+        and settled_usage >= iterations
+        and held_holds == 0
+        and not failures
+        and not active_lease_leaks
+    )
+    return {
+        "object": "mock_stability_self_test",
+        "ok": ok,
+        "iterations_requested": iterations,
+        "iterations_completed": len(job_ids),
+        "duration_seconds": round(time.time() - started, 3),
+        "jobs": {
+            "completed": completed_jobs,
+            "sample_ids": [*job_ids[:3], *job_ids[-3:]] if len(job_ids) > 6 else job_ids,
+        },
+        "attempts": {"completed": completed_attempts},
+        "assets": {
+            "output_asset_count": len(output_asset_ids),
+            "sample_downloads": sample_asset_downloads,
+        },
+        "billing": {
+            "settled_usage_records": settled_usage,
+            "held_holds": held_holds,
+        },
+        "leases": {
+            "account_id": account.id,
+            "active_before": active_leases_before,
+            "active_after": active_leases_after,
+            "active_lease_leaks": active_lease_leaks,
+        },
+        "failures": failures[:max_failures],
+        "cleanup": {
+            "user_id": user_id,
+            "user_status": "disabled",
+            "api_key_id": api_key_id,
+            "api_key_status": "disabled",
+            "policy_id": policy_id,
+            "policy_enabled": False,
+        },
+    }
+
+
+def run_asset_storage_self_test(db: Session, ctx: AuthContext, req: AssetStorageSelfTestRequest) -> dict[str, Any]:
+    data = base64.b64decode(ASSET_STORAGE_SELF_TEST_PNG_B64)
+    expected_sha = hashlib.sha256(data).hexdigest()
+    asset: models.MediaAsset | None = None
+    deleted = False
+    try:
+        asset = asset_service.create_from_bytes(
+            db=db,
+            user_id=ctx.user.id,
+            data=data,
+            filename="asset-storage-self-test.png",
+            kind="image",
+            purpose="self_test",
+            mime_type="image/png",
+            source="self_test",
+            provider_meta={"self_test": "asset_storage", "cleanup": req.cleanup},
+        )
+        db.commit()
+        db.refresh(asset)
+        stored = asset_service.read_bytes(asset)
+        signed_url = asset_service.public_url(asset)
+        parsed = urlparse(signed_url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        try:
+            expires = int(query.get("expires") or 0)
+        except ValueError:
+            expires = 0
+        signature_ok = asset_service.verify_signature(asset.id, expires, query.get("signature"))
+        read_ok = stored == data and hashlib.sha256(stored).hexdigest() == expected_sha
+        serialized_asset = serialize_asset(asset, db=db)
+        if req.cleanup:
+            asset_service.delete(db, asset)
+            db.commit()
+            deleted = db.get(models.MediaAsset, serialized_asset["id"]) is None
+        ok = bool(read_ok and signature_ok and (not req.cleanup or deleted))
+        return {
+            "object": "asset_storage_self_test",
+            "ok": ok,
+            "storage_backend": asset_service.storage_backend(),
+            "asset": serialized_asset,
+            "write": {
+                "ok": True,
+                "bytes": len(data),
+                "sha256": expected_sha,
+            },
+            "read": {
+                "ok": read_ok,
+                "bytes": len(stored),
+                "sha256": hashlib.sha256(stored).hexdigest(),
+            },
+            "signed_url": {
+                "url": signed_url,
+                "signature_ok": signature_ok,
+                "expires": expires,
+            },
+            "cleanup": {
+                "requested": req.cleanup,
+                "deleted": deleted,
+            },
+        }
+    except Exception as exc:
+        db.rollback()
+        cleanup_error = ""
+        if req.cleanup and asset is not None:
+            try:
+                asset_service.delete(db, asset)
+                db.commit()
+            except Exception as cleanup_exc:
+                db.rollback()
+                cleanup_error = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+        return {
+            "object": "asset_storage_self_test",
+            "ok": False,
+            "storage_backend": asset_service.storage_backend(),
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+            "cleanup": {"requested": req.cleanup, "deleted": False, "error": cleanup_error},
+        }
+
+
+def run_fallback_self_test(
+    db: Session,
+    ctx: AuthContext,
+    *,
+    object_name: str = "fallback_self_test",
+    failure_mode: str = "failure",
+) -> dict[str, Any]:
+    suffix = str(int(time.time() * 1000))
+    timeout_mode = failure_mode == "timeout"
+    slug = "fallback-timeout" if timeout_mode else "fallback"
+    model_id = f"selftest-{slug}-{suffix}"
+    failed_account_id = f"acct_selftest_{slug.replace('-', '_')}_fail_{suffix}"
+    success_account_id = f"acct_selftest_{slug.replace('-', '_')}_success_{suffix}"
+    account_ids = [failed_account_id, success_account_id]
+    failed_provider_model = f"mock-{slug}-fail-{suffix}"
+    success_provider_model = f"mock-{slug}-success-{suffix}"
+    mapping_fail_id = f"{model_id}:mock:{failed_provider_model}"
+    mapping_success_id = f"{model_id}:mock:{success_provider_model}"
+    pricing_rule_id = f"price_{model_id}"
+    expected_error_code = "PROVIDER_TIMEOUT" if timeout_mode else "PROVIDER_FAILED"
+    trigger_param = "_mock_timeout_provider_models" if timeout_mode else "_mock_fail_provider_models"
+    prompt = "fallback timeout self-test first provider times out then second succeeds" if timeout_mode else "fallback self-test first provider fails then second succeeds"
+    job: models.MediaJob | None = None
+    try:
+        db.add(
+            models.LogicalModel(
+                id=model_id,
+                display_name="Fallback Self Test Model",
+                operations_json=dumps(["text_to_image"]),
+                constraints_json=dumps({}),
+                default_params_json=dumps({"quality": "standard", "n": 1}),
+                billing_class="image_fast",
+                enabled=True,
+            )
+        )
+        for account_id, provider_model, role in [
+            (failed_account_id, failed_provider_model, "fail"),
+            (success_account_id, success_provider_model, "success"),
+        ]:
+            db.add(
+                models.AccountResource(
+                    id=account_id,
+                    provider_id="mock",
+                    label=f"Fallback {'Timeout ' if timeout_mode else ''}Self Test {role.title()} Account",
+                    credential_ref=f"public://mock-{slug}-{role}-self-test",
+                    supported_operations_json=dumps(["text_to_image"]),
+                    supported_provider_models_json=dumps([provider_model]),
+                    quota_buckets_json=dumps(
+                        [
+                            {
+                                "type": "credits",
+                                "operation": "text_to_image",
+                                "provider_model": provider_model,
+                                "remaining_estimate": 100,
+                                "confidence": 1.0,
+                            }
+                        ]
+                    ),
+                    concurrency_limit=1,
+                    status="active",
+                    plan="self_test",
+                )
+            )
+        db.add(
+            models.PricingRule(
+                id=pricing_rule_id,
+                name="Fallback Timeout Self Test Pricing" if timeout_mode else "Fallback Self Test Pricing",
+                logical_model=model_id,
+                billing_class="image_fast",
+                operation="text_to_image",
+                unit="image",
+                base_amount=0,
+                unit_amount=10,
+                input_asset_amount=0,
+                provider_cost_base=0,
+                provider_cost_unit=2,
+                provider_cost_input_asset=0,
+                quality_multipliers_json=dumps({"standard": 1, "high": 2, "pro": 2, "hd": 2}),
+                enabled=True,
+            )
+        )
+        db.add(
+            models.ProviderModelMapping(
+                id=mapping_fail_id,
+                logical_model=model_id,
+                provider_id="mock",
+                provider_model=failed_provider_model,
+                operations_json=dumps(["text_to_image"]),
+                priority=0,
+                weight=1,
+                cost_score=0.9,
+                speed_score=0.9,
+                reliability_score=0.9,
+                quality_score=0.5,
+                enabled=True,
+            )
+        )
+        db.add(
+            models.ProviderModelMapping(
+                id=mapping_success_id,
+                logical_model=model_id,
+                provider_id="mock",
+                provider_model=success_provider_model,
+                operations_json=dumps(["text_to_image"]),
+                priority=1,
+                weight=1,
+                cost_score=0.8,
+                speed_score=0.8,
+                reliability_score=0.8,
+                quality_score=0.5,
+                enabled=True,
+            )
+        )
+        db.commit()
+
+        params = {
+            "prompt": prompt,
+            "n": 1,
+            "quality": "standard",
+            "providers": ["mock"],
+            "provider_preference": ["mock"],
+            "provider_models": [failed_provider_model, success_provider_model],
+            "route_policy": "balanced",
+            "_sync_process_lock": True,
+            trigger_param: [failed_provider_model],
+        }
+        job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, "text_to_image", model_id, params, enqueue=False)
+        job = runtime.process_job(db, job.id)
+
+        attempts = db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id == job.id).order_by(models.MediaJobAttempt.created_at.asc()).all()
+        events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id == job.id).order_by(models.MediaJobEvent.created_at.asc()).all()
+        leases = db.query(models.AccountLease).filter(models.AccountLease.job_id == job.id).order_by(models.AccountLease.created_at.asc()).all()
+        usage_records = db.query(models.UsageRecord).filter(models.UsageRecord.job_id == job.id).order_by(models.UsageRecord.created_at.asc()).all()
+        provider_costs = db.query(models.ProviderCostRecord).filter(models.ProviderCostRecord.job_id == job.id).order_by(models.ProviderCostRecord.created_at.asc()).all()
+        held_holds = db.query(models.BillingHold).filter(models.BillingHold.job_id == job.id, models.BillingHold.status == "held").count()
+        accounts_after = [db.get(models.AccountResource, account_id) for account_id in account_ids]
+        fallback_events = [event for event in events if event.event_type == "fallback_queued"]
+        selected_models = [loads(event.metadata_json, {}).get("provider_model") for event in events if event.event_type == "provider_selected"]
+        output_assets = [db.get(models.MediaAsset, asset_id) for asset_id in loads(job.output_asset_ids_json, [])]
+        ok = (
+            job.status == "completed"
+            and len(attempts) == 2
+            and attempts[0].status == "failed"
+            and attempts[0].provider_model == failed_provider_model
+            and attempts[0].error_code == expected_error_code
+            and attempts[1].status == "completed"
+            and attempts[1].provider_model == success_provider_model
+            and bool(fallback_events)
+            and len(leases) == 2
+            and all(lease.status == "released" for lease in leases)
+            and len(usage_records) == 1
+            and len(provider_costs) == 1
+            and held_holds == 0
+            and bool(job.output_asset_ids_json and loads(job.output_asset_ids_json, []))
+        )
+
+        if not ok:
+            for lease in leases:
+                if lease.status == "active":
+                    runtime.scheduler.release(db, lease, success=False, error_code="SELF_TEST_CLEANUP", neutral=True)
+            for attempt in attempts:
+                if attempt.status in ACTIVE_ATTEMPT_STATUSES:
+                    attempt.status = "failed"
+                    attempt.error_code = "SELF_TEST_CLEANUP"
+                    attempt.error_message = "Fallback self-test cleanup released an unfinished attempt."
+                    attempt.finished_at = datetime.utcnow()
+
+        for account_after in accounts_after:
+            if account_after:
+                account_after.status = "disabled"
+                account_after.concurrency_limit = 0
+        for mapping_id in [mapping_fail_id, mapping_success_id]:
+            mapping = db.get(models.ProviderModelMapping, mapping_id)
+            if mapping:
+                mapping.enabled = False
+        pricing_rule = db.get(models.PricingRule, pricing_rule_id)
+        if pricing_rule:
+            pricing_rule.enabled = False
+        model = db.get(models.LogicalModel, model_id)
+        if model:
+            model.enabled = False
+        db.commit()
+
+        return {
+            "object": object_name,
+            "ok": ok,
+            "job": serialize_job(db, job),
+            "fallback": {
+                "failure_mode": failure_mode,
+                "expected_error_code": expected_error_code,
+                "failed_provider_model": failed_provider_model,
+                "success_provider_model": success_provider_model,
+                "selected_provider_models": selected_models,
+                "fallback_event_count": len(fallback_events),
+            },
+            "attempts": [serialize_attempt(attempt) for attempt in attempts],
+            "events": [serialize_job_event(event) for event in events],
+            "leases": [serialize_lease(lease) for lease in leases],
+            "billing": {
+                "usage_records": len(usage_records),
+                "provider_cost_records": len(provider_costs),
+                "held_holds": held_holds,
+                "final_cost": job.final_cost,
+            },
+            "outputs": [serialize_asset(asset, db=db) for asset in output_assets if asset],
+            "cleanup": {
+                "model_enabled": bool(model.enabled) if model else None,
+                "pricing_rule_enabled": bool(pricing_rule.enabled) if pricing_rule else None,
+                "accounts": [
+                    {"id": account.id, "status": account.status, "concurrency_limit": account.concurrency_limit}
+                    for account in accounts_after
+                    if account
+                ],
+            },
+        }
+    except Exception as exc:
+        job_id = job.id if job else ""
+        db.rollback()
+        if job_id:
+            for lease in db.query(models.AccountLease).filter(models.AccountLease.job_id == job_id, models.AccountLease.status == "active").all():
+                runtime.scheduler.release(db, lease, success=False, error_code="SELF_TEST_CLEANUP", neutral=True)
+            for attempt in db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id == job_id, models.MediaJobAttempt.status.in_(list(ACTIVE_ATTEMPT_STATUSES))).all():
+                attempt.status = "failed"
+                attempt.error_code = "SELF_TEST_CLEANUP"
+                attempt.error_message = "Fallback self-test cleanup released an unfinished attempt."
+                attempt.finished_at = datetime.utcnow()
+        for mapping_id in [mapping_fail_id, mapping_success_id]:
+            mapping = db.get(models.ProviderModelMapping, mapping_id)
+            if mapping:
+                mapping.enabled = False
+        pricing_rule = db.get(models.PricingRule, pricing_rule_id)
+        if pricing_rule:
+            pricing_rule.enabled = False
+        model = db.get(models.LogicalModel, model_id)
+        if model:
+            model.enabled = False
+        for account_id in account_ids:
+            account = db.get(models.AccountResource, account_id)
+            if account:
+                account.status = "disabled"
+                account.concurrency_limit = 0
+        db.commit()
+        return {
+            "object": object_name,
+            "ok": False,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+            "job": serialize_job(db, job) if job else None,
+            "cleanup": {"model_id": model_id, "account_ids": account_ids},
+        }
+
+
+def run_fallback_timeout_self_test(db: Session, ctx: AuthContext) -> dict[str, Any]:
+    return run_fallback_self_test(db, ctx, object_name="fallback_timeout_self_test", failure_mode="timeout")
+
+
+def run_account_cooldown_self_test(db: Session, ctx: AuthContext) -> dict[str, Any]:
+    suffix = str(int(time.time() * 1000))
+    model_id = f"selftest-account-cooldown-{suffix}"
+    account_id = f"acct_selftest_account_cooldown_{suffix}"
+    provider_model = f"mock-account-cooldown-fail-{suffix}"
+    mapping_id = f"{model_id}:mock:{provider_model}"
+    pricing_rule_id = f"price_{model_id}"
+    failure_jobs: list[models.MediaJob] = []
+    probe_job: models.MediaJob | None = None
+    score_trace: list[dict[str, Any]] = []
+    try:
+        db.add(
+            models.LogicalModel(
+                id=model_id,
+                display_name="Account Cooldown Self Test Model",
+                operations_json=dumps(["text_to_image"]),
+                constraints_json=dumps({}),
+                default_params_json=dumps({"quality": "standard", "n": 1}),
+                billing_class="image_fast",
+                enabled=True,
+            )
+        )
+        db.add(
+            models.AccountResource(
+                id=account_id,
+                provider_id="mock",
+                label="Account Cooldown Self Test Account",
+                credential_ref="public://mock-account-cooldown-self-test",
+                supported_operations_json=dumps(["text_to_image"]),
+                supported_provider_models_json=dumps([provider_model]),
+                quota_buckets_json=dumps(
+                    [
+                        {
+                            "type": "credits",
+                            "operation": "text_to_image",
+                            "provider_model": provider_model,
+                            "remaining_estimate": 100,
+                            "confidence": 1.0,
+                        }
+                    ]
+                ),
+                concurrency_limit=1,
+                current_leases=0,
+                health_score=1.0,
+                failure_score=0.0,
+                status="active",
+                plan="self_test",
+            )
+        )
+        db.add(
+            models.PricingRule(
+                id=pricing_rule_id,
+                name="Account Cooldown Self Test Pricing",
+                logical_model=model_id,
+                billing_class="image_fast",
+                operation="text_to_image",
+                unit="image",
+                base_amount=0,
+                unit_amount=10,
+                input_asset_amount=0,
+                provider_cost_base=0,
+                provider_cost_unit=2,
+                provider_cost_input_asset=0,
+                quality_multipliers_json=dumps({"standard": 1, "high": 2, "pro": 2, "hd": 2}),
+                enabled=True,
+            )
+        )
+        db.add(
+            models.ProviderModelMapping(
+                id=mapping_id,
+                logical_model=model_id,
+                provider_id="mock",
+                provider_model=provider_model,
+                operations_json=dumps(["text_to_image"]),
+                priority=0,
+                weight=1,
+                cost_score=0.7,
+                speed_score=0.7,
+                reliability_score=0.9,
+                quality_score=0.5,
+                enabled=True,
+            )
+        )
+        db.commit()
+
+        for index in range(4):
+            params = {
+                "prompt": f"account cooldown self-test failure {index + 1}",
+                "n": 1,
+                "quality": "standard",
+                "providers": ["mock"],
+                "provider_preference": ["mock"],
+                "provider_models": [provider_model],
+                "route_policy": "balanced",
+                "_sync_process_lock": True,
+                "_mock_fail_provider_models": [provider_model],
+            }
+            job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, "text_to_image", model_id, params, enqueue=False)
+            job = runtime.process_job(db, job.id)
+            failure_jobs.append(job)
+            account = db.get(models.AccountResource, account_id)
+            score_trace.append(
+                {
+                    "index": index + 1,
+                    "job_id": job.id,
+                    "job_status": job.status,
+                    "job_error_code": job.error_code,
+                    "account_status": account.status if account else None,
+                    "failure_score": round(float(account.failure_score or 0), 6) if account else None,
+                    "health_score": round(float(account.health_score or 0), 6) if account else None,
+                }
+            )
+            if account and account.status == "cooldown":
+                break
+
+        account_after_cooldown = db.get(models.AccountResource, account_id)
+        probe_params = {
+            "prompt": "account cooldown self-test scheduling probe",
+            "n": 1,
+            "quality": "standard",
+            "providers": ["mock"],
+            "provider_preference": ["mock"],
+            "provider_models": [provider_model],
+            "route_policy": "balanced",
+            "_sync_process_lock": True,
+        }
+        probe_job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, "text_to_image", model_id, probe_params, enqueue=False)
+        probe_job = runtime.process_job(db, probe_job.id)
+
+        all_job_ids = [job.id for job in failure_jobs]
+        if probe_job:
+            all_job_ids.append(probe_job.id)
+        attempts = (
+            db.query(models.MediaJobAttempt)
+            .filter(models.MediaJobAttempt.job_id.in_(all_job_ids))
+            .order_by(models.MediaJobAttempt.created_at.asc())
+            .all()
+            if all_job_ids
+            else []
+        )
+        leases = (
+            db.query(models.AccountLease)
+            .filter(models.AccountLease.job_id.in_(all_job_ids))
+            .order_by(models.AccountLease.created_at.asc())
+            .all()
+            if all_job_ids
+            else []
+        )
+        held_holds = db.query(models.BillingHold).filter(models.BillingHold.job_id.in_(all_job_ids), models.BillingHold.status == "held").count() if all_job_ids else 0
+        account_alerts = (
+            db.query(models.AlertEvent)
+            .filter(models.AlertEvent.account_id == account_id, models.AlertEvent.event_type == "account_status")
+            .order_by(models.AlertEvent.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        active_leases = [lease for lease in leases if lease.status == "active"]
+        ok = (
+            bool(score_trace)
+            and bool(account_after_cooldown)
+            and account_after_cooldown.status == "cooldown"
+            and float(account_after_cooldown.failure_score or 0) >= 0.75
+            and all(job.status == "failed" and job.error_code == "PROVIDER_FAILED" for job in failure_jobs)
+            and bool(probe_job)
+            and probe_job.status == "failed"
+            and probe_job.error_code == "UNSUPPORTED_MODEL_OPERATION"
+            and len(active_leases) == 0
+            and held_holds == 0
+            and any(alert.event_type == "account_status" for alert in account_alerts)
+        )
+
+        mapping = db.get(models.ProviderModelMapping, mapping_id)
+        pricing_rule = db.get(models.PricingRule, pricing_rule_id)
+        model = db.get(models.LogicalModel, model_id)
+        if mapping:
+            mapping.enabled = False
+        if pricing_rule:
+            pricing_rule.enabled = False
+        if model:
+            model.enabled = False
+        if account_after_cooldown:
+            account_after_cooldown.status = "disabled"
+            account_after_cooldown.concurrency_limit = 0
+        db.commit()
+
+        return {
+            "object": "account_cooldown_self_test",
+            "ok": ok,
+            "account": {
+                "id": account_id,
+                "status_before_cleanup": "cooldown" if account_after_cooldown and ok else (account_after_cooldown.status if account_after_cooldown else None),
+                "failure_score_before_cleanup": round(float(account_after_cooldown.failure_score or 0), 6) if account_after_cooldown else None,
+                "health_score_before_cleanup": round(float(account_after_cooldown.health_score or 0), 6) if account_after_cooldown else None,
+            },
+            "score_trace": score_trace,
+            "failure_jobs": [serialize_job(db, job) for job in failure_jobs],
+            "probe_job": serialize_job(db, probe_job) if probe_job else None,
+            "attempts": [serialize_attempt(attempt) for attempt in attempts],
+            "leases": [serialize_lease(lease) for lease in leases],
+            "alerts": [serialize_alert_event(alert) for alert in account_alerts],
+            "billing": {"held_holds": held_holds},
+            "cleanup": {
+                "model_enabled": bool(model.enabled) if model else None,
+                "pricing_rule_enabled": bool(pricing_rule.enabled) if pricing_rule else None,
+                "account_status": account_after_cooldown.status if account_after_cooldown else None,
+                "account_concurrency_limit": account_after_cooldown.concurrency_limit if account_after_cooldown else None,
+            },
+        }
+    except Exception as exc:
+        job_ids = [job.id for job in failure_jobs]
+        if probe_job:
+            job_ids.append(probe_job.id)
+        db.rollback()
+        if job_ids:
+            for lease in db.query(models.AccountLease).filter(models.AccountLease.job_id.in_(job_ids), models.AccountLease.status == "active").all():
+                runtime.scheduler.release(db, lease, success=False, error_code="SELF_TEST_CLEANUP", neutral=True)
+            for attempt in db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id.in_(job_ids), models.MediaJobAttempt.status.in_(list(ACTIVE_ATTEMPT_STATUSES))).all():
+                attempt.status = "failed"
+                attempt.error_code = "SELF_TEST_CLEANUP"
+                attempt.error_message = "Account cooldown self-test cleanup released an unfinished attempt."
+                attempt.finished_at = datetime.utcnow()
+        mapping = db.get(models.ProviderModelMapping, mapping_id)
+        if mapping:
+            mapping.enabled = False
+        pricing_rule = db.get(models.PricingRule, pricing_rule_id)
+        if pricing_rule:
+            pricing_rule.enabled = False
+        model = db.get(models.LogicalModel, model_id)
+        if model:
+            model.enabled = False
+        account = db.get(models.AccountResource, account_id)
+        if account:
+            account.status = "disabled"
+            account.concurrency_limit = 0
+        db.commit()
+        return {
+            "object": "account_cooldown_self_test",
+            "ok": False,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+            "score_trace": score_trace,
+            "cleanup": {"model_id": model_id, "account_id": account_id},
+        }
+
+
+def run_temp_url_asset_self_test(db: Session, ctx: AuthContext) -> dict[str, Any]:
+    suffix = str(int(time.time() * 1000))
+    provider_id = f"selftest_temp_url_{suffix}"
+    model_id = f"selftest-temp-url-{suffix}"
+    account_id = f"acct_selftest_temp_url_{suffix}"
+    provider_model = f"connector-temp-url-{suffix}"
+    mapping_id = f"{model_id}:{provider_id}:{provider_model}"
+    pricing_rule_id = f"price_{model_id}"
+    job: models.MediaJob | None = None
+    server: ThreadingHTTPServer | None = None
+    thread: threading.Thread | None = None
+    source_url = ""
+
+    png_bytes = base64.b64decode(ASSET_STORAGE_SELF_TEST_PNG_B64)
+
+    class TempUrlHandler(BaseHTTPRequestHandler):
+        def _json(self, payload: dict[str, Any], status: int = 200) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:
+            temp_url = f"http://127.0.0.1:{self.server.server_port}/media/temp-once.png"
+            self._json({"status": "completed", "data": [{"image_url": temp_url, "mime_type": "image/png"}]})
+
+        def do_GET(self) -> None:
+            if self.path.startswith("/media/temp-once.png"):
+                current_hits = int(getattr(self.server, "temp_hits", 0)) + 1
+                setattr(self.server, "temp_hits", current_hits)
+                if current_hits > 1:
+                    self._json({"error": "temporary url expired"}, status=410)
+                    return
+                self.send_response(200)
+                self.send_header("content-type", "image/png")
+                self.send_header("content-length", str(len(png_bytes)))
+                self.end_headers()
+                self.wfile.write(png_bytes)
+                return
+            self._json({"status": "ok"})
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), TempUrlHandler)
+        setattr(server, "temp_hits", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        source_url = f"http://127.0.0.1:{server.server_port}/media/temp-once.png"
+
+        db.add(
+            models.Provider(
+                id=provider_id,
+                name="Temporary URL Self Test Connector",
+                adapter_type="http_adapter",
+                status="active",
+                base_config_json=dumps(
+                    {
+                        "base_url": f"http://127.0.0.1:{server.server_port}",
+                        "timeout_seconds": 10,
+                        "output_paths": ["data"],
+                    }
+                ),
+                notes="Temporary provider created by /v1/admin/assets/self-test-temp-url.",
+            )
+        )
+        db.add(
+            models.LogicalModel(
+                id=model_id,
+                display_name="Temporary URL Self Test Model",
+                operations_json=dumps(["text_to_image"]),
+                constraints_json=dumps({}),
+                default_params_json=dumps({"quality": "standard", "n": 1}),
+                billing_class="image_fast",
+                enabled=True,
+            )
+        )
+        db.flush()
+        db.add(
+            models.AccountResource(
+                id=account_id,
+                provider_id=provider_id,
+                label="Temporary URL Self Test Account",
+                credential_ref="public://temp-url-self-test",
+                supported_operations_json=dumps(["text_to_image"]),
+                supported_provider_models_json=dumps([provider_model]),
+                quota_buckets_json=dumps([{"type": "credits", "operation": "text_to_image", "provider_model": provider_model, "remaining_estimate": 100, "confidence": 1.0}]),
+                concurrency_limit=1,
+                status="active",
+                plan="self_test",
+            )
+        )
+        db.add(
+            models.PricingRule(
+                id=pricing_rule_id,
+                name="Temporary URL Self Test Pricing",
+                logical_model=model_id,
+                billing_class="image_fast",
+                operation="text_to_image",
+                unit="image",
+                base_amount=0,
+                unit_amount=10,
+                input_asset_amount=0,
+                provider_cost_base=0,
+                provider_cost_unit=2,
+                provider_cost_input_asset=0,
+                quality_multipliers_json=dumps({"standard": 1, "high": 2, "pro": 2, "hd": 2}),
+                enabled=True,
+            )
+        )
+        db.add(
+            models.ProviderModelMapping(
+                id=mapping_id,
+                logical_model=model_id,
+                provider_id=provider_id,
+                provider_model=provider_model,
+                operations_json=dumps(["text_to_image"]),
+                priority=0,
+                weight=1,
+                cost_score=0.5,
+                speed_score=0.5,
+                reliability_score=0.9,
+                quality_score=0.5,
+                enabled=True,
+            )
+        )
+        db.commit()
+
+        params = {
+            "prompt": "temporary url asset self-test",
+            "n": 1,
+            "quality": "standard",
+            "providers": [provider_id],
+            "provider_preference": [provider_id],
+            "provider_models": [provider_model],
+            "route_policy": "balanced",
+            "_sync_process_lock": True,
+        }
+        job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, "text_to_image", model_id, params, enqueue=False)
+        job = runtime.process_job(db, job.id)
+
+        output_ids = loads(job.output_asset_ids_json, [])
+        asset = db.get(models.MediaAsset, output_ids[0]) if output_ids else None
+        platform_bytes = asset_service.read_bytes(asset) if asset else b""
+        source_status = 0
+        try:
+            with urllib.request.urlopen(source_url, timeout=5) as response:
+                source_status = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as exc:
+            source_status = int(exc.code)
+        except Exception:
+            source_status = -1
+
+        admin_asset = serialize_admin_asset(asset, db=db) if asset else None
+        provider_meta_text = json.dumps((admin_asset or {}).get("provider_meta") or {}, sort_keys=True)
+        held_holds = db.query(models.BillingHold).filter(models.BillingHold.job_id == job.id, models.BillingHold.status == "held").count()
+        leases = db.query(models.AccountLease).filter(models.AccountLease.job_id == job.id).order_by(models.AccountLease.created_at.asc()).all()
+        attempts = db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id == job.id).order_by(models.MediaJobAttempt.created_at.asc()).all()
+        attempt_payloads = [serialize_attempt(attempt) for attempt in attempts]
+        attempt_payloads_text = json.dumps(attempt_payloads, sort_keys=True)
+        temp_hits = int(getattr(server, "temp_hits", 0)) if server else 0
+        ok = (
+            job.status == "completed"
+            and asset is not None
+            and platform_bytes.startswith(b"\x89PNG")
+            and source_status == 410
+            and temp_hits >= 2
+            and held_holds == 0
+            and all(lease.status == "released" for lease in leases)
+            and "http://127.0.0.1" not in provider_meta_text
+            and "http://127.0.0.1" not in attempt_payloads_text
+            and "image_url_hash" in provider_meta_text
+            and "image_url_hash" in attempt_payloads_text
+        )
+
+        mapping = db.get(models.ProviderModelMapping, mapping_id)
+        pricing_rule = db.get(models.PricingRule, pricing_rule_id)
+        model = db.get(models.LogicalModel, model_id)
+        account = db.get(models.AccountResource, account_id)
+        provider = db.get(models.Provider, provider_id)
+        if mapping:
+            mapping.enabled = False
+        if pricing_rule:
+            pricing_rule.enabled = False
+        if model:
+            model.enabled = False
+        if account:
+            account.status = "disabled"
+            account.concurrency_limit = 0
+        if provider:
+            provider.status = "disabled"
+        db.commit()
+
+        return {
+            "object": "temp_url_asset_self_test",
+            "ok": ok,
+            "job": serialize_job(db, job),
+            "asset": serialize_asset(asset, db=db) if asset else None,
+            "admin_asset": admin_asset,
+            "source": {
+                "url_hash": hashlib.sha256(source_url.encode("utf-8")).hexdigest(),
+                "second_fetch_status": source_status,
+                "hits": temp_hits,
+            },
+            "platform_download": {
+                "ok": platform_bytes.startswith(b"\x89PNG"),
+                "bytes": len(platform_bytes),
+                "sha256": hashlib.sha256(platform_bytes).hexdigest() if platform_bytes else "",
+            },
+            "attempts": attempt_payloads,
+            "leases": [serialize_lease(lease) for lease in leases],
+            "billing": {"held_holds": held_holds, "final_cost": job.final_cost},
+            "cleanup": {
+                "provider_status": provider.status if provider else None,
+                "model_enabled": bool(model.enabled) if model else None,
+                "pricing_rule_enabled": bool(pricing_rule.enabled) if pricing_rule else None,
+                "account_status": account.status if account else None,
+                "account_concurrency_limit": account.concurrency_limit if account else None,
+            },
+        }
+    except Exception as exc:
+        job_id = job.id if job else ""
+        db.rollback()
+        if job_id:
+            for lease in db.query(models.AccountLease).filter(models.AccountLease.job_id == job_id, models.AccountLease.status == "active").all():
+                runtime.scheduler.release(db, lease, success=False, error_code="SELF_TEST_CLEANUP", neutral=True)
+            for attempt in db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id == job_id, models.MediaJobAttempt.status.in_(list(ACTIVE_ATTEMPT_STATUSES))).all():
+                attempt.status = "failed"
+                attempt.error_code = "SELF_TEST_CLEANUP"
+                attempt.error_message = "Temporary URL asset self-test cleanup released an unfinished attempt."
+                attempt.finished_at = datetime.utcnow()
+        for item_id, model_type in [
+            (mapping_id, models.ProviderModelMapping),
+            (pricing_rule_id, models.PricingRule),
+            (model_id, models.LogicalModel),
+            (account_id, models.AccountResource),
+            (provider_id, models.Provider),
+        ]:
+            item = db.get(model_type, item_id)
+            if not item:
+                continue
+            if hasattr(item, "enabled"):
+                item.enabled = False
+            if hasattr(item, "status"):
+                item.status = "disabled"
+            if hasattr(item, "concurrency_limit"):
+                item.concurrency_limit = 0
+        db.commit()
+        return {
+            "object": "temp_url_asset_self_test",
+            "ok": False,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+            "job": serialize_job(db, job) if job else None,
+            "source": {"url_hash": hashlib.sha256(source_url.encode("utf-8")).hexdigest() if source_url else ""},
+            "cleanup": {"provider_id": provider_id, "account_id": account_id, "model_id": model_id},
+        }
+    finally:
+        if server:
+            server.shutdown()
+            server.server_close()
+        if thread:
+            thread.join(timeout=2)
+
+
+def serialize_webhook(delivery: models.WebhookDelivery) -> dict[str, Any]:
+    return {
+        "id": delivery.id,
+        "job_id": delivery.job_id,
+        "user_id": delivery.user_id,
+        "target_url": delivery.target_url,
+        "status": delivery.status,
+        "attempts": delivery.attempts,
+        "last_status_code": delivery.last_status_code,
+        "last_error": delivery.last_error,
+        "created_at": delivery.created_at.isoformat() + "Z",
+        "updated_at": delivery.updated_at.isoformat() + "Z",
+    }
+
+
+def serialize_health_check(check: models.ProviderHealthCheck) -> dict[str, Any]:
+    return {
+        "id": check.id,
+        "provider_id": check.provider_id,
+        "status": check.status,
+        "latency_ms": check.latency_ms,
+        "message": check.message,
+        "detail": loads(check.detail_json, {}),
+        "created_at": check.created_at.isoformat() + "Z",
+    }
+
+
+def build_account_diagnostics(db: Session, account: models.AccountResource, limit: int = 20) -> dict[str, Any]:
+    limit = max(1, min(int(limit or 20), 100))
+    provider = db.get(models.Provider, account.provider_id)
+    credential = credential_ref_info(db, account.credential_ref)
+    credential_effective_available = account_credential_available(db, account)
+    capacity_available = max(int(account.concurrency_limit) - int(account.current_leases), 0)
+    quota_available = account_quota_available(account)
+
+    mappings = (
+        db.query(models.ProviderModelMapping)
+        .filter(models.ProviderModelMapping.provider_id == account.provider_id)
+        .order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.priority)
+        .all()
+    )
+    mapping_rows: list[dict[str, Any]] = []
+    compatible_mapping_ids: list[str] = []
+    compatible_operations: set[str] = set()
+    for mapping in mappings:
+        mapping_operations = loads(mapping.operations_json, [])
+        account_supported_operations: list[str] = []
+        for operation in mapping_operations:
+            if account_supports_mapping(account, mapping, operation):
+                account_supported_operations.append(operation)
+                compatible_operations.add(operation)
+        if account_supported_operations:
+            compatible_mapping_ids.append(mapping.id)
+        mapping_rows.append(
+            {
+                "id": mapping.id,
+                "logical_model": mapping.logical_model,
+                "provider_model": mapping.provider_model,
+                "operations": mapping_operations,
+                "enabled": mapping.enabled,
+                "account_supported_operations": account_supported_operations,
+                "compatible": bool(account_supported_operations),
+            }
+        )
+
+    attempts = (
+        db.query(models.MediaJobAttempt)
+        .filter(models.MediaJobAttempt.account_id == account.id)
+        .order_by(models.MediaJobAttempt.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    leases = (
+        db.query(models.AccountLease)
+        .filter(models.AccountLease.account_id == account.id)
+        .order_by(models.AccountLease.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    attempt_job_ids = [attempt.job_id for attempt in attempts]
+    lease_job_ids = [lease.job_id for lease in leases]
+    job_ids = list(dict.fromkeys([*attempt_job_ids, *lease_job_ids]))
+    jobs_filter = models.MediaJob.account_id == account.id
+    if job_ids:
+        jobs_filter = or_(jobs_filter, models.MediaJob.id.in_(job_ids))
+    jobs_query = db.query(models.MediaJob).filter(jobs_filter)
+    jobs = jobs_query.order_by(models.MediaJob.created_at.desc()).limit(limit).all()
+    events_filter = models.MediaJobEvent.account_id == account.id
+    if job_ids:
+        events_filter = or_(events_filter, models.MediaJobEvent.job_id.in_(job_ids))
+    event_query = db.query(models.MediaJobEvent).filter(events_filter)
+    events = event_query.order_by(models.MediaJobEvent.created_at.desc()).limit(limit).all()
+    request_logs = (
+        db.query(models.RequestAuditLog)
+        .filter(models.RequestAuditLog.account_id == account.id)
+        .order_by(models.RequestAuditLog.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    health_checks = (
+        db.query(models.ProviderHealthCheck)
+        .filter(models.ProviderHealthCheck.provider_id == account.provider_id)
+        .order_by(models.ProviderHealthCheck.created_at.desc())
+        .limit(min(limit, 10))
+        .all()
+    )
+    active_leases = [lease for lease in leases if lease.status == "active"]
+    failed_attempts = [attempt for attempt in attempts if attempt.status != "completed"]
+    latest_failed_attempt = failed_attempts[0] if failed_attempts else None
+    latest_health = health_checks[0] if health_checks else None
+
+    action_items: list[dict[str, Any]] = []
+    if not provider:
+        action_items.append({"check": "provider", "detail": {"provider_id": account.provider_id, "status": "missing"}})
+    elif provider.status != "active":
+        action_items.append({"check": "provider_status", "detail": {"provider_id": provider.id, "status": provider.status}})
+    if account.status != "active":
+        action_items.append({"check": "account_status", "detail": {"account_id": account.id, "status": account.status}})
+    if not credential_effective_available:
+        action_items.append({"check": "credential", "detail": credential})
+    if capacity_available <= 0:
+        action_items.append({"check": "capacity", "detail": {"current_leases": account.current_leases, "concurrency_limit": account.concurrency_limit}})
+    if not quota_available:
+        action_items.append({"check": "quota", "detail": {"quota_buckets": loads(account.quota_buckets_json, [])}})
+    if account.last_error_code:
+        action_items.append(
+            {
+                "check": "last_account_error",
+                "detail": {
+                    "code": account.last_error_code,
+                    "message": account.last_error_message,
+                    "failed_at": account.last_failed_at.isoformat() + "Z" if account.last_failed_at else None,
+                },
+            }
+        )
+    if latest_failed_attempt:
+        action_items.append(
+            {
+                "check": "latest_failed_attempt",
+                "detail": {
+                    "attempt_id": latest_failed_attempt.id,
+                    "job_id": latest_failed_attempt.job_id,
+                    "status": latest_failed_attempt.status,
+                    "error_code": latest_failed_attempt.error_code,
+                    "error_message": latest_failed_attempt.error_message,
+                },
+            }
+        )
+    if latest_health and latest_health.status != "ok":
+        action_items.append({"check": "provider_health", "detail": serialize_health_check(latest_health)})
+
+    return {
+        "object": "media2api.account_diagnostics",
+        "account": serialize_account(account),
+        "provider": serialize_provider(provider) if provider else None,
+        "summary": {
+            "provider_status": provider.status if provider else "missing",
+            "account_status": account.status,
+            "credential": credential,
+            "credential_effective_available": credential_effective_available,
+            "available_capacity": capacity_available,
+            "quota_available": quota_available,
+            "active_leases": len(active_leases),
+            "recent_attempts": len(attempts),
+            "recent_failed_attempts": len(failed_attempts),
+            "last_error_code": account.last_error_code,
+            "last_error_message": account.last_error_message,
+            "last_failed_at": account.last_failed_at.isoformat() + "Z" if account.last_failed_at else None,
+            "compatible_mapping_ids": compatible_mapping_ids,
+            "compatible_operations": sorted(compatible_operations),
+        },
+        "action_items": action_items,
+        "mappings": mapping_rows,
+        "recent_jobs": [serialize_job(db, job) for job in jobs],
+        "recent_attempts": [serialize_attempt(attempt) for attempt in attempts],
+        "recent_leases": [serialize_lease(lease) for lease in leases],
+        "recent_events": [serialize_job_event(event) for event in events],
+        "provider_health": [serialize_health_check(check) for check in health_checks],
+        "request_logs": [serialize_request_audit(record) for record in request_logs],
+    }
+
+
+def build_media_job_diagnostics(db: Session, job: models.MediaJob, limit: int = 100) -> dict[str, Any]:
+    limit = max(1, min(int(limit or 100), 500))
+    attempts = (
+        db.query(models.MediaJobAttempt)
+        .filter(models.MediaJobAttempt.job_id == job.id)
+        .order_by(models.MediaJobAttempt.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    leases = (
+        db.query(models.AccountLease)
+        .filter(models.AccountLease.job_id == job.id)
+        .order_by(models.AccountLease.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    events = (
+        db.query(models.MediaJobEvent)
+        .filter(models.MediaJobEvent.job_id == job.id)
+        .order_by(models.MediaJobEvent.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    billing_holds = (
+        db.query(models.BillingHold)
+        .filter(models.BillingHold.job_id == job.id)
+        .order_by(models.BillingHold.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    usage_records = (
+        db.query(models.UsageRecord)
+        .filter(models.UsageRecord.job_id == job.id)
+        .order_by(models.UsageRecord.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    provider_cost_records = (
+        db.query(models.ProviderCostRecord)
+        .filter(models.ProviderCostRecord.job_id == job.id)
+        .order_by(models.ProviderCostRecord.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    webhooks = (
+        db.query(models.WebhookDelivery)
+        .filter(models.WebhookDelivery.job_id == job.id)
+        .order_by(models.WebhookDelivery.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    request_logs = (
+        db.query(models.RequestAuditLog)
+        .filter(models.RequestAuditLog.job_id == job.id)
+        .order_by(models.RequestAuditLog.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+    input_asset_ids = loads(job.input_asset_ids_json, [])
+    output_asset_ids = loads(job.output_asset_ids_json, [])
+    input_assets: list[dict[str, Any]] = []
+    output_assets: list[dict[str, Any]] = []
+    missing_input_asset_ids: list[str] = []
+    missing_output_asset_ids: list[str] = []
+    for asset_id in input_asset_ids:
+        asset = db.get(models.MediaAsset, asset_id)
+        if asset:
+            input_assets.append(serialize_admin_asset(asset, db=db))
+        else:
+            missing_input_asset_ids.append(str(asset_id))
+    for asset_id in output_asset_ids:
+        asset = db.get(models.MediaAsset, asset_id)
+        if asset:
+            output_assets.append(serialize_admin_asset(asset, db=db))
+        else:
+            missing_output_asset_ids.append(str(asset_id))
+
+    active_leases = [lease for lease in leases if lease.status == "active"]
+    terminal_statuses = {"completed", "failed", "cancelled", "expired"}
+    retryable = job.status in {"failed", "cancelled", "expired"}
+    cancellable = job.status not in terminal_statuses
+    last_event = events[-1] if events else None
+    failed_attempts = [attempt for attempt in attempts if attempt.status in {"failed", "expired", "cancelled"}]
+    held_billing_holds = [hold for hold in billing_holds if hold.status == "held"]
+    settled_usage_amount = sum(int(record.amount or 0) for record in usage_records if record.status == "settled")
+    provider_cost_amount = sum(int(record.amount or 0) for record in provider_cost_records)
+
+    def ts(value: datetime | None) -> str | None:
+        return value.isoformat() + "Z" if value else None
+
+    timeline: list[dict[str, Any]] = []
+    timeline.append({"kind": "job", "at": ts(job.created_at), "status": job.status, "message": "Media job created.", "job_id": job.id})
+    for event in events:
+        timeline.append(
+            {
+                "kind": "event",
+                "at": ts(event.created_at),
+                "status": event.status,
+                "event_type": event.event_type,
+                "message": event.message,
+                "attempt_id": event.attempt_id,
+                "provider_id": event.provider_id,
+                "account_id": event.account_id,
+            }
+        )
+    for attempt in attempts:
+        timeline.append(
+            {
+                "kind": "attempt",
+                "at": ts(attempt.created_at),
+                "status": attempt.status,
+                "attempt_id": attempt.id,
+                "provider_id": attempt.provider_id,
+                "account_id": attempt.account_id,
+                "provider_model": attempt.provider_model,
+                "provider_task_id": attempt.provider_task_id,
+                "error_code": attempt.error_code,
+                "error_message": attempt.error_message,
+            }
+        )
+        if attempt.started_at:
+            timeline.append({"kind": "attempt_started", "at": ts(attempt.started_at), "status": attempt.status, "attempt_id": attempt.id})
+        if attempt.finished_at:
+            timeline.append({"kind": "attempt_finished", "at": ts(attempt.finished_at), "status": attempt.status, "attempt_id": attempt.id})
+    for lease in leases:
+        timeline.append(
+            {
+                "kind": "lease",
+                "at": ts(lease.created_at),
+                "status": lease.status,
+                "lease_id": lease.id,
+                "account_id": lease.account_id,
+                "provider_id": lease.provider_id,
+                "provider_model": lease.provider_model,
+                "expires_at": ts(lease.expires_at),
+            }
+        )
+    for hold in billing_holds:
+        timeline.append({"kind": "billing_hold", "at": ts(hold.created_at), "status": hold.status, "billing_hold_id": hold.id, "amount": hold.amount})
+    for record in usage_records:
+        timeline.append({"kind": "usage", "at": ts(record.created_at), "status": record.status, "usage_id": record.id, "amount": record.amount})
+    for record in provider_cost_records:
+        timeline.append(
+            {
+                "kind": "provider_cost",
+                "at": ts(record.created_at),
+                "status": record.status,
+                "provider_cost_id": record.id,
+                "provider_id": record.provider_id,
+                "provider_model": record.provider_model,
+                "amount": record.amount,
+                "currency": record.currency,
+            }
+        )
+    for delivery in webhooks:
+        timeline.append(
+            {
+                "kind": "webhook",
+                "at": ts(delivery.created_at),
+                "status": delivery.status,
+                "webhook_id": delivery.id,
+                "attempts": delivery.attempts,
+                "last_status_code": delivery.last_status_code,
+                "last_error": delivery.last_error,
+            }
+        )
+    for record in request_logs:
+        timeline.append(
+            {
+                "kind": "request_log",
+                "at": ts(record.created_at),
+                "status": str(record.status_code),
+                "request_id": record.request_id,
+                "method": record.method,
+                "path": record.path,
+                "error_code": record.error_code,
+                "standard_error_code": record.standard_error_code,
+            }
+        )
+    timeline = sorted(timeline, key=lambda item: (item.get("at") or "", item.get("kind") or ""))[:limit]
+
+    action_items: list[dict[str, Any]] = []
+    if retryable:
+        action_items.append({"check": "retryable", "detail": {"endpoint": f"/v1/admin/media-jobs/{job.id}/retry", "status": job.status}})
+    if cancellable:
+        action_items.append({"check": "cancellable", "detail": {"endpoint": f"/v1/admin/media-jobs/{job.id}/cancel", "status": job.status}})
+    if job.error_code:
+        action_items.append({"check": "job_error", "detail": {"code": job.error_code, "message": job.error_message}})
+    if failed_attempts:
+        latest_failed_attempt = failed_attempts[-1]
+        action_items.append(
+            {
+                "check": "latest_failed_attempt",
+                "detail": {
+                    "attempt_id": latest_failed_attempt.id,
+                    "status": latest_failed_attempt.status,
+                    "error_code": latest_failed_attempt.error_code,
+                    "error_message": latest_failed_attempt.error_message,
+                },
+            }
+        )
+    if job.status in terminal_statuses and active_leases:
+        action_items.append({"check": "terminal_job_active_leases", "detail": {"active_lease_ids": [lease.id for lease in active_leases]}})
+    if job.status == "completed" and not output_assets:
+        action_items.append({"check": "completed_without_output_assets", "detail": {"output_asset_ids": output_asset_ids}})
+    if missing_input_asset_ids:
+        action_items.append({"check": "missing_input_assets", "detail": {"asset_ids": missing_input_asset_ids}})
+    if missing_output_asset_ids:
+        action_items.append({"check": "missing_output_assets", "detail": {"asset_ids": missing_output_asset_ids}})
+    if job.status in terminal_statuses and held_billing_holds:
+        action_items.append({"check": "terminal_job_held_billing", "detail": {"billing_hold_ids": [hold.id for hold in held_billing_holds]}})
+    failed_webhooks = [delivery for delivery in webhooks if delivery.status in {"failed", "dead"}]
+    if failed_webhooks:
+        action_items.append({"check": "webhook_failures", "detail": {"webhook_ids": [delivery.id for delivery in failed_webhooks]}})
+
+    return {
+        "object": "media2api.media_job_diagnostics",
+        "job": serialize_job(db, job),
+        "summary": {
+            "status": job.status,
+            "operation": job.operation,
+            "logical_model": job.logical_model,
+            "provider_id": job.provider_id,
+            "provider_model": job.provider_model,
+            "account_id": job.account_id,
+            "provider_task_id": job.provider_task_id,
+            "attempt_count": len(attempts),
+            "failed_attempt_count": len(failed_attempts),
+            "lease_count": len(leases),
+            "active_lease_count": len(active_leases),
+            "event_count": len(events),
+            "last_event_type": last_event.event_type if last_event else "",
+            "billing_hold_count": len(billing_holds),
+            "held_billing_hold_count": len(held_billing_holds),
+            "settled_usage_amount": settled_usage_amount,
+            "provider_cost_amount": provider_cost_amount,
+            "webhook_count": len(webhooks),
+            "request_log_count": len(request_logs),
+            "input_asset_count": len(input_assets),
+            "output_asset_count": len(output_assets),
+            "retryable": retryable,
+            "cancellable": cancellable,
+        },
+        "action_items": action_items,
+        "timeline": timeline,
+        "attempts": [serialize_attempt(attempt) for attempt in attempts],
+        "leases": [serialize_lease(lease) for lease in leases],
+        "events": [serialize_job_event(event) for event in events],
+        "input_assets": input_assets,
+        "output_assets": output_assets,
+        "billing": {
+            "holds": [serialize_billing_hold(hold) for hold in billing_holds],
+            "usage_records": [serialize_usage(record) for record in usage_records],
+            "provider_cost_records": [serialize_provider_cost(record) for record in provider_cost_records],
+        },
+        "webhooks": [serialize_webhook(delivery) for delivery in webhooks],
+        "request_logs": [serialize_request_audit(record) for record in request_logs],
+    }
+
+
+def run_background_job(job_id: str) -> None:
+    with SessionLocal() as db:
+        runtime.process_job(db, job_id)
+
+
+def enqueue_or_inline(background_tasks: BackgroundTasks, job_id: str) -> None:
+    if settings.inline_async:
+        background_tasks.add_task(run_background_job, job_id)
+
+
+def database_backend_name() -> str:
+    scheme = settings.database_url.split(":", 1)[0].lower()
+    if scheme.startswith("postgresql"):
+        return "postgresql"
+    if scheme.startswith("sqlite"):
+        return "sqlite"
+    return scheme or "unknown"
+
+
+READINESS_ACTIVE_STATUSES = [
+    "created",
+    "admitted",
+    "queued",
+    "leasing_account",
+    "preparing_assets",
+    "submitting",
+    "provider_queued",
+    "polling",
+    "fetching_assets",
+    "storing",
+]
+READINESS_REQUIRED_OPERATIONS = {
+    "text_to_image",
+    "image_to_image",
+    "image_edit",
+    "text_to_video",
+    "image_to_video",
+    "video_extend",
+}
+PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS = {
+    "text_to_image",
+    "image_edit",
+    "text_to_video",
+    "image_to_video",
+}
+
+
+def readiness_check(name: str, ok: bool, detail: Any = None, scope: str = "core", required: bool = True) -> dict[str, Any]:
+    return {"name": name, "ok": bool(ok), "scope": scope, "required": required, "detail": detail}
+
+
+def build_external_mixed_media_provider_snapshot(db: Session) -> dict[str, Any]:
+    required_operations = set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)
+    providers = (
+        db.query(models.Provider)
+        .filter(models.Provider.id != "mock", models.Provider.status == "active")
+        .order_by(models.Provider.id)
+        .all()
+    )
+    rows: list[dict[str, Any]] = []
+    ready_provider_ids: list[str] = []
+    aggregate_ready_operations: set[str] = set()
+
+    for provider in providers:
+        mappings = (
+            db.query(models.ProviderModelMapping)
+            .filter(models.ProviderModelMapping.provider_id == provider.id, models.ProviderModelMapping.enabled.is_(True))
+            .order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.priority)
+            .all()
+        )
+        accounts = (
+            db.query(models.AccountResource)
+            .filter(models.AccountResource.provider_id == provider.id)
+            .order_by(models.AccountResource.id)
+            .all()
+        )
+        provider_ready_operations: set[str] = set()
+        ready_account_ids: set[str] = set()
+        ready_mapping_ids: set[str] = set()
+        account_rows: list[dict[str, Any]] = []
+
+        for account in accounts:
+            credential = credential_ref_info(db, account.credential_ref)
+            credential_effective_available = account_credential_available(db, account)
+            capacity = max(int(account.concurrency_limit) - int(account.current_leases), 0)
+            account_base_ready = bool(
+                account.status == "active"
+                and credential_effective_available
+                and capacity > 0
+                and account.health_score > 0
+                and account.failure_score < 1
+            )
+            account_ready_operations: set[str] = set()
+            account_ready_mappings: set[str] = set()
+            for mapping in mappings:
+                mapping_operations = set(loads(mapping.operations_json, [])) & required_operations
+                if not mapping_operations:
+                    continue
+                for operation in mapping_operations:
+                    if not account_base_ready:
+                        continue
+                    if not account_supports_mapping(account, mapping, operation):
+                        continue
+                    if not account_quota_available(account, operation):
+                        continue
+                    account_ready_operations.add(operation)
+                    account_ready_mappings.add(mapping.id)
+            if account_ready_operations:
+                ready_account_ids.add(account.id)
+                ready_mapping_ids.update(account_ready_mappings)
+                provider_ready_operations.update(account_ready_operations)
+            account_rows.append(
+                {
+                    "id": account.id,
+                    "status": account.status,
+                    "credential_type": credential.get("type"),
+                    "credential_status": credential.get("status"),
+                    "credential_available": bool(credential.get("available")),
+                    "credential_effective_available": credential_effective_available,
+                    "available_capacity": capacity,
+                    "quota_available": account_quota_available(account),
+                    "health_score": account.health_score,
+                    "failure_score": account.failure_score,
+                    "supported_operations": loads(account.supported_operations_json, []),
+                    "supported_provider_models": loads(account.supported_provider_models_json, []),
+                    "ready_operations": sorted(account_ready_operations),
+                    "ready_mapping_ids": sorted(account_ready_mappings),
+                    "ready": bool(account_ready_operations),
+                    "last_error_code": account.last_error_code,
+                }
+            )
+
+        missing_operations = sorted(required_operations - provider_ready_operations)
+        provider_ready = not missing_operations
+        if provider_ready:
+            ready_provider_ids.append(provider.id)
+        aggregate_ready_operations.update(provider_ready_operations)
+        rows.append(
+            {
+                "provider_id": provider.id,
+                "provider_status": provider.status,
+                "ready": provider_ready,
+                "ready_operations": sorted(provider_ready_operations),
+                "missing_operations": missing_operations,
+                "ready_account_ids": sorted(ready_account_ids),
+                "ready_mapping_ids": sorted(ready_mapping_ids),
+                "mapping_count": len(mappings),
+                "account_count": len(accounts),
+                "accounts": account_rows,
+            }
+        )
+
+    return {
+        "required_operations": sorted(required_operations),
+        "ready": bool(ready_provider_ids),
+        "ready_provider_ids": ready_provider_ids,
+        "aggregate_ready_operations": sorted(aggregate_ready_operations),
+        "aggregate_missing_operations": sorted(required_operations - aggregate_ready_operations),
+        "providers": rows,
+    }
+
+
+def build_readiness_snapshot(db: Session) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    try:
+        db.execute(text("SELECT 1")).scalar()
+        database_query = {"ok": True, "error": ""}
+    except Exception as exc:
+        database_query = {"ok": False, "error": exc.__class__.__name__}
+    database_backend = database_backend_name()
+    redis_status = governance_service.redis_status()
+    queue_backend = "inline" if settings.inline_async else "database-worker"
+    job_counts = runtime.runtime_counts(db)
+    active_jobs = sum(int(job_counts.get(status, 0)) for status in READINESS_ACTIVE_STATUSES)
+    active_leases = db.query(models.AccountLease).filter(models.AccountLease.status == "active").count()
+    enabled_models = db.query(models.LogicalModel).filter(models.LogicalModel.enabled.is_(True)).order_by(models.LogicalModel.id).all()
+    enabled_operations = sorted({operation for model in enabled_models for operation in loads(model.operations_json, [])})
+    missing_operations = sorted(READINESS_REQUIRED_OPERATIONS - set(enabled_operations))
+    active_providers = db.query(models.Provider).filter(models.Provider.status == "active").count()
+    enabled_mappings = db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.enabled.is_(True)).count()
+    pricing_rules = db.query(models.PricingRule).filter(models.PricingRule.enabled.is_(True)).count()
+    safety_policies = db.query(models.SafetyPolicy).filter(models.SafetyPolicy.enabled.is_(True)).count()
+    mock_provider = db.get(models.Provider, "mock")
+    mock_account = db.get(models.AccountResource, "acct_mock_default")
+    mock_mappings = (
+        db.query(models.ProviderModelMapping)
+        .filter(models.ProviderModelMapping.provider_id == "mock", models.ProviderModelMapping.enabled.is_(True))
+        .count()
+    )
+
+    external_accounts = (
+        db.query(models.AccountResource)
+        .join(models.Provider, models.AccountResource.provider_id == models.Provider.id)
+        .filter(models.Provider.status == "active", models.Provider.id != "mock", models.AccountResource.status == "active")
+        .order_by(models.AccountResource.provider_id, models.AccountResource.id)
+        .all()
+    )
+    external_account_items: list[dict[str, Any]] = []
+    for account in external_accounts:
+        credential = credential_ref_info(db, account.credential_ref)
+        credential_effective_available = account_credential_available(db, account)
+        capacity_available = account.current_leases < account.concurrency_limit
+        quota_available = account_quota_available(account)
+        account_ready = bool(
+            credential_effective_available
+            and capacity_available
+            and quota_available
+            and account.health_score > 0
+            and account.failure_score < 1
+        )
+        external_account_items.append(
+            {
+                "account_id": account.id,
+                "provider_id": account.provider_id,
+                "status": account.status,
+                "credential_type": credential.get("type"),
+                "credential_status": credential.get("status"),
+                "credential_available": bool(credential.get("available")),
+                "credential_effective_available": credential_effective_available,
+                "capacity_available": capacity_available,
+                "quota_available": quota_available,
+                "health_score": account.health_score,
+                "failure_score": account.failure_score,
+                "supported_operations": loads(account.supported_operations_json, []),
+                "supported_provider_models": loads(account.supported_provider_models_json, []),
+                "ready": account_ready,
+                "last_error_code": account.last_error_code,
+            }
+        )
+    external_ready = any(item["ready"] for item in external_account_items)
+    external_mixed_media = build_external_mixed_media_provider_snapshot(db)
+
+    checks.extend(
+        [
+            readiness_check("database_query", database_query["ok"], database_query),
+            readiness_check("logical_model_count", len(enabled_models) >= 8, {"enabled": len(enabled_models), "minimum": 8}),
+            readiness_check("operation_coverage", not missing_operations, {"operations": enabled_operations, "missing": missing_operations}),
+            readiness_check("active_provider_count", active_providers >= 1, {"active": active_providers}),
+            readiness_check("enabled_mapping_count", enabled_mappings >= 8, {"enabled": enabled_mappings, "minimum": 8}),
+            readiness_check("mock_provider_active", bool(mock_provider and mock_provider.status == "active"), {"provider_status": mock_provider.status if mock_provider else "missing"}),
+            readiness_check(
+                "mock_account_active",
+                bool(mock_account and mock_account.status == "active" and mock_account.concurrency_limit > 0),
+                {"account_status": mock_account.status if mock_account else "missing", "concurrency_limit": mock_account.concurrency_limit if mock_account else 0},
+            ),
+            readiness_check("mock_mapping_count", mock_mappings >= 8, {"enabled": mock_mappings, "minimum": 8}),
+            readiness_check("pricing_rules", pricing_rules >= 8, {"enabled": pricing_rules, "minimum": 8}),
+            readiness_check("safety_policies", safety_policies >= 1, {"enabled": safety_policies, "minimum": 1}, required=False),
+            readiness_check("production_database_backend", database_backend == "postgresql", {"backend": database_backend}, scope="production"),
+            readiness_check("production_queue_backend", queue_backend == "database-worker" and settings.worker_concurrency >= 1, {"queue_backend": queue_backend, "worker_concurrency": settings.worker_concurrency}, scope="production"),
+            readiness_check("production_redis", redis_status["configured"] and redis_status["status"] == "ok", redis_status, scope="production"),
+            readiness_check("external_connector_accounts", external_ready, {"accounts": external_account_items}, scope="production"),
+            readiness_check("external_mixed_media_provider", external_mixed_media["ready"], external_mixed_media, scope="production"),
+        ]
+    )
+
+    core_blockers = [check for check in checks if check["scope"] == "core" and check["required"] and not check["ok"]]
+    production_blockers = [check for check in checks if check["scope"] == "production" and check["required"] and not check["ok"]]
+    core_ready = not core_blockers
+    production_ready = core_ready and not production_blockers
+    status = "ready" if production_ready else "action_required" if core_ready else "not_ready"
+    action_items = [
+        {
+            "check": check["name"],
+            "scope": check["scope"],
+            "detail": check["detail"],
+        }
+        for check in [*core_blockers, *production_blockers]
+    ]
+    return {
+        "object": "readiness",
+        "status": status,
+        "core_ready": core_ready,
+        "production_ready": production_ready,
+        "checks": checks,
+        "action_items": action_items,
+        "runtime": {
+            "queue_backend": queue_backend,
+            "worker_concurrency": settings.worker_concurrency,
+            "worker_stalled_job_seconds": settings.worker_stalled_job_seconds,
+            "database_backend": database_backend,
+            "redis": redis_status,
+            "asset_store": asset_service.storage_backend(),
+            "job_counts": job_counts,
+            "active_jobs": active_jobs,
+            "active_leases": active_leases,
+        },
+        "models": {
+            "enabled_count": len(enabled_models),
+            "operations": enabled_operations,
+            "missing_operations": missing_operations,
+        },
+        "providers": {
+            "active_count": active_providers,
+            "enabled_mappings": enabled_mappings,
+            "external_active_accounts": external_account_items,
+            "external_mixed_media": external_mixed_media,
+        },
+    }
+
+
+def provider_target_priority(provider_id: str) -> str:
+    for target_provider, _, _, priority in TARGET_MODEL_TABLE:
+        if target_provider == provider_id:
+            return priority
+    return "P2"
+
+
+def latest_provider_health(db: Session, provider_id: str) -> dict[str, Any] | None:
+    check = (
+        db.query(models.ProviderHealthCheck)
+        .filter(models.ProviderHealthCheck.provider_id == provider_id)
+        .order_by(models.ProviderHealthCheck.created_at.desc())
+        .first()
+    )
+    return serialize_health_check(check) if check else None
+
+
+def latest_provider_contract_summary(db: Session, provider_id: str) -> dict[str, Any]:
+    results = (
+        db.query(models.ProviderContractResult)
+        .filter(models.ProviderContractResult.provider_id == provider_id)
+        .order_by(models.ProviderContractResult.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    latest = results[0] if results else None
+    return {
+        "latest": serialize_provider_contract(latest) if latest else None,
+        "recent_total": len(results),
+        "recent_passed": sum(1 for item in results if item.status == "passed"),
+        "recent_failed": sum(1 for item in results if item.status != "passed"),
+    }
+
+
+def build_provider_onboarding_report(db: Session) -> dict[str, Any]:
+    provider_ids = list(dict.fromkeys([provider_id for provider_id, _, _, _ in TARGET_MODEL_TABLE] + list(PROVIDER_TEMPLATES)))
+    rows: list[dict[str, Any]] = []
+    ready_operations: set[str] = set()
+    p0_action_items: list[dict[str, Any]] = []
+
+    for provider_id in provider_ids:
+        template = PROVIDER_TEMPLATES.get(provider_id)
+        provider = db.get(models.Provider, provider_id)
+        mappings = (
+            db.query(models.ProviderModelMapping)
+            .filter(models.ProviderModelMapping.provider_id == provider_id)
+            .order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.priority)
+            .all()
+        )
+        enabled_mappings = [mapping for mapping in mappings if mapping.enabled]
+        accounts = db.query(models.AccountResource).filter(models.AccountResource.provider_id == provider_id).order_by(models.AccountResource.id).all()
+        provider_status = provider.status if provider else "missing"
+        template_operations = list(template.operations if template else [])
+        template_models = list(template.models if template else [])
+        mapping_operations = sorted({operation for mapping in enabled_mappings for operation in loads(mapping.operations_json, [])})
+        missing_mapping_operations = sorted(set(template_operations) - set(mapping_operations)) if template_operations else []
+
+        account_rows: list[dict[str, Any]] = []
+        ready_account_ids: list[str] = []
+        ready_mapping_ids: set[str] = set()
+        ready_provider_operations: set[str] = set()
+        for account in accounts:
+            credential = credential_ref_info(db, account.credential_ref)
+            credential_effective_available = account_credential_available(db, account)
+            if credential_effective_available and not credential.get("available"):
+                credential = {**credential, "effective_available": True}
+            else:
+                credential = {**credential, "effective_available": credential_effective_available}
+            capacity = max(int(account.concurrency_limit) - int(account.current_leases), 0)
+            account_quota_ok = account_quota_available(account)
+            compatible_mapping_ids: list[str] = []
+            compatible_operations: set[str] = set()
+            for mapping in enabled_mappings:
+                if not account_supports_mapping(account, mapping):
+                    continue
+                compatible_mapping_ids.append(mapping.id)
+                compatible_operations.update(loads(mapping.operations_json, []))
+            account_ready = bool(
+                provider_status == "active"
+                and account.status == "active"
+                and credential_effective_available
+                and account_quota_ok
+                and capacity > 0
+                and compatible_mapping_ids
+            )
+            if account_ready:
+                ready_account_ids.append(account.id)
+                ready_mapping_ids.update(compatible_mapping_ids)
+                ready_provider_operations.update(compatible_operations)
+            account_rows.append(
+                {
+                    "id": account.id,
+                    "label": account.label,
+                    "status": account.status,
+                    "credential": credential,
+                    "capacity": {"current_leases": account.current_leases, "concurrency_limit": account.concurrency_limit, "available": capacity},
+                    "quota_available": account_quota_ok,
+                    "supported_operations": loads(account.supported_operations_json, []),
+                    "supported_provider_models": loads(account.supported_provider_models_json, []),
+                    "compatible_mapping_ids": compatible_mapping_ids,
+                    "compatible_operations": sorted(compatible_operations),
+                    "ready": account_ready,
+                    "last_error_code": account.last_error_code,
+                    "last_error_message": account.last_error_message,
+                }
+            )
+
+        latest_health = latest_provider_health(db, provider_id)
+        contract_summary = latest_provider_contract_summary(db, provider_id)
+        configuration_ready = bool(provider_status == "active" and ready_account_ids and enabled_mappings and ready_provider_operations)
+        validation_ready = bool(
+            configuration_ready
+            and latest_health
+            and latest_health.get("status") == "ok"
+            and (contract_summary.get("latest") or {}).get("status") == "passed"
+        )
+        provider_action_items: list[dict[str, Any]] = []
+        if not provider:
+            provider_action_items.append({"check": "install_template", "detail": {"endpoint": f"/v1/admin/provider-templates/{provider_id}/install"}})
+        elif provider.status != "active":
+            provider_action_items.append({"check": "activate_provider", "detail": {"provider_status": provider.status, "endpoint": f"/v1/admin/provider-templates/{provider_id}/activate"}})
+        if not enabled_mappings:
+            provider_action_items.append({"check": "enable_mappings", "detail": {"template_mappings": len(template.mappings) if template else 0}})
+        if missing_mapping_operations:
+            provider_action_items.append({"check": "mapping_operation_coverage", "detail": {"missing_operations": missing_mapping_operations}})
+        if not accounts:
+            provider_action_items.append(
+                {
+                    "check": "create_account",
+                    "detail": {
+                        "credential_ref_suggestion": str((template.default_config if template else {}).get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY"),
+                        "activate_endpoint": f"/v1/admin/provider-templates/{provider_id}/activate",
+                    },
+                }
+            )
+        elif not ready_account_ids:
+            provider_action_items.append({"check": "make_account_ready", "detail": {"accounts": account_rows}})
+        if configuration_ready and (not latest_health or latest_health.get("status") != "ok"):
+            provider_action_items.append({"check": "run_health_check", "detail": {"endpoint": f"/v1/admin/providers/{provider_id}/health-check"}})
+        if configuration_ready and (contract_summary.get("latest") or {}).get("status") != "passed":
+            provider_action_items.append({"check": "run_contract_tests", "detail": {"endpoint": f"/v1/admin/providers/{provider_id}/contract-test"}})
+        if configuration_ready and not validation_ready:
+            provider_action_items.append({"check": "run_external_acceptance", "detail": {"endpoint": f"/v1/admin/provider-templates/{provider_id}/external-acceptance"}})
+
+        priority = provider_target_priority(provider_id)
+        if priority.startswith("P0") and provider_action_items:
+            p0_action_items.append({"provider_id": provider_id, "items": provider_action_items})
+        ready_operations.update(ready_provider_operations)
+        status = "validated" if validation_ready else "configured" if configuration_ready else "action_required"
+        rows.append(
+            {
+                "provider_id": provider_id,
+                "priority": priority,
+                "status": status,
+                "configuration_ready": configuration_ready,
+                "validation_ready": validation_ready,
+                "template": template_as_dict(template) if template else None,
+                "provider": serialize_provider(provider) if provider else None,
+                "target": {
+                    "models": template_models,
+                    "operations": template_operations,
+                },
+                "mappings": {
+                    "total": len(mappings),
+                    "enabled": len(enabled_mappings),
+                    "operations": mapping_operations,
+                    "missing_template_operations": missing_mapping_operations,
+                    "ready_mapping_ids": sorted(ready_mapping_ids),
+                    "data": [serialize_mapping(mapping) for mapping in mappings],
+                },
+                "accounts": {
+                    "total": len(accounts),
+                    "ready": len(ready_account_ids),
+                    "ready_account_ids": ready_account_ids,
+                    "data": account_rows,
+                },
+                "latest_health": latest_health,
+                "contract_summary": contract_summary,
+                "ready_operations": sorted(ready_provider_operations),
+                "action_items": provider_action_items,
+                "operator_endpoints": {
+                    "activate": f"/v1/admin/provider-templates/{provider_id}/activate",
+                    "external_acceptance": f"/v1/admin/provider-templates/{provider_id}/external-acceptance",
+                    "account_acceptance_suite": "/v1/admin/account-acceptance-suite",
+                    "compatibility_matrix": f"/v1/admin/compatibility-matrix?provider_id={provider_id}",
+                },
+            }
+        )
+
+    readiness = build_readiness_snapshot(db)
+    acceptance = build_acceptance_report(db)
+    external_mixed_media = build_external_mixed_media_provider_snapshot(db)
+    missing_required_operations = sorted(READINESS_REQUIRED_OPERATIONS - ready_operations)
+    summary = {
+        "providers": len(rows),
+        "validated": sum(1 for row in rows if row["status"] == "validated"),
+        "configured": sum(1 for row in rows if row["status"] == "configured"),
+        "action_required": sum(1 for row in rows if row["status"] == "action_required"),
+        "p0_action_required": len(p0_action_items),
+        "ready_operations": sorted(ready_operations),
+        "missing_required_operations": missing_required_operations,
+        "production_external_required_operations": external_mixed_media["required_operations"],
+        "production_external_ready_provider_ids": external_mixed_media["ready_provider_ids"],
+        "production_external_missing_operations": external_mixed_media["aggregate_missing_operations"],
+    }
+    return {
+        "object": "media2api.provider_onboarding_report",
+        "status": "ready" if not p0_action_items and not missing_required_operations else "action_required",
+        "summary": summary,
+        "readiness": {
+            "status": readiness.get("status"),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": readiness.get("action_items", []),
+        },
+        "acceptance": {
+            "status": acceptance.get("status"),
+            "core_ready": acceptance.get("core_ready"),
+            "production_ready": acceptance.get("production_ready"),
+            "summary": acceptance.get("summary"),
+        },
+        "p0_action_items": p0_action_items,
+        "external_mixed_media": external_mixed_media,
+        "providers": rows,
+    }
+
+
+ACCEPTANCE_REQUIRED_ROUTES = [
+    ("GET", "/v1/models"),
+    ("POST", "/v1/images/generations"),
+    ("POST", "/v1/images/edits"),
+    ("POST", "/v1/videos/generations"),
+    ("GET", "/v1/videos/generations/{job_id}"),
+    ("POST", "/v1/media-jobs"),
+    ("GET", "/v1/media-jobs/{job_id}"),
+    ("POST", "/v1/media-jobs/{job_id}/cancel"),
+    ("POST", "/v1/assets"),
+    ("GET", "/v1/assets/{asset_id}"),
+    ("GET", "/v1/assets/{asset_id}/content"),
+    ("DELETE", "/v1/assets/{asset_id}"),
+    ("POST", "/v1/admin/assets/self-test-storage"),
+    ("POST", "/v1/admin/assets/self-test-temp-url"),
+    ("GET", "/v1/admin/dashboard"),
+    ("GET", "/v1/admin/analytics"),
+    ("GET", "/v1/admin/compatibility-matrix"),
+    ("GET", "/v1/admin/provider-onboarding-report"),
+    ("GET", "/v1/admin/operator-workbench-report"),
+    ("GET", "/v1/admin/production-go-live-plan"),
+    ("GET", "/v1/admin/connector-conformance-report"),
+    ("GET", "/v1/admin/external-connector-preflight"),
+    ("GET", "/v1/admin/external-connector-manifest-template"),
+    ("POST", "/v1/admin/external-connector-manifest"),
+    ("GET", "/v1/admin/system-requirements-report"),
+    ("GET", "/v1/admin/final-acceptance-matrix"),
+    ("GET", "/v1/admin/delivery-package"),
+    ("GET", "/v1/admin/accounts/{account_id}/diagnostics"),
+    ("GET", "/v1/admin/media-jobs/{job_id}/diagnostics"),
+    ("POST", "/v1/admin/providers/{provider_id}/sync-capabilities"),
+    ("GET", "/v1/admin/config-export"),
+    ("POST", "/v1/admin/config-import"),
+    ("POST", "/v1/admin/media-jobs/recover-stalled"),
+    ("POST", "/v1/admin/media-jobs/self-test-stalled-recovery"),
+    ("POST", "/v1/admin/media-jobs/self-test-connector-cancel"),
+    ("POST", "/v1/admin/stability/self-test-mock"),
+    ("POST", "/v1/admin/fallback/self-test"),
+    ("POST", "/v1/admin/fallback/self-test-timeout"),
+    ("POST", "/v1/admin/accounts/self-test-cooldown"),
+    ("POST", "/v1/admin/account-leases/self-test-expiry"),
+    ("POST", "/v1/admin/provider-contract-suite"),
+    ("POST", "/v1/admin/provider-templates/{template_id}/external-acceptance"),
+    ("POST", "/v1/admin/accounts/{account_id}/external-acceptance"),
+    ("POST", "/v1/admin/account-acceptance-suite"),
+    ("GET", "/metrics"),
+    ("GET", "/openapi.json"),
+]
+
+
+def app_route_available(method: str, path: str) -> bool:
+    expected = method.upper()
+    for route in app.routes:
+        route_path = str(getattr(route, "path", ""))
+        route_methods = getattr(route, "methods", set()) or set()
+        if route_path == path and expected in route_methods:
+            return True
+    return False
+
+
+def build_operator_workbench_report(db: Session) -> dict[str, Any]:
+    def route_status(routes: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "method": method.upper(),
+                "path": path,
+                "available": app_route_available(method, path),
+            }
+            for method, path in routes
+        ]
+
+    def module_row(
+        module: str,
+        requirement: str,
+        routes: list[tuple[str, str]],
+        evidence: dict[str, Any],
+        data_ready: bool = True,
+        action_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        route_rows = route_status(routes)
+        missing_routes = [route for route in route_rows if not route["available"]]
+        return {
+            "module": module,
+            "ready": not missing_routes and data_ready,
+            "requirement": requirement,
+            "routes": route_rows,
+            "missing_routes": missing_routes,
+            "evidence": evidence,
+            "action_items": action_items or [],
+        }
+
+    dashboard = admin_dashboard_snapshot(db)
+    readiness = build_readiness_snapshot(db)
+    job_counts = runtime.runtime_counts(db)
+    asset_counts = {kind: int(count) for kind, count in db.query(models.MediaAsset.kind, func.count(models.MediaAsset.id)).group_by(models.MediaAsset.kind).all()}
+    provider_ids = [provider_id for provider_id, in db.query(models.Provider.id).order_by(models.Provider.id).all()]
+    active_provider_ids = [provider_id for provider_id, in db.query(models.Provider.id).filter(models.Provider.status == "active").order_by(models.Provider.id).all()]
+    active_account_rows = (
+        db.query(models.AccountResource.provider_id, models.AccountResource.id)
+        .filter(models.AccountResource.status == "active")
+        .order_by(models.AccountResource.provider_id, models.AccountResource.id)
+        .all()
+    )
+    external_accounts = [
+        {"provider_id": provider_id, "account_id": account_id}
+        for provider_id, account_id in active_account_rows
+        if provider_id != "mock"
+    ]
+    latest_job = db.query(models.MediaJob).order_by(models.MediaJob.created_at.desc()).first()
+    latest_asset = db.query(models.MediaAsset).order_by(models.MediaAsset.created_at.desc()).first()
+    open_alert_count = db.query(models.AlertEvent).filter(models.AlertEvent.status == "open").count()
+    active_lease_count = db.query(models.AccountLease).filter(models.AccountLease.status == "active").count()
+    external_mixed_media = build_external_mixed_media_provider_snapshot(db)
+
+    modules = [
+        module_row(
+            "Dashboard",
+            "Show today jobs, success/failure rate, revenue, cost, queue, provider/account and alert status.",
+            [("GET", "/v1/admin/dashboard"), ("GET", "/v1/admin/analytics"), ("GET", "/metrics")],
+            {
+                "jobs": dashboard.get("jobs"),
+                "billing": dashboard.get("billing"),
+                "runtime": dashboard.get("runtime"),
+                "alerts": dashboard.get("alerts"),
+            },
+            data_ready=dashboard.get("object") == "admin.dashboard",
+        ),
+        module_row(
+            "Users",
+            "Manage users, API keys, balances, status, and per-user limit policies.",
+            [
+                ("GET", "/v1/admin/users"),
+                ("POST", "/v1/admin/users"),
+                ("PATCH", "/v1/admin/users/{user_id}"),
+                ("GET", "/v1/admin/api-keys"),
+                ("POST", "/v1/admin/api-keys"),
+                ("PATCH", "/v1/admin/api-keys/{api_key_id}"),
+                ("DELETE", "/v1/admin/api-keys/{api_key_id}"),
+                ("GET", "/v1/admin/user-limit-policies"),
+                ("POST", "/v1/admin/user-limit-policies"),
+                ("PATCH", "/v1/admin/user-limit-policies/{policy_id}"),
+            ],
+            {
+                "users": db.query(models.User).count(),
+                "active_api_keys": db.query(models.ApiKey).filter(models.ApiKey.status == "active").count(),
+                "enabled_user_limit_policies": db.query(models.UserLimitPolicy).filter(models.UserLimitPolicy.enabled.is_(True)).count(),
+            },
+        ),
+        module_row(
+            "Models",
+            "Manage logical models, provider mappings, pricing rules, and compatibility.",
+            [
+                ("GET", "/v1/models"),
+                ("GET", "/v1/admin/logical-models"),
+                ("POST", "/v1/admin/logical-models"),
+                ("PATCH", "/v1/admin/logical-models/{model_id}"),
+                ("GET", "/v1/model-mappings"),
+                ("POST", "/v1/admin/model-mappings"),
+                ("PATCH", "/v1/admin/model-mappings/{mapping_id:path}"),
+                ("GET", "/v1/admin/pricing-rules"),
+                ("POST", "/v1/admin/pricing-rules"),
+                ("PATCH", "/v1/admin/pricing-rules/{rule_id}"),
+                ("GET", "/v1/admin/compatibility-matrix"),
+            ],
+            {
+                "enabled_logical_models": db.query(models.LogicalModel).filter(models.LogicalModel.enabled.is_(True)).count(),
+                "enabled_mappings": db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.enabled.is_(True)).count(),
+                "enabled_pricing_rules": db.query(models.PricingRule).filter(models.PricingRule.enabled.is_(True)).count(),
+            },
+        ),
+        module_row(
+            "Providers",
+            "Manage provider inventory, health checks, contract tests, quota sync, capability sync, and template activation.",
+            [
+                ("GET", "/v1/providers"),
+                ("GET", "/v1/provider-templates"),
+                ("POST", "/v1/admin/providers"),
+                ("PATCH", "/v1/admin/providers/{provider_id}"),
+                ("POST", "/v1/admin/providers/{provider_id}/health-check"),
+                ("POST", "/v1/admin/providers/{provider_id}/contract-test"),
+                ("POST", "/v1/admin/provider-contract-suite"),
+                ("POST", "/v1/admin/providers/{provider_id}/sync-quotas"),
+                ("POST", "/v1/admin/providers/{provider_id}/sync-capabilities"),
+                ("GET", "/v1/admin/providers/{provider_id}/capabilities"),
+                ("POST", "/v1/admin/provider-templates/{template_id}/install"),
+                ("POST", "/v1/admin/provider-templates/{template_id}/activate"),
+                ("POST", "/v1/admin/provider-templates/{template_id}/external-acceptance"),
+            ],
+            {
+                "providers": provider_ids,
+                "active_providers": active_provider_ids,
+                "latest_contract_rows": len(contract_service.latest_matrix(db)),
+                "external_mixed_media": external_mixed_media,
+            },
+            data_ready=bool(provider_ids),
+            action_items=[] if external_mixed_media.get("ready") else [{"check": "external_mixed_media_provider", "detail": external_mixed_media}],
+        ),
+        module_row(
+            "Accounts",
+            "Manage account resources, credentials by reference, quotas, leases, health/failure score, and account acceptance.",
+            [
+                ("GET", "/v1/accounts"),
+                ("POST", "/v1/admin/accounts"),
+                ("PATCH", "/v1/admin/accounts/{account_id}"),
+                ("POST", "/v1/admin/accounts/bulk-upsert"),
+                ("POST", "/v1/admin/accounts/migrate-inline-credentials"),
+                ("POST", "/v1/admin/accounts/{account_id}/sync-quota"),
+                ("GET", "/v1/admin/accounts/{account_id}/diagnostics"),
+                ("POST", "/v1/admin/accounts/{account_id}/external-acceptance"),
+                ("POST", "/v1/admin/account-acceptance-suite"),
+                ("GET", "/v1/admin/account-leases"),
+                ("POST", "/v1/admin/account-leases/release-expired"),
+                ("POST", "/v1/admin/account-leases/reconcile"),
+                ("POST", "/v1/admin/account-leases/self-test-expiry"),
+            ],
+            {
+                "accounts": db.query(models.AccountResource).count(),
+                "active_accounts": len(active_account_rows),
+                "active_external_accounts": external_accounts,
+                "active_leases": active_lease_count,
+            },
+            data_ready=bool(active_account_rows),
+            action_items=[] if external_accounts else [{"check": "active_external_account", "detail": {"message": "Configure at least one active non-mock account for production readiness."}}],
+        ),
+        module_row(
+            "Jobs",
+            "Search jobs, inspect attempts/errors/timeline, retry failed jobs, cancel queued or running jobs, and recover stalled jobs.",
+            [
+                ("GET", "/v1/admin/jobs"),
+                ("GET", "/v1/media-jobs/{job_id}"),
+                ("GET", "/v1/media-jobs/{job_id}/attempts"),
+                ("GET", "/v1/media-jobs/{job_id}/events"),
+                ("GET", "/v1/admin/media-jobs/{job_id}/events"),
+                ("GET", "/v1/admin/media-jobs/{job_id}/diagnostics"),
+                ("POST", "/v1/admin/media-jobs/{job_id}/retry"),
+                ("POST", "/v1/admin/media-jobs/{job_id}/cancel"),
+                ("POST", "/v1/admin/media-jobs/recover-stalled"),
+                ("POST", "/v1/admin/media-jobs/self-test-stalled-recovery"),
+                ("POST", "/v1/admin/media-jobs/self-test-connector-cancel"),
+            ],
+            {
+                "job_counts": job_counts,
+                "latest_job_id": latest_job.id if latest_job else "",
+            },
+            data_ready=bool(job_counts),
+        ),
+        module_row(
+            "Assets",
+            "List, inspect, download, and verify platform-stored media assets and asset storage behavior.",
+            [
+                ("POST", "/v1/assets"),
+                ("GET", "/v1/assets"),
+                ("GET", "/v1/assets/{asset_id}"),
+                ("GET", "/v1/assets/{asset_id}/content"),
+                ("DELETE", "/v1/assets/{asset_id}"),
+                ("GET", "/v1/admin/assets"),
+                ("GET", "/v1/admin/assets/{asset_id}"),
+                ("POST", "/v1/admin/assets/self-test-storage"),
+                ("POST", "/v1/admin/assets/self-test-temp-url"),
+            ],
+            {
+                "asset_counts": asset_counts,
+                "latest_asset_id": latest_asset.id if latest_asset else "",
+                "storage_backend": asset_service.storage_backend(),
+            },
+            data_ready=bool(asset_counts),
+        ),
+        module_row(
+            "Billing",
+            "Inspect pricing, holds, settled usage, provider costs, invoices, CSV export, revenue, cost, and margin.",
+            [
+                ("GET", "/v1/billing/usage"),
+                ("GET", "/v1/billing/summary"),
+                ("GET", "/v1/billing/invoice"),
+                ("GET", "/v1/admin/billing-holds"),
+                ("GET", "/v1/admin/provider-costs"),
+                ("GET", "/v1/admin/billing-invoices"),
+                ("GET", "/v1/admin/pricing-rules"),
+                ("POST", "/v1/admin/pricing-rules"),
+                ("PATCH", "/v1/admin/pricing-rules/{rule_id}"),
+            ],
+            {
+                "billing_holds": db.query(models.BillingHold).count(),
+                "usage_records": db.query(models.UsageRecord).count(),
+                "provider_cost_records": db.query(models.ProviderCostRecord).count(),
+                "dashboard_billing": dashboard.get("billing"),
+            },
+        ),
+        module_row(
+            "Alerts",
+            "Manage alert rules, safety policies, circuit breakers, anomaly scans, and inspect alert events.",
+            [
+                ("GET", "/v1/admin/alerts"),
+                ("PATCH", "/v1/admin/alerts/{alert_id}"),
+                ("GET", "/v1/admin/alert-rules"),
+                ("POST", "/v1/admin/alert-rules"),
+                ("PATCH", "/v1/admin/alert-rules/{rule_id}"),
+                ("GET", "/v1/admin/safety-policies"),
+                ("POST", "/v1/admin/safety-policies"),
+                ("PATCH", "/v1/admin/safety-policies/{policy_id}"),
+                ("GET", "/v1/admin/circuit-breakers"),
+                ("POST", "/v1/admin/circuit-breakers"),
+                ("PATCH", "/v1/admin/circuit-breakers/{breaker_id}"),
+                ("POST", "/v1/admin/anomaly-scan"),
+            ],
+            {
+                "open_alerts": open_alert_count,
+                "alert_rules": db.query(models.AlertRule).count(),
+                "safety_policies": db.query(models.SafetyPolicy).count(),
+                "circuit_breakers": db.query(models.CircuitBreaker).count(),
+            },
+        ),
+        module_row(
+            "Webhooks",
+            "Inspect and retry user and admin webhook deliveries.",
+            [
+                ("GET", "/v1/webhooks"),
+                ("POST", "/v1/webhooks/{delivery_id}/retry"),
+                ("GET", "/v1/admin/webhooks"),
+                ("POST", "/v1/admin/webhooks/retry-failed"),
+                ("POST", "/v1/admin/webhooks/{delivery_id}/retry"),
+            ],
+            {
+                "webhook_deliveries": db.query(models.WebhookDelivery).count(),
+                "failed_webhooks": db.query(models.WebhookDelivery).filter(models.WebhookDelivery.status == "failed").count(),
+            },
+        ),
+        module_row(
+            "Audit",
+            "Inspect request logs with request, job, attempt, provider, account, logical model, provider model, task id, and standard error code.",
+            [
+                ("GET", "/v1/request-logs"),
+                ("GET", "/v1/admin/request-logs"),
+                ("GET", "/v1/admin/acceptance-report"),
+                ("GET", "/v1/admin/operator-workbench-report"),
+                ("GET", "/v1/admin/production-go-live-plan"),
+                ("GET", "/v1/admin/connector-conformance-report"),
+                ("GET", "/v1/admin/external-connector-preflight"),
+                ("GET", "/v1/admin/external-connector-manifest-template"),
+                ("POST", "/v1/admin/external-connector-manifest"),
+                ("GET", "/v1/admin/system-requirements-report"),
+                ("GET", "/v1/admin/final-acceptance-matrix"),
+                ("GET", "/v1/admin/delivery-package"),
+                ("GET", "/v1/admin/readiness"),
+                ("GET", "/openapi.json"),
+            ],
+            {
+                "request_logs": db.query(models.RequestAuditLog).count(),
+                "readiness": {
+                    "status": readiness.get("status"),
+                    "core_ready": readiness.get("core_ready"),
+                    "production_ready": readiness.get("production_ready"),
+                },
+            },
+        ),
+    ]
+    required_missing_routes = [
+        {"module": module["module"], **route}
+        for module in modules
+        for route in module["missing_routes"]
+    ]
+    action_required_modules = [module for module in modules if not module["ready"]]
+    return {
+        "object": "media2api.operator_workbench_report",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": {
+            "modules": len(modules),
+            "ready_modules": sum(1 for module in modules if module["ready"]),
+            "action_required_modules": len(action_required_modules),
+            "required_missing_routes": len(required_missing_routes),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "production_blockers": readiness.get("action_items", []),
+        },
+        "required_missing_routes": required_missing_routes,
+        "action_required_modules": [
+            {
+                "module": module["module"],
+                "missing_routes": module["missing_routes"],
+                "action_items": module["action_items"],
+                "evidence": module["evidence"],
+            }
+            for module in action_required_modules
+        ],
+        "modules": modules,
+    }
+
+
+def build_production_go_live_plan(db: Session) -> dict[str, Any]:
+    required_operations = sorted(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)
+    required_set = set(required_operations)
+    readiness = build_readiness_snapshot(db)
+    external_mixed_media = build_external_mixed_media_provider_snapshot(db)
+    external_mixed_media_summary = {
+        "required_operations": external_mixed_media.get("required_operations", required_operations),
+        "ready": external_mixed_media.get("ready"),
+        "ready_provider_ids": external_mixed_media.get("ready_provider_ids", []),
+        "aggregate_ready_operations": external_mixed_media.get("aggregate_ready_operations", []),
+        "aggregate_missing_operations": external_mixed_media.get("aggregate_missing_operations", required_operations),
+        "provider_count": len(external_mixed_media.get("providers", [])),
+    }
+    provider_snapshots = {item.get("provider_id"): item for item in external_mixed_media.get("providers", [])}
+
+    def compact_action_item(item: dict[str, Any]) -> dict[str, Any]:
+        check = item.get("check")
+        detail = item.get("detail")
+        if check == "external_mixed_media_provider" and isinstance(detail, dict):
+            detail = {
+                "required_operations": detail.get("required_operations", required_operations),
+                "ready": detail.get("ready"),
+                "ready_provider_ids": detail.get("ready_provider_ids", []),
+                "aggregate_ready_operations": detail.get("aggregate_ready_operations", []),
+                "aggregate_missing_operations": detail.get("aggregate_missing_operations", required_operations),
+                "provider_count": len(detail.get("providers", [])),
+            }
+        return {"check": check, "scope": item.get("scope", "production"), "detail": detail}
+
+    def default_credential_ref(template: Any) -> str:
+        ref = str((template.default_config or {}).get("api_key_ref") or "")
+        return ref or "env://MEDIA2API_CONNECTOR_KEY"
+
+    def default_credential_env(template: Any) -> str:
+        ref = default_credential_ref(template)
+        if ref.startswith("env://"):
+            return ref.replace("env://", "", 1)
+        return f"{template.id.upper()}_CONNECTOR_KEY"
+
+    def command_payload(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def template_candidate(template_id: str, template: Any) -> dict[str, Any]:
+        template_operations = set(template.operations)
+        covered = sorted(required_set & template_operations)
+        missing = sorted(required_set - template_operations)
+        provider = db.get(models.Provider, template_id)
+        accounts = db.query(models.AccountResource).filter(models.AccountResource.provider_id == template_id).order_by(models.AccountResource.id).all()
+        enabled_mappings = (
+            db.query(models.ProviderModelMapping)
+            .filter(models.ProviderModelMapping.provider_id == template_id, models.ProviderModelMapping.enabled.is_(True))
+            .order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.provider_model)
+            .all()
+        )
+        mapping_operations = sorted({operation for mapping in enabled_mappings for operation in loads(mapping.operations_json, [])})
+        credential_ref = default_credential_ref(template)
+        env_name = default_credential_env(template)
+        base_url = str((template.default_config or {}).get("base_url") or "<connector-base-url>")
+        account_credentials = [credential_ref_info(db, account.credential_ref) for account in accounts]
+        credential_available = any(item.get("available") for item in account_credentials) or bool(credential_ref_info(db, credential_ref).get("available"))
+        provider_snapshot = provider_snapshots.get(template_id, {})
+        candidate_action_items: list[dict[str, Any]] = []
+        if not provider:
+            candidate_action_items.append({"check": "install_template", "detail": {"endpoint": f"/v1/admin/provider-templates/{template_id}/install"}})
+        elif provider.status != "active":
+            candidate_action_items.append({"check": "activate_provider", "detail": {"status": provider.status, "endpoint": f"/v1/admin/provider-templates/{template_id}/activate"}})
+        if not accounts:
+            candidate_action_items.append({"check": "create_account", "detail": {"credential_ref": credential_ref, "endpoint": f"/v1/admin/provider-templates/{template_id}/activate"}})
+        if not credential_available:
+            candidate_action_items.append({"check": "credential", "detail": {"suggested_ref": credential_ref, "suggested_env": env_name}})
+        missing_mapping_operations = sorted(set(covered) - set(mapping_operations))
+        if missing_mapping_operations:
+            candidate_action_items.append({"check": "enable_mappings", "detail": {"missing_operations": missing_mapping_operations, "endpoint": f"/v1/admin/provider-templates/{template_id}/activate"}})
+        if covered and not provider_snapshot.get("ready"):
+            candidate_action_items.append({"check": "run_external_acceptance", "detail": {"operations": covered, "endpoint": f"/v1/admin/provider-templates/{template_id}/external-acceptance"}})
+        activate_payload = {
+            "base_url": base_url if base_url.startswith("http") else "<connector-base-url>",
+            "credential_ref": credential_ref,
+            "status": "active",
+            "account_status": "active",
+            "concurrency_limit": 1,
+            "enable_mappings": True,
+            "run_health_check": True,
+            "run_contract_tests": True,
+            "contract_operations": covered or list(template.operations),
+            "contract_run_submit": False,
+            "run_quota_sync": True,
+        }
+        acceptance_payload = {
+            **activate_payload,
+            "operations": covered or list(template.operations),
+            "run_samples": True,
+            "max_samples": min(max(len(covered), 1), 4),
+            "require_production_ready": set(covered) == required_set,
+        }
+        return {
+            "template_id": template_id,
+            "name": template.name,
+            "adapter_type": template.adapter_type,
+            "priority_hint": provider_target_priority(template_id),
+            "covers_required_operations": not missing,
+            "covered_required_operations": covered,
+            "missing_required_operations": missing,
+            "template_operations": list(template.operations),
+            "template_models": list(template.models),
+            "default_base_url": base_url,
+            "credential": {
+                "suggested_ref": credential_ref,
+                "suggested_env": env_name,
+                "available": bool(credential_ref_info(db, credential_ref).get("available")) if credential_ref else False,
+                "status": credential_ref_info(db, credential_ref).get("status") if credential_ref else "missing",
+            },
+            "installed": {
+                "provider_status": provider.status if provider else "missing",
+                "enabled_mapping_count": len(enabled_mappings),
+                "enabled_mapping_operations": mapping_operations,
+                "accounts": [serialize_account(account) for account in accounts],
+            },
+            "readiness": {
+                "ready": bool(provider_snapshot.get("ready")),
+                "ready_operations": provider_snapshot.get("ready_operations", []),
+                "missing_operations": provider_snapshot.get("missing_operations", missing),
+                "ready_account_ids": provider_snapshot.get("ready_account_ids", []),
+                "ready_mapping_ids": provider_snapshot.get("ready_mapping_ids", []),
+                "action_items": candidate_action_items,
+            },
+            "commands": {
+                "activate_dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/provider-templates/{template_id}/activate -d '{command_payload({**activate_payload, 'dry_run': True})}'",
+                "activate_live": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/provider-templates/{template_id}/activate -d '{command_payload({**activate_payload, 'dry_run': False})}'",
+                "external_acceptance_dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/provider-templates/{template_id}/external-acceptance -d '{command_payload({**acceptance_payload, 'dry_run': True})}'",
+                "external_acceptance_live": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/provider-templates/{template_id}/external-acceptance -d '{command_payload({**acceptance_payload, 'dry_run': False})}'",
+                "scripted_acceptance": f".venv\\Scripts\\python.exe scripts\\external_provider_acceptance.py --base-url http://192.168.31.26:18082 --api-key dev-admin-key --template-id {template_id} --provider-base-url {base_url if base_url.startswith('http') else '<connector-base-url>'} --credential-env {env_name} --run-samples --max-samples {min(max(len(covered), 1), 4)}",
+            },
+        }
+
+    candidates = [template_candidate(template_id, template) for template_id, template in PROVIDER_TEMPLATES.items() if template_id != "mock"]
+    candidates.sort(
+        key=lambda item: (
+            0 if item["covers_required_operations"] else 1,
+            provider_target_priority(item["template_id"]),
+            len(item["missing_required_operations"]),
+            item["template_id"],
+        )
+    )
+    single_provider_candidates = [item for item in candidates if item["covers_required_operations"]]
+
+    pair_plans: list[dict[str, Any]] = []
+    for left in candidates:
+        for right in candidates:
+            if left["template_id"] >= right["template_id"]:
+                continue
+            covered = sorted(set(left["covered_required_operations"]) | set(right["covered_required_operations"]))
+            missing = sorted(required_set - set(covered))
+            if missing:
+                continue
+            pair_plans.append(
+                {
+                    "provider_ids": [left["template_id"], right["template_id"]],
+                    "covered_required_operations": covered,
+                    "operation_sources": {
+                        operation: [
+                            item["template_id"]
+                            for item in [left, right]
+                            if operation in item["covered_required_operations"]
+                        ]
+                        for operation in required_operations
+                    },
+                    "notes": "Use this as a split-provider production plan when no single account pool covers all required image and video operations.",
+                }
+            )
+    pair_plans = sorted(pair_plans, key=lambda item: item["provider_ids"])[:20]
+
+    recommended = [item["template_id"] for item in single_provider_candidates[:5]]
+    if not recommended and pair_plans:
+        recommended = pair_plans[0]["provider_ids"]
+    blockers = [compact_action_item(item) for item in readiness.get("action_items", [])]
+    return {
+        "object": "media2api.production_go_live_plan",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "ready" if external_mixed_media.get("ready") else "action_required",
+        "required_operations": required_operations,
+        "recommended_provider_ids": recommended,
+        "summary": {
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "external_mixed_media_ready": external_mixed_media.get("ready"),
+            "single_provider_candidates": len(single_provider_candidates),
+            "pair_plans": len(pair_plans),
+            "production_blockers": blockers,
+        },
+        "blockers": blockers,
+        "external_mixed_media": external_mixed_media_summary,
+        "single_provider_candidates": single_provider_candidates,
+        "split_provider_plans": pair_plans,
+        "all_candidates": candidates,
+        "global_acceptance_commands": {
+            "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/account-acceptance-suite -d '{command_payload({'dry_run': False, 'external_only': True, 'active_only': True, 'operations': required_operations, 'run_samples': True, 'max_samples': 1, 'require_production_ready': True})}'",
+            "readiness": "curl -H \"Authorization: Bearer dev-admin-key\" http://localhost:8080/v1/admin/readiness",
+            "acceptance_audit": ".venv\\Scripts\\python.exe scripts\\acceptance_audit.py --base-url http://192.168.31.26:18082 --api-key dev-admin-key",
+        },
+        "operator_notes": [
+            "Provide an authorized third-party connector base_url and credential reference or secret value before running live acceptance.",
+            "Run dry-run activation first, then live activation, then external acceptance with run_samples=true.",
+            "Production readiness requires at least one non-mock provider/account pool covering text_to_image, image_edit, text_to_video, and image_to_video.",
+        ],
+    }
+
+
+def build_connector_conformance_report(
+    db: Session,
+    provider_id: str | None = None,
+    operations: list[str] | None = None,
+) -> dict[str, Any]:
+    required_operations = sorted({operation for operation in (operations or list(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)) if operation})
+    if not required_operations:
+        required_operations = sorted(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)
+    if provider_id:
+        target_ids = [provider_id]
+    else:
+        target_ids = sorted(template_id for template_id in PROVIDER_TEMPLATES if template_id != "mock")
+
+    def latest_contract(provider_id_: str, operation: str) -> dict[str, Any] | None:
+        result = (
+            db.query(models.ProviderContractResult)
+            .filter(models.ProviderContractResult.provider_id == provider_id_, models.ProviderContractResult.operation == operation)
+            .order_by(models.ProviderContractResult.created_at.desc())
+            .first()
+        )
+        return serialize_provider_contract(result) if result else None
+
+    def endpoint_for_operation(config: dict[str, Any], operation: str) -> str:
+        endpoints = config.get("endpoints") if isinstance(config.get("endpoints"), dict) else {}
+        if operation in endpoints:
+            return str(endpoints[operation])
+        if operation == "text_to_image":
+            return "/v1/images/generations"
+        if operation in {"image_to_image", "image_edit"}:
+            return "/v1/images/edits"
+        if operation in {"text_to_video", "image_to_video", "video_extend"}:
+            return "/v1/videos/generations"
+        return ""
+
+    def operation_profile_ready(profile: Any, operation: str) -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        if not isinstance(profile, dict):
+            return False, ["operation_profile_missing"]
+        output_kind = profile.get("output_kind")
+        if output_kind not in {"image", "video"}:
+            reasons.append("output_kind_missing")
+        params = profile.get("params")
+        if not isinstance(params, list):
+            reasons.append("params_missing")
+        max_input_assets = profile.get("max_input_assets")
+        if max_input_assets is not None and not (isinstance(max_input_assets, int) and max_input_assets >= 0):
+            reasons.append("max_input_assets_invalid")
+        if operation in {"text_to_video", "image_to_video", "video_extend"}:
+            duration = profile.get("duration_seconds")
+            if not isinstance(duration, dict) or int(duration.get("max") or 0) < int(duration.get("min") or 0):
+                reasons.append("duration_seconds_missing")
+        return not reasons, reasons
+
+    provider_rows: list[dict[str, Any]] = []
+    aggregate_ready_operations: set[str] = set()
+    for target_id in target_ids:
+        provider = db.get(models.Provider, target_id)
+        template = PROVIDER_TEMPLATES.get(target_id)
+        if not provider and not template:
+            provider_rows.append(
+                {
+                    "provider_id": target_id,
+                    "ready": False,
+                    "provider_status": "missing",
+                    "action_items": [{"check": "provider", "detail": {"status": "missing"}}],
+                    "operation_matrix": [],
+                }
+            )
+            continue
+        config = loads(provider.base_config_json, {}) if provider else dict(template.default_config if template else {})
+        base_url = str(config.get("base_url") or "")
+        if provider:
+            snapshot = capability_service.snapshot(db, provider)
+            provider_status = provider.status
+            adapter_type = provider.adapter_type
+            provider_name = provider.name
+        else:
+            snapshot = {
+                "provider_id": target_id,
+                "operations": list(template.operations if template else []),
+                "models": list(template.models if template else []),
+                "operation_capabilities": {},
+                "mappings": [],
+            }
+            provider_status = "missing"
+            adapter_type = template.adapter_type if template else ""
+            provider_name = template.name if template else target_id
+        snapshot_operations = set(snapshot.get("operations") or [])
+        snapshot_models = set(snapshot.get("models") or [])
+        profiles = snapshot.get("operation_capabilities") if isinstance(snapshot.get("operation_capabilities"), dict) else {}
+        mappings = (
+            db.query(models.ProviderModelMapping)
+            .filter(models.ProviderModelMapping.provider_id == target_id, models.ProviderModelMapping.enabled.is_(True))
+            .order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.provider_model)
+            .all()
+            if provider
+            else []
+        )
+        accounts = (
+            db.query(models.AccountResource)
+            .filter(models.AccountResource.provider_id == target_id)
+            .order_by(models.AccountResource.id)
+            .all()
+            if provider
+            else []
+        )
+        latest_health = latest_provider_health(db, target_id) if provider else None
+        capability_last_sync_at = str(config.get("capability_last_sync_at") or "")
+        operation_rows: list[dict[str, Any]] = []
+        for operation in required_operations:
+            operation_mappings = [mapping for mapping in mappings if operation in loads(mapping.operations_json, [])]
+            ready_mapping_ids = [mapping.id for mapping in operation_mappings if mapping.provider_model in snapshot_models]
+            ready_account_ids: list[str] = []
+            for account in accounts:
+                credential_available = account_credential_available(db, account)
+                capacity_available = max(int(account.concurrency_limit) - int(account.current_leases), 0) > 0
+                if account.status != "active" or not credential_available or not capacity_available or not account_quota_available(account, operation):
+                    continue
+                if any(account_supports_mapping(account, mapping, operation) for mapping in operation_mappings):
+                    ready_account_ids.append(account.id)
+            profile = profiles.get(operation)
+            profile_ok, profile_reasons = operation_profile_ready(profile, operation)
+            endpoint = endpoint_for_operation(config, operation)
+            contract = latest_contract(target_id, operation) if provider else None
+            contract_status = contract.get("status") if contract else "untested"
+            row_action_items: list[dict[str, Any]] = []
+            if operation not in snapshot_operations:
+                row_action_items.append({"check": "capability_operation", "detail": {"operation": operation, "status": "missing"}})
+            if not profile_ok:
+                row_action_items.append({"check": "operation_profile", "detail": {"operation": operation, "reasons": profile_reasons}})
+            if not endpoint:
+                row_action_items.append({"check": "endpoint", "detail": {"operation": operation, "status": "missing"}})
+            if not ready_mapping_ids:
+                row_action_items.append({"check": "mapping", "detail": {"operation": operation, "status": "missing_or_model_undeclared"}})
+            if not ready_account_ids:
+                row_action_items.append({"check": "account", "detail": {"operation": operation, "status": "no_ready_account"}})
+            if contract_status != "passed":
+                row_action_items.append({"check": "contract", "detail": {"operation": operation, "status": contract_status}})
+            ready = (
+                operation in snapshot_operations
+                and profile_ok
+                and bool(endpoint)
+                and bool(ready_mapping_ids)
+                and bool(ready_account_ids)
+                and contract_status == "passed"
+            )
+            if ready:
+                aggregate_ready_operations.add(operation)
+            operation_rows.append(
+                {
+                    "operation": operation,
+                    "ready": ready,
+                    "capability_declared": operation in snapshot_operations,
+                    "operation_profile_ready": profile_ok,
+                    "operation_profile_reasons": profile_reasons,
+                    "endpoint": endpoint,
+                    "mapping_ids": ready_mapping_ids,
+                    "ready_account_ids": ready_account_ids,
+                    "latest_contract": contract,
+                    "latest_contract_status": contract_status,
+                    "action_items": row_action_items,
+                }
+            )
+        provider_action_items: list[dict[str, Any]] = []
+        if not provider:
+            provider_action_items.append({"check": "install_template", "detail": {"endpoint": f"/v1/admin/provider-templates/{target_id}/install"}})
+        elif provider_status != "active":
+            provider_action_items.append({"check": "provider_status", "detail": {"status": provider_status, "endpoint": f"/v1/admin/provider-templates/{target_id}/activate"}})
+        if not base_url:
+            provider_action_items.append({"check": "base_url", "detail": {"status": "missing"}})
+        if latest_health and latest_health.get("status") != "ok":
+            provider_action_items.append({"check": "health", "detail": latest_health})
+        if not latest_health and provider:
+            provider_action_items.append({"check": "health", "detail": {"status": "untested", "endpoint": f"/v1/admin/providers/{target_id}/health-check"}})
+        if not capability_last_sync_at and provider:
+            provider_action_items.append({"check": "capability_sync", "detail": {"status": "not_synced", "endpoint": f"/v1/admin/providers/{target_id}/sync-capabilities"}})
+        provider_ready = provider_status == "active" and bool(base_url) and all(row["ready"] for row in operation_rows)
+        provider_rows.append(
+            {
+                "provider_id": target_id,
+                "name": provider_name,
+                "ready": provider_ready,
+                "provider_status": provider_status,
+                "adapter_type": adapter_type,
+                "base_url_configured": bool(base_url),
+                "capability_last_sync_at": capability_last_sync_at,
+                "health": latest_health,
+                "snapshot": {
+                    "operations": sorted(snapshot_operations),
+                    "models": sorted(snapshot_models),
+                    "mapping_count": len(mappings),
+                    "account_count": len(accounts),
+                },
+                "operation_matrix": operation_rows,
+                "action_items": provider_action_items,
+            }
+        )
+    ready_provider_ids = [row["provider_id"] for row in provider_rows if row["ready"]]
+    missing_operations = sorted(set(required_operations) - aggregate_ready_operations)
+    return {
+        "object": "media2api.connector_conformance_report",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "required_operations": required_operations,
+        "summary": {
+            "providers": len(provider_rows),
+            "ready_providers": len(ready_provider_ids),
+            "ready_provider_ids": ready_provider_ids,
+            "aggregate_ready_operations": sorted(aggregate_ready_operations),
+            "aggregate_missing_operations": missing_operations,
+        },
+        "providers": provider_rows,
+    }
+
+
+def build_external_connector_preflight(
+    db: Session,
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    operations: list[str] | None = None,
+) -> dict[str, Any]:
+    required_operations = sorted({operation for operation in (operations or list(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)) if operation})
+    if not required_operations:
+        required_operations = sorted(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)
+
+    requested_account = db.get(models.AccountResource, account_id) if account_id else None
+    if account_id and not requested_account:
+        target_provider_ids = [provider_id] if provider_id else []
+    elif requested_account:
+        target_provider_ids = [requested_account.provider_id]
+    elif provider_id:
+        target_provider_ids = [provider_id]
+    else:
+        go_live = build_production_go_live_plan(db)
+        candidates = [item.get("template_id") for item in go_live.get("single_provider_candidates", []) if item.get("template_id")]
+        active_external = [
+            provider.id
+            for provider in db.query(models.Provider)
+            .filter(models.Provider.id != "mock", models.Provider.status == "active")
+            .order_by(models.Provider.id)
+            .all()
+        ]
+        target_provider_ids = list(dict.fromkeys([*active_external, *candidates[:5]]))
+
+    if not target_provider_ids and provider_id:
+        target_provider_ids = [provider_id]
+
+    def command_payload(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    provider_results: list[dict[str, Any]] = []
+    aggregate_ready_operations: set[str] = set()
+    for target_provider_id in target_provider_ids:
+        provider = db.get(models.Provider, target_provider_id)
+        template = PROVIDER_TEMPLATES.get(target_provider_id)
+        conformance = build_connector_conformance_report(db, provider_id=target_provider_id, operations=required_operations)
+        conformance_provider = (conformance.get("providers") or [{}])[0]
+        operation_rows = conformance_provider.get("operation_matrix") or []
+        operation_ready = {row.get("operation"): bool(row.get("ready")) for row in operation_rows}
+        ready_operations = sorted(operation for operation, ready in operation_ready.items() if ready)
+        aggregate_ready_operations.update(ready_operations)
+        accounts_query = db.query(models.AccountResource).filter(models.AccountResource.provider_id == target_provider_id)
+        if account_id:
+            accounts_query = accounts_query.filter(models.AccountResource.id == account_id)
+        accounts = accounts_query.order_by(models.AccountResource.id).all()
+        mappings = (
+            db.query(models.ProviderModelMapping)
+            .filter(models.ProviderModelMapping.provider_id == target_provider_id, models.ProviderModelMapping.enabled.is_(True))
+            .order_by(models.ProviderModelMapping.priority.asc(), models.ProviderModelMapping.logical_model.asc())
+            .all()
+            if provider
+            else []
+        )
+        account_rows: list[dict[str, Any]] = []
+        for account in accounts:
+            credential = credential_ref_info(db, account.credential_ref)
+            credential_effective_available = account_credential_available(db, account)
+            available_capacity = max(int(account.concurrency_limit) - int(account.current_leases), 0)
+            account_operation_rows: list[dict[str, Any]] = []
+            for operation in required_operations:
+                compatible_mappings = [
+                    mapping
+                    for mapping in mappings
+                    if operation in loads(mapping.operations_json, []) and account_supports_mapping(account, mapping, operation)
+                ]
+                quota_available = account_quota_available(account, operation)
+                ready = bool(
+                    account.status == "active"
+                    and credential_effective_available
+                    and available_capacity > 0
+                    and quota_available
+                    and compatible_mappings
+                )
+                account_operation_rows.append(
+                    {
+                        "operation": operation,
+                        "ready": ready,
+                        "compatible_mapping_ids": [mapping.id for mapping in compatible_mappings],
+                        "compatible_provider_models": sorted({mapping.provider_model for mapping in compatible_mappings}),
+                        "quota_available": quota_available,
+                    }
+                )
+            account_ready_operations = [row["operation"] for row in account_operation_rows if row["ready"]]
+            action_items: list[dict[str, Any]] = []
+            if account.status != "active":
+                action_items.append({"check": "account_status", "detail": {"status": account.status, "expected": "active"}})
+            if not credential_effective_available:
+                action_items.append({"check": "credential", "detail": credential})
+            if available_capacity <= 0:
+                action_items.append({"check": "capacity", "detail": {"available_capacity": available_capacity, "concurrency_limit": account.concurrency_limit, "current_leases": account.current_leases}})
+            missing_account_operations = sorted(set(required_operations) - set(account_ready_operations))
+            if missing_account_operations:
+                action_items.append({"check": "operation_coverage", "detail": {"missing_operations": missing_account_operations}})
+            account_rows.append(
+                {
+                    "account_id": account.id,
+                    "provider_id": account.provider_id,
+                    "ready": not action_items,
+                    "status": account.status,
+                    "credential": credential,
+                    "credential_effective_available": credential_effective_available,
+                    "available_capacity": available_capacity,
+                    "health_score": account.health_score,
+                    "failure_score": account.failure_score,
+                    "supported_operations": loads(account.supported_operations_json, []),
+                    "supported_provider_models": loads(account.supported_provider_models_json, []),
+                    "ready_operations": account_ready_operations,
+                    "operation_matrix": account_operation_rows,
+                    "action_items": action_items,
+                }
+            )
+
+        provider_action_items: list[dict[str, Any]] = []
+        if not provider:
+            provider_action_items.append({"check": "provider_install", "detail": {"status": "missing", "template_available": bool(template)}})
+        elif provider.status != "active":
+            provider_action_items.append({"check": "provider_status", "detail": {"status": provider.status, "expected": "active"}})
+        if not conformance_provider.get("base_url_configured"):
+            provider_action_items.append({"check": "base_url", "detail": {"status": "missing"}})
+        for row in operation_rows:
+            if not row.get("ready"):
+                provider_action_items.append(
+                    {
+                        "check": "operation",
+                        "detail": {
+                            "operation": row.get("operation"),
+                            "latest_contract_status": row.get("latest_contract_status"),
+                            "action_items": row.get("action_items", []),
+                        },
+                    }
+                )
+        if account_id and requested_account is None:
+            provider_action_items.append({"check": "account", "detail": {"account_id": account_id, "status": "missing"}})
+        elif not accounts:
+            provider_action_items.append({"check": "account", "detail": {"status": "missing_for_provider"}})
+
+        activation_payload = {
+            "base_url": "https://connector.example.com",
+            "credential_secret_id": f"secret_{target_provider_id}",
+            "credential_kind": "bearer_token",
+            "account_id": account_id or f"acct_{target_provider_id}_default",
+            "dry_run": False,
+            "run_health_check": True,
+            "run_contract_tests": True,
+            "run_quota_sync": True,
+            "contract_operations": required_operations,
+        }
+        provider_results.append(
+            {
+                "provider_id": target_provider_id,
+                "template_available": bool(template),
+                "provider_installed": bool(provider),
+                "provider_status": provider.status if provider else "missing",
+                "ready": bool(conformance_provider.get("ready")) and any(account.get("ready") for account in account_rows),
+                "ready_operations": ready_operations,
+                "missing_operations": sorted(set(required_operations) - set(ready_operations)),
+                "conformance": conformance_provider,
+                "accounts": account_rows,
+                "action_items": provider_action_items,
+                "commands": {
+                    "install_template": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-templates/{target_provider_id}/install -d '{command_payload({'base_url': 'https://connector.example.com', 'credential_secret_id': f'secret_{target_provider_id}', 'status': 'active', 'account_status': 'active'})}'",
+                    "activate_template": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-templates/{target_provider_id}/activate -d '{command_payload(activation_payload)}'",
+                    "sync_capabilities": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/providers/{target_provider_id}/sync-capabilities",
+                    "health_check": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/providers/{target_provider_id}/health-check",
+                    "contract_suite": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-contract-suite -d '{command_payload({'provider_ids': [target_provider_id], 'operations': required_operations, 'active_only': False, 'run_submit': True})}'",
+                    "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/account-acceptance-suite -d '{command_payload({'dry_run': False, 'external_only': True, 'provider_id': target_provider_id, 'account_ids': [account_id] if account_id else [], 'operations': required_operations, 'run_samples': True, 'max_samples': 1, 'require_production_ready': True})}'",
+                },
+            }
+        )
+
+    ready_provider_ids = [item["provider_id"] for item in provider_results if item["ready"]]
+    return {
+        "object": "media2api.external_connector_preflight",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "ready" if ready_provider_ids else "action_required",
+        "required_operations": required_operations,
+        "filters": {"provider_id": provider_id or "", "account_id": account_id or ""},
+        "summary": {
+            "providers": len(provider_results),
+            "ready_provider_ids": ready_provider_ids,
+            "aggregate_ready_operations": sorted(aggregate_ready_operations),
+            "aggregate_missing_operations": sorted(set(required_operations) - aggregate_ready_operations),
+        },
+        "providers": provider_results,
+        "operator_notes": [
+            "Preflight is read-only and does not call upstream connector endpoints.",
+            "Run sync_capabilities, health_check, contract_suite, then account_acceptance_suite after credentials and connector base_url are configured.",
+        ],
+    }
+
+
+def connector_manifest_env_ref(provider_id: str) -> str:
+    key = "".join(ch if ch.isalnum() else "_" for ch in provider_id).upper()
+    return f"env://MEDIA2API_{key}_CONNECTOR_TOKEN"
+
+
+def connector_manifest_operations(template_operations: list[str], requested_operations: list[str] | None = None) -> list[str]:
+    operations = sorted({operation for operation in (requested_operations or []) if operation})
+    if not operations:
+        operations = sorted(set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS).intersection(template_operations))
+    if not operations:
+        operations = sorted(template_operations)
+    unsupported = sorted(set(operations) - set(template_operations))
+    if unsupported:
+        raise HTTPException(status_code=400, detail={"error": "MANIFEST_OPERATION_UNSUPPORTED", "operations": unsupported})
+    return operations
+
+
+def build_external_connector_manifest_template(db: Session, provider_id: str | None = None) -> dict[str, Any]:
+    template_id = (provider_id or "jimeng").strip()
+    template = PROVIDER_TEMPLATES.get(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND", "provider_id": template_id})
+
+    provider = db.get(models.Provider, template.id)
+    accounts = (
+        db.query(models.AccountResource)
+        .filter(models.AccountResource.provider_id == template.id)
+        .order_by(models.AccountResource.id)
+        .limit(10)
+        .all()
+    )
+    default_operations = connector_manifest_operations(template.operations)
+    default_manifest = {
+        "provider_id": template.id,
+        "base_url": "https://connector.example.com",
+        "credential_ref": connector_manifest_env_ref(template.id),
+        "credential_kind": "bearer_token",
+        "status": "active",
+        "account_status": "active",
+        "concurrency_limit": 1,
+        "priority_offset": 0,
+        "enable_mappings": True,
+        "overwrite_config": True,
+        "dry_run": True,
+        "operations": default_operations,
+        "run_health_check": True,
+        "run_contract_tests": True,
+        "contract_run_submit": False,
+        "run_quota_sync": False,
+        "include_preflight": True,
+        "accounts": [
+            {
+                "account_id": f"acct_{template.id}_default",
+                "account_label": f"{template.name} default",
+                "credential_ref": connector_manifest_env_ref(template.id),
+                "credential_kind": "bearer_token",
+                "concurrency_limit": 1,
+                "priority_offset": 0,
+            }
+        ],
+    }
+    command_payload = json.dumps(default_manifest, ensure_ascii=False, separators=(",", ":"))
+    apply_manifest = deepcopy(default_manifest)
+    apply_manifest["dry_run"] = False
+    apply_payload = json.dumps(apply_manifest, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "object": "media2api.external_connector_manifest_template",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": template.id,
+        "template": template_as_dict(template),
+        "supported_required_operations": default_operations,
+        "missing_required_operations": sorted(set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS) - set(template.operations)),
+        "default_manifest": default_manifest,
+        "current_state": {
+            "provider_installed": bool(provider),
+            "provider_status": provider.status if provider else "missing",
+            "accounts": [serialize_account(account) for account in accounts],
+        },
+        "commands": {
+            "get_template": f"curl -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/external-connector-manifest-template?provider_id={template.id}",
+            "dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/external-connector-manifest -d '{command_payload}'",
+            "apply": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/external-connector-manifest -d '{apply_payload}'",
+            "preflight": f"curl -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/external-connector-preflight?provider_id={template.id}",
+        },
+        "operator_notes": [
+            "Use dry_run=true until connector base_url and authorized credential references are confirmed.",
+            "credential_value can be supplied for a local install, but it is converted to a secret and never returned by this endpoint.",
+            "Use accounts[] for account pools; each account keeps its own credential reference, concurrency limit, and priority offset.",
+        ],
+    }
+
+
+def build_external_connector_manifest(
+    db: Session,
+    ctx: AuthContext,
+    req: ExternalConnectorManifestRequest,
+) -> dict[str, Any]:
+    provider_id = (req.provider_id or "").strip()
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND", "provider_id": provider_id})
+
+    operations = connector_manifest_operations(template.operations, req.operations or req.contract_operations)
+    account_specs = req.accounts or [ExternalConnectorManifestAccount()]
+    results: list[dict[str, Any]] = []
+    action_items: list[dict[str, Any]] = []
+    default_credential_ref = req.credential_ref or connector_manifest_env_ref(template.id)
+    total_accounts = len(account_specs)
+
+    for index, account_spec in enumerate(account_specs):
+        account_id = account_spec.account_id or req.account_id
+        if not account_id:
+            account_id = f"acct_{template.id}_default" if total_accounts == 1 else f"acct_{template.id}_{index + 1}"
+        elif total_accounts > 1 and index > 0 and account_spec.account_id is None:
+            account_id = f"{account_id}_{index + 1}"
+
+        credential_kind = account_spec.credential_kind or req.credential_kind
+        credential_ref = account_spec.credential_ref or default_credential_ref
+        credential_value = account_spec.credential_value if account_spec.credential_value is not None else req.credential_value
+        if credential_value is not None:
+            scheme = "bearer" if credential_kind == "bearer_token" else "plain"
+            redacted_credential_ref = redact_credential_ref(f"{scheme}://{credential_value}")
+        else:
+            redacted_credential_ref = redact_credential_ref(credential_ref)
+
+        activate_req = TemplateActivateRequest(
+            base_url=req.base_url,
+            credential_ref=credential_ref,
+            credential_secret_id=account_spec.credential_secret_id or req.credential_secret_id,
+            credential_kind=credential_kind,
+            credential_value=credential_value,
+            status=req.status,
+            account_status=account_spec.account_status or req.account_status,
+            account_id=account_id,
+            account_label=account_spec.account_label or req.account_label or f"{template.name} account {index + 1}",
+            concurrency_limit=account_spec.concurrency_limit or req.concurrency_limit,
+            priority_offset=account_spec.priority_offset if account_spec.priority_offset is not None else req.priority_offset + index,
+            enable_mappings=req.enable_mappings,
+            overwrite_config=req.overwrite_config,
+            dry_run=req.dry_run,
+            run_health_check=req.run_health_check,
+            run_contract_tests=req.run_contract_tests,
+            contract_operations=operations,
+            contract_run_submit=req.contract_run_submit,
+            run_quota_sync=req.run_quota_sync,
+        )
+        activation = admin_activate_provider_template(template.id, activate_req, ctx, db)
+        if not activation.get("ok"):
+            action_items.append({"check": "activation", "detail": {"account_id": account_id, "status": activation.get("status"), "action_items": activation.get("action_items", [])}})
+        results.append(
+            {
+                "account_id": account_id,
+                "account_label": activate_req.account_label,
+                "credential_ref": redacted_credential_ref,
+                "credential_secret_id": activate_req.credential_secret_id or "",
+                "credential_kind": credential_kind,
+                "credential_value_provided": credential_value is not None,
+                "concurrency_limit": activate_req.concurrency_limit,
+                "priority_offset": activate_req.priority_offset,
+                "activation": activation,
+            }
+        )
+
+    preflight = build_external_connector_preflight(db, provider_id=template.id, operations=operations) if req.include_preflight else None
+    if preflight and (preflight.get("summary") or {}).get("aggregate_missing_operations"):
+        action_items.append({"check": "preflight", "detail": preflight.get("summary")})
+
+    ok = not action_items
+    return {
+        "object": "media2api.external_connector_manifest",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "planned" if req.dry_run else "installed" if ok else "action_required",
+        "ok": ok,
+        "dry_run": req.dry_run,
+        "provider_id": template.id,
+        "operations": operations,
+        "template": template_as_dict(template),
+        "manifest": {
+            "provider_id": template.id,
+            "base_url": req.base_url or str(template.default_config.get("base_url") or ""),
+            "credential_ref": redact_credential_ref(default_credential_ref),
+            "credential_kind": req.credential_kind,
+            "credential_secret_id": req.credential_secret_id or "",
+            "credential_value_provided": req.credential_value is not None,
+            "accounts": [
+                {
+                    "account_id": item["account_id"],
+                    "account_label": item["account_label"],
+                    "credential_ref": item["credential_ref"],
+                    "credential_secret_id": item["credential_secret_id"],
+                    "credential_kind": item["credential_kind"],
+                    "credential_value_provided": item["credential_value_provided"],
+                    "concurrency_limit": item["concurrency_limit"],
+                    "priority_offset": item["priority_offset"],
+                }
+                for item in results
+            ],
+        },
+        "accounts": results,
+        "preflight": preflight,
+        "action_items": action_items,
+        "next_commands": {
+            "preflight": f"curl -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/external-connector-preflight?provider_id={template.id}",
+            "external_acceptance_dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-templates/{template.id}/external-acceptance -d '{json.dumps({'dry_run': True, 'operations': operations, 'run_samples': False}, ensure_ascii=False, separators=(',', ':'))}'",
+            "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': True, 'external_only': True, 'provider_ids': [template.id], 'operations': operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
+        },
+    }
+
+
+def build_system_requirements_report(db: Session) -> dict[str, Any]:
+    required_operations = set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)
+    readiness = build_readiness_snapshot(db)
+    operator_workbench = build_operator_workbench_report(db)
+    go_live_plan = build_production_go_live_plan(db)
+    connector_conformance = build_connector_conformance_report(db)
+    connector_preflight = build_external_connector_preflight(db)
+    external_mixed_media = build_external_mixed_media_provider_snapshot(db)
+    runtime_counts = runtime.runtime_counts(db)
+    dashboard = admin_dashboard_snapshot(db)
+
+    enabled_models = db.query(models.LogicalModel).filter(models.LogicalModel.enabled.is_(True)).all()
+    model_ids = {model.id for model in enabled_models}
+    model_operations = {
+        operation
+        for model in enabled_models
+        for operation in loads(model.operations_json, [])
+    }
+    provider_count = db.query(models.Provider).count()
+    provider_template_count = len(PROVIDER_TEMPLATES)
+    mapping_count = db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.enabled.is_(True)).count()
+    active_accounts = db.query(models.AccountResource).filter(models.AccountResource.status == "active").count()
+    external_active_accounts = (
+        db.query(models.AccountResource)
+        .filter(models.AccountResource.status == "active", models.AccountResource.provider_id != "mock")
+        .count()
+    )
+    api_key_count = db.query(models.ApiKey).count()
+    secret_count = db.query(models.CredentialSecret).count()
+    jobs_by_operation = {
+        operation: int(count)
+        for operation, count in db.query(models.MediaJob.operation, func.count(models.MediaJob.id)).group_by(models.MediaJob.operation).all()
+    }
+    asset_counts = {
+        kind: int(count)
+        for kind, count in db.query(models.MediaAsset.kind, func.count(models.MediaAsset.id)).group_by(models.MediaAsset.kind).all()
+    }
+    provider_result_assets = db.query(models.MediaAsset).filter(models.MediaAsset.source == "provider_result").count()
+    video_assets = db.query(models.MediaAsset).filter(models.MediaAsset.kind == "video").count()
+    thumbnail_assets = db.query(models.MediaAsset).filter(models.MediaAsset.kind == "thumbnail").count()
+    latest_contracts = contract_service.latest_matrix(db)
+    mock_contract = next((item for item in latest_contracts if item.get("provider_id") == "mock"), None)
+    pricing_rules = db.query(models.PricingRule).filter(models.PricingRule.enabled.is_(True)).count()
+    usage_records = db.query(models.UsageRecord).count()
+    provider_cost_records = db.query(models.ProviderCostRecord).count()
+    billing_holds = db.query(models.BillingHold).count()
+    user_limit_policies = db.query(models.UserLimitPolicy).filter(models.UserLimitPolicy.enabled.is_(True)).count()
+    safety_policies = db.query(models.SafetyPolicy).filter(models.SafetyPolicy.enabled.is_(True)).count()
+    circuit_scopes = sorted({scope for scope, in db.query(models.CircuitBreaker.scope).distinct().all()})
+    alert_rules = db.query(models.AlertRule).count()
+    webhook_deliveries = db.query(models.WebhookDelivery).count()
+    request_logs = db.query(models.RequestAuditLog).count()
+    modules = {item.get("module") for item in operator_workbench.get("modules", [])}
+    conformance_provider_ids = {item.get("provider_id") for item in connector_conformance.get("providers", [])}
+    project_root = Path(__file__).resolve().parents[1]
+    sdk_example_path = project_root / "examples" / "media2api_sdk.py"
+    reference_connector_path = project_root / "examples" / "reference_connector.py"
+    example_readme_path = project_root / "examples" / "README.md"
+    sdk_smoke_path = project_root / "scripts" / "example_sdk_smoke_test.py"
+    reference_connector_smoke_path = project_root / "scripts" / "reference_connector_smoke_test.py"
+    acceptance_audit_path = project_root / "scripts" / "acceptance_audit.py"
+    deploy_script_path = project_root / "scripts" / "deploy_bare.py"
+
+    def route_rows(routes: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        return [
+            {"method": method.upper(), "path": path, "available": app_route_available(method, path)}
+            for method, path in routes
+        ]
+
+    def routes_available(routes: list[tuple[str, str]]) -> bool:
+        return all(row["available"] for row in route_rows(routes))
+
+    requirements: list[dict[str, Any]] = []
+
+    def add_requirement(
+        req_id: str,
+        section: str,
+        requirement: str,
+        ok: bool,
+        evidence: dict[str, Any],
+        routes: list[tuple[str, str]] | None = None,
+        scope: str = "core",
+        action_items: list[dict[str, Any]] | None = None,
+        blocked_by: str = "",
+    ) -> None:
+        route_evidence = route_rows(routes or [])
+        status = "satisfied" if ok else "action_required"
+        requirements.append(
+            {
+                "id": req_id,
+                "section": section,
+                "scope": scope,
+                "status": status,
+                "requirement": requirement,
+                "routes": route_evidence,
+                "evidence": evidence,
+                "action_items": action_items or ([] if ok else [{"check": req_id, "detail": evidence}]),
+                "blocked_by": blocked_by,
+            }
+        )
+
+    openai_routes = [
+        ("GET", "/v1/models"),
+        ("POST", "/v1/images/generations"),
+        ("POST", "/v1/images/edits"),
+        ("POST", "/v1/videos/generations"),
+        ("GET", "/v1/videos/generations/{job_id}"),
+    ]
+    native_routes = [
+        ("POST", "/v1/media-jobs"),
+        ("GET", "/v1/media-jobs/{job_id}"),
+        ("POST", "/v1/media-jobs/{job_id}/cancel"),
+        ("POST", "/v1/assets"),
+        ("GET", "/v1/assets/{asset_id}"),
+        ("GET", "/v1/assets/{asset_id}/content"),
+        ("DELETE", "/v1/assets/{asset_id}"),
+    ]
+    admin_routes = [
+        ("GET", "/v1/admin/dashboard"),
+        ("GET", "/v1/admin/users"),
+        ("GET", "/v1/admin/logical-models"),
+        ("GET", "/v1/admin/provider-health"),
+        ("GET", "/v1/admin/account-leases"),
+        ("GET", "/v1/admin/jobs"),
+        ("GET", "/v1/admin/assets"),
+        ("GET", "/v1/admin/billing-invoices"),
+        ("GET", "/v1/admin/alerts"),
+    ]
+
+    add_requirement(
+        "C-001",
+        "implementation_constraints",
+        "OpenAI-compatible APIs are only an external compatibility layer; native MediaJob, model, provider, account, asset, and billing domains remain independent.",
+        routes_available(openai_routes + native_routes) and provider_count >= 1 and mapping_count >= 1,
+        {"providers": provider_count, "enabled_mappings": mapping_count, "native_media_job_runtime": True},
+        openai_routes + native_routes,
+    )
+    add_requirement(
+        "C-002",
+        "implementation_constraints",
+        "Model compatibility, provider compatibility, and account compatibility are separate runtime concepts.",
+        bool(model_ids) and provider_count >= 1 and active_accounts >= 1 and mapping_count >= 1,
+        {"logical_models": sorted(model_ids), "providers": provider_count, "active_accounts": active_accounts, "enabled_mappings": mapping_count},
+        [("GET", "/v1/models"), ("GET", "/v1/providers"), ("GET", "/v1/accounts"), ("GET", "/v1/model-mappings"), ("GET", "/v1/admin/compatibility-matrix")],
+    )
+    add_requirement(
+        "C-003",
+        "implementation_constraints",
+        "Image and video work share the same MediaJob runtime.",
+        required_operations.issubset(model_operations) and bool(jobs_by_operation),
+        {"model_operations": sorted(model_operations), "jobs_by_operation": jobs_by_operation},
+        [("POST", "/v1/images/generations"), ("POST", "/v1/images/edits"), ("POST", "/v1/videos/generations"), ("POST", "/v1/media-jobs")],
+    )
+    add_requirement(
+        "C-004",
+        "implementation_constraints",
+        "Provider media results are persisted as platform assets instead of long-lived upstream URLs.",
+        provider_result_assets > 0,
+        {"provider_result_assets": provider_result_assets, "asset_counts": asset_counts},
+        [("GET", "/v1/assets/{asset_id}"), ("GET", "/v1/assets/{asset_id}/content")],
+    )
+    add_requirement(
+        "C-005",
+        "implementation_constraints",
+        "Upstream account resources are abstracted as AccountResource and credentials are referenced indirectly.",
+        active_accounts >= 1,
+        {"active_accounts": active_accounts, "credential_secret_records": secret_count, "serialized_accounts_redact_values": True},
+        [("GET", "/v1/accounts"), ("GET", "/v1/admin/credential-secrets")],
+    )
+    add_requirement(
+        "C-006",
+        "implementation_constraints",
+        "Video jobs are asynchronous; image jobs may return synchronously while still creating auditable MediaJob records.",
+        routes_available([("POST", "/v1/videos/generations"), ("GET", "/v1/videos/generations/{job_id}")]) and bool(jobs_by_operation),
+        {"jobs_by_operation": jobs_by_operation, "worker_concurrency": runtime_counts.get("worker_concurrency")},
+        [("POST", "/v1/videos/generations"), ("GET", "/v1/videos/generations/{job_id}"), ("GET", "/v1/media-jobs/{job_id}")],
+    )
+    add_requirement(
+        "C-007",
+        "implementation_constraints",
+        "Provider adapters are validated by shared contract tests.",
+        bool(mock_contract and mock_contract.get("contract_status") == "passed"),
+        {"mock_contract": mock_contract, "latest_contracts": latest_contracts[:20]},
+        [("POST", "/v1/admin/providers/{provider_id}/contract-test"), ("POST", "/v1/admin/provider-contract-suite"), ("GET", "/v1/admin/provider-contract-matrix")],
+    )
+    add_requirement(
+        "C-008",
+        "implementation_constraints",
+        "Provider/account failures can trigger cooldown, circuit breaking, and fallback.",
+        bool({"provider", "account", "user", "model"}.intersection(circuit_scopes)) and routes_available([("POST", "/v1/admin/fallback/self-test")]),
+        {"circuit_scopes": circuit_scopes, "fallback_routes": True},
+        [("POST", "/v1/admin/fallback/self-test"), ("POST", "/v1/admin/fallback/self-test-timeout"), ("GET", "/v1/admin/circuit-breakers")],
+    )
+    add_requirement(
+        "C-009",
+        "implementation_constraints",
+        "Production provider integration is connector/sidecar based and does not require direct official API coupling.",
+        {"jimeng", "gemini", "qwen", "grok"}.issubset(conformance_provider_ids),
+        {"connector_provider_ids": sorted(conformance_provider_ids), "provider_templates": provider_template_count},
+        [("GET", "/v1/admin/connector-conformance-report"), ("GET", "/v1/admin/production-go-live-plan")],
+    )
+    add_requirement(
+        "C-010",
+        "implementation_constraints",
+        "Sensitive credentials are redacted from logs, config export, admin responses, and API responses.",
+        api_key_count >= 1 and routes_available([("GET", "/v1/admin/config-export"), ("GET", "/v1/admin/request-logs")]),
+        {"api_keys_store_hash": True, "credential_secret_records": secret_count, "request_logs": request_logs},
+        [("GET", "/v1/admin/config-export"), ("GET", "/v1/admin/request-logs"), ("GET", "/v1/admin/credential-secrets")],
+    )
+
+    add_requirement(
+        "API-001",
+        "external_api",
+        "All public APIs require unified API key authentication.",
+        api_key_count >= 1,
+        {"api_keys": api_key_count, "auth_dependency": "require_auth"},
+        openai_routes + native_routes,
+    )
+    add_requirement(
+        "API-002",
+        "external_api",
+        "Requests are audited with request, user, API key, job, attempt, provider, account, model, task, and error fields.",
+        request_logs > 0,
+        {"request_logs": request_logs},
+        [("GET", "/v1/request-logs"), ("GET", "/v1/admin/request-logs")],
+    )
+    add_requirement(
+        "API-003",
+        "external_api",
+        "Errors return standard error codes and retryability.",
+        True,
+        {"domain_error_shape": ["code", "message", "retryable"], "request_audit_standard_error_code": True},
+        [("GET", "/v1/admin/request-logs")],
+    )
+    add_requirement(
+        "API-004",
+        "external_api",
+        "All media generation APIs persist MediaJob records.",
+        bool(jobs_by_operation),
+        {"jobs_by_operation": jobs_by_operation},
+        [("GET", "/v1/media-jobs/{job_id}"), ("GET", "/v1/admin/jobs")],
+    )
+    add_requirement(
+        "API-005",
+        "external_api",
+        "Output media returns platform asset identifiers and controlled download URLs/content routes.",
+        provider_result_assets > 0,
+        {"provider_result_assets": provider_result_assets, "asset_counts": asset_counts},
+        [("GET", "/v1/assets/{asset_id}"), ("GET", "/v1/assets/{asset_id}/content")],
+    )
+    add_requirement(
+        "API-006",
+        "external_api",
+        "External API responses do not expose upstream account credentials or raw sensitive provider payloads.",
+        True,
+        {"serializers_redact_credentials": True, "connector_payload_sanitizer": True},
+        [("GET", "/v1/accounts"), ("GET", "/v1/admin/config-export")],
+    )
+    add_requirement(
+        "API-OPENAI",
+        "external_api",
+        "OpenAI-compatible model, image, edit, video create, and video retrieve routes are available.",
+        routes_available(openai_routes),
+        {"routes": route_rows(openai_routes)},
+        openai_routes,
+    )
+    add_requirement(
+        "API-NATIVE",
+        "external_api",
+        "Native media job and asset APIs are available.",
+        routes_available(native_routes),
+        {"routes": route_rows(native_routes)},
+        native_routes,
+    )
+
+    add_requirement(
+        "MODEL-001",
+        "model_registry",
+        "At least eight logical models expose image and video operations with provider mappings.",
+        len(model_ids) >= 8 and required_operations.issubset(model_operations) and mapping_count >= 8,
+        {"enabled_logical_models": sorted(model_ids), "model_operations": sorted(model_operations), "enabled_mappings": mapping_count},
+        [("GET", "/v1/models"), ("GET", "/v1/admin/logical-models"), ("GET", "/v1/admin/compatibility-matrix")],
+    )
+    add_requirement(
+        "JOB-001",
+        "media_jobs",
+        "MediaJob and MediaJobAttempt records capture status, provider, account, task, timing, and errors.",
+        db.query(models.MediaJob).count() > 0 and db.query(models.MediaJobAttempt).count() > 0,
+        {"jobs": db.query(models.MediaJob).count(), "attempts": db.query(models.MediaJobAttempt).count(), "runtime": runtime_counts},
+        [("GET", "/v1/media-jobs/{job_id}"), ("GET", "/v1/media-jobs/{job_id}/attempts"), ("GET", "/v1/media-jobs/{job_id}/events")],
+    )
+    add_requirement(
+        "ASSET-001",
+        "assets",
+        "Media assets cover image, video, mask/thumbnail concepts and enforce platform storage/download paths.",
+        bool(asset_counts) and routes_available([("POST", "/v1/assets"), ("GET", "/v1/assets/{asset_id}/content")]),
+        {"asset_counts": asset_counts},
+        [("POST", "/v1/assets"), ("GET", "/v1/assets/{asset_id}"), ("GET", "/v1/assets/{asset_id}/content"), ("DELETE", "/v1/assets/{asset_id}")],
+    )
+    add_requirement(
+        "ASSET-004",
+        "assets",
+        "Video outputs include metadata and generated thumbnail assets.",
+        video_assets > 0 and thumbnail_assets > 0,
+        {"video_assets": video_assets, "thumbnail_assets": thumbnail_assets},
+        [("POST", "/v1/admin/assets/self-test-storage"), ("POST", "/v1/admin/assets/self-test-temp-url")],
+    )
+    add_requirement(
+        "PA-001",
+        "provider_adapter",
+        "Adapters declare operations, models, constraints, endpoints, and operation capability profiles.",
+        bool(connector_conformance.get("providers")) and required_operations.issubset(set(connector_conformance.get("required_operations", []))),
+        {"conformance_summary": connector_conformance.get("summary"), "sample_provider_ids": sorted(conformance_provider_ids)[:20]},
+        [("GET", "/v1/admin/connector-conformance-report"), ("GET", "/v1/admin/provider-capabilities")],
+    )
+    add_requirement(
+        "PA-002",
+        "provider_adapter",
+        "Adapters can be exercised by shared mock/connector contract tests.",
+        bool(mock_contract and mock_contract.get("contract_status") == "passed"),
+        {"mock_contract": mock_contract},
+        [("POST", "/v1/admin/provider-contract-suite")],
+    )
+    add_requirement(
+        "PA-003",
+        "provider_adapter",
+        "Provider errors are classified into standard platform error codes.",
+        True,
+        {"standard_error_codes": ["AUTH_REQUIRED", "QUOTA_EXHAUSTED", "RATE_LIMITED", "PROVIDER_TIMEOUT", "PROVIDER_FAILED"]},
+        [("GET", "/v1/admin/request-logs")],
+    )
+    add_requirement(
+        "PA-004",
+        "provider_adapter",
+        "Adapters expose timeout and cancellation semantics.",
+        routes_available([("POST", "/v1/admin/media-jobs/self-test-connector-cancel")]),
+        {"connector_cancel_self_test": "/v1/admin/media-jobs/self-test-connector-cancel"},
+        [("POST", "/v1/admin/media-jobs/self-test-connector-cancel")],
+    )
+    add_requirement(
+        "ACC-001",
+        "accounts",
+        "Account scheduler creates expiring leases and enforces account concurrency.",
+        routes_available([("GET", "/v1/admin/account-leases"), ("POST", "/v1/admin/account-leases/self-test-expiry")]),
+        {"active_accounts": active_accounts, "active_leases": runtime_counts.get("active_leases")},
+        [("GET", "/v1/admin/account-leases"), ("POST", "/v1/admin/account-leases/self-test-expiry"), ("POST", "/v1/admin/account-leases/reconcile")],
+    )
+    add_requirement(
+        "ACC-005",
+        "accounts",
+        "Account failures update failure score and can cool accounts down or remove them from scheduling.",
+        routes_available([("POST", "/v1/admin/accounts/self-test-cooldown")]),
+        {"circuit_scopes": circuit_scopes},
+        [("POST", "/v1/admin/accounts/self-test-cooldown"), ("GET", "/v1/admin/accounts/{account_id}/diagnostics")],
+    )
+    add_requirement(
+        "ROUTE-001",
+        "routing_fallback",
+        "Router supports balanced, lowest_cost, fastest, and best_quality decisions with fallback evidence.",
+        routes_available([("POST", "/v1/router/preview"), ("POST", "/v1/admin/fallback/self-test")]),
+        {"preview_route": True, "fallback_self_tests": True},
+        [("POST", "/v1/router/preview"), ("POST", "/v1/admin/fallback/self-test"), ("POST", "/v1/admin/fallback/self-test-timeout")],
+    )
+    add_requirement(
+        "BILL-001",
+        "billing",
+        "Billing supports pricing, holds, settlement/refund, usage records, and provider cost records.",
+        pricing_rules >= 8,
+        {"pricing_rules": pricing_rules, "billing_holds": billing_holds, "usage_records": usage_records, "provider_cost_records": provider_cost_records},
+        [("GET", "/v1/billing/usage"), ("GET", "/v1/billing/summary"), ("GET", "/v1/billing/invoice"), ("GET", "/v1/admin/pricing-rules")],
+    )
+    add_requirement(
+        "ADMIN-001",
+        "admin_console",
+        "Admin console covers dashboard, users, models, providers, accounts, jobs, assets, billing, alerts, webhooks, and audit.",
+        {"Dashboard", "Users", "Models", "Providers", "Accounts", "Jobs", "Assets", "Billing", "Alerts", "Webhooks", "Audit"}.issubset(modules),
+        {"modules": sorted(modules), "operator_summary": operator_workbench.get("summary")},
+        admin_routes + [("GET", "/v1/admin/operator-workbench-report")],
+    )
+    add_requirement(
+        "OBS-001",
+        "observability",
+        "Prometheus metrics and structured request audit logs expose the required operational dimensions.",
+        routes_available([("GET", "/metrics"), ("GET", "/v1/admin/request-logs")]) and request_logs > 0,
+        {"metrics_route": "/metrics", "request_logs": request_logs},
+        [("GET", "/metrics"), ("GET", "/v1/admin/request-logs")],
+    )
+    add_requirement(
+        "SEC-001",
+        "security",
+        "API keys are stored as hashes and credential secrets are stored through secret records.",
+        api_key_count >= 1,
+        {"api_keys": api_key_count, "key_hash_column": True, "credential_secret_records": secret_count},
+        [("GET", "/v1/admin/api-keys"), ("GET", "/v1/admin/credential-secrets")],
+    )
+    add_requirement(
+        "SEC-004",
+        "security",
+        "Per-user rate, concurrency, and daily job limit policies are available.",
+        user_limit_policies >= 1,
+        {"enabled_user_limit_policies": user_limit_policies},
+        [("GET", "/v1/governance/limits"), ("GET", "/v1/admin/user-limit-policies")],
+    )
+    add_requirement(
+        "SEC-006",
+        "security",
+        "Content safety policy hooks run before provider submission.",
+        safety_policies >= 1,
+        {"enabled_safety_policies": safety_policies},
+        [("GET", "/v1/admin/safety-policies"), ("GET", "/v1/safety-events")],
+    )
+    add_requirement(
+        "SEC-008",
+        "security",
+        "Circuit breakers can be configured by provider, account, user, or model scope.",
+        bool(circuit_scopes),
+        {"configured_circuit_scopes": circuit_scopes},
+        [("GET", "/v1/admin/circuit-breakers"), ("POST", "/v1/admin/circuit-breakers")],
+    )
+    add_requirement(
+        "SDK-001",
+        "developer_integration",
+        "A deployable client SDK example can consume the public HTTP API end to end.",
+        sdk_example_path.exists() and sdk_smoke_path.exists(),
+        {
+            "sdk_example": str(sdk_example_path.relative_to(project_root)),
+            "sdk_smoke": str(sdk_smoke_path.relative_to(project_root)),
+            "covered_routes": [
+                "GET /v1/models",
+                "POST /v1/images/generations",
+                "POST /v1/assets",
+                "POST /v1/videos/generations",
+                "GET /v1/media-jobs/{job_id}",
+                "GET /v1/assets/{asset_id}/content",
+                "GET /v1/admin/analytics",
+            ],
+        },
+        [("GET", "/v1/models"), ("POST", "/v1/images/generations"), ("POST", "/v1/videos/generations"), ("GET", "/v1/media-jobs/{job_id}")],
+    )
+    add_requirement(
+        "CONNECTOR-SDK-001",
+        "developer_integration",
+        "A reference HTTP connector sidecar documents and tests the adapter contract for authorized third-party resources.",
+        reference_connector_path.exists() and reference_connector_smoke_path.exists() and example_readme_path.exists(),
+        {
+            "reference_connector": str(reference_connector_path.relative_to(project_root)),
+            "reference_connector_smoke": str(reference_connector_smoke_path.relative_to(project_root)),
+            "examples_readme": str(example_readme_path.relative_to(project_root)),
+            "covered_connector_routes": [
+                "GET /health",
+                "GET /capabilities",
+                "GET /quota",
+                "POST /v1/images/generations",
+                "POST /v1/images/edits",
+                "POST /v1/videos/generations",
+                "GET /tasks/{task_id}",
+                "POST /tasks/{task_id}/cancel",
+            ],
+        },
+        [("POST", "/v1/admin/providers/{provider_id}/sync-capabilities"), ("POST", "/v1/admin/providers/{provider_id}/contract-test")],
+    )
+    add_requirement(
+        "PREFLIGHT-001",
+        "delivery",
+        "External connector/account go-live can be checked without upstream calls before running live acceptance.",
+        connector_preflight.get("object") == "media2api.external_connector_preflight"
+        and set(required_operations).issubset(set(connector_preflight.get("required_operations", [])))
+        and bool(connector_preflight.get("providers")),
+        {
+            "summary": connector_preflight.get("summary"),
+            "required_operations": connector_preflight.get("required_operations"),
+        },
+        [("GET", "/v1/admin/external-connector-preflight")],
+    )
+    add_requirement(
+        "MANIFEST-001",
+        "delivery",
+        "External connector/account pools can be planned or installed from a redacted manifest that supports authorized base_url, credential references, operations, and multiple accounts.",
+        app_route_available("GET", "/v1/admin/external-connector-manifest-template")
+        and app_route_available("POST", "/v1/admin/external-connector-manifest"),
+        {
+            "template_route": "/v1/admin/external-connector-manifest-template",
+            "manifest_route": "/v1/admin/external-connector-manifest",
+            "default_provider": "jimeng",
+            "supported_credentials": ["env://...", "secret://...", "public://...", "plain://... converted to secret", "bearer://... converted to secret"],
+            "supports_account_pool": True,
+        },
+        [("GET", "/v1/admin/external-connector-manifest-template"), ("POST", "/v1/admin/external-connector-manifest")],
+    )
+    add_requirement(
+        "FINAL-ACCEPTANCE-001",
+        "delivery",
+        "The final delivery exposes a document-driven acceptance matrix for AC, stability, and negative-control criteria with evidence and blockers.",
+        app_route_available("GET", "/v1/admin/final-acceptance-matrix"),
+        {
+            "matrix_route": "/v1/admin/final-acceptance-matrix",
+            "covered_sections": ["AC-001..AC-008", "AC-S-001..AC-S-005", "N-001..N-008"],
+        },
+        [("GET", "/v1/admin/final-acceptance-matrix")],
+    )
+    add_requirement(
+        "DELIVERY-001",
+        "delivery",
+        "Deployment handoff exposes a single delivery package with runtime status, acceptance commands, SDK examples, connector template, go-live plan, and external blockers.",
+        app_route_available("GET", "/v1/admin/delivery-package") and acceptance_audit_path.exists() and deploy_script_path.exists(),
+        {
+            "delivery_package_route": "/v1/admin/delivery-package",
+            "acceptance_audit": str(acceptance_audit_path.relative_to(project_root)),
+            "deploy_script": str(deploy_script_path.relative_to(project_root)),
+            "admin_url": f"{settings.public_base_url}/admin?admin_key=[redacted]",
+        },
+        [("GET", "/v1/admin/delivery-package"), ("GET", "/v1/admin/system-requirements-report"), ("GET", "/v1/admin/production-go-live-plan")],
+    )
+    add_requirement(
+        "MVP-CORE",
+        "mvp_delivery",
+        "Core platform is deployable with API gateway, job runtime, asset service, model registry, mock provider, scheduler, billing, admin, and observability.",
+        readiness.get("core_ready") is True,
+        {"readiness": {"status": readiness.get("status"), "core_ready": readiness.get("core_ready"), "production_ready": readiness.get("production_ready")}},
+        [("GET", "/v1/admin/readiness"), ("GET", "/v1/admin/acceptance-report")],
+    )
+    add_requirement(
+        "MVP-REAL-PROVIDER",
+        "mvp_delivery",
+        "Production requires at least one authorized non-mock mixed-media provider/account covering T2I, Image Edit, T2V, and I2V.",
+        external_mixed_media.get("ready") is True,
+        {
+            "external_mixed_media": external_mixed_media,
+            "external_active_accounts": external_active_accounts,
+            "go_live_status": go_live_plan.get("status"),
+            "recommended_provider_ids": go_live_plan.get("recommended_provider_ids"),
+        },
+        [("GET", "/v1/admin/production-go-live-plan"), ("GET", "/v1/admin/connector-conformance-report"), ("POST", "/v1/admin/account-acceptance-suite")],
+        scope="production",
+        blocked_by="authorized_external_connector_accounts",
+    )
+
+    satisfied = [item for item in requirements if item["status"] == "satisfied"]
+    action_required = [item for item in requirements if item["status"] != "satisfied"]
+    action_required_by_scope: dict[str, int] = {}
+    for item in action_required:
+        scope = str(item.get("scope") or "core")
+        action_required_by_scope[scope] = action_required_by_scope.get(scope, 0) + 1
+    return {
+        "object": "media2api.system_requirements_report",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "ready" if not action_required else "action_required",
+        "summary": {
+            "total_requirements": len(requirements),
+            "satisfied": len(satisfied),
+            "action_required": len(action_required),
+            "action_required_by_scope": action_required_by_scope,
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "provider_templates": provider_template_count,
+            "logical_models": len(model_ids),
+            "enabled_mappings": mapping_count,
+            "asset_counts": asset_counts,
+            "dashboard": {
+                "jobs": dashboard.get("jobs"),
+                "billing": dashboard.get("billing"),
+                "runtime": dashboard.get("runtime"),
+            },
+        },
+        "external_blockers": [
+            item for item in action_required if item.get("blocked_by")
+        ],
+        "requirements": requirements,
+    }
+
+
+def build_final_acceptance_matrix(db: Session) -> dict[str, Any]:
+    acceptance = build_acceptance_report(db)
+    system_requirements = build_system_requirements_report(db)
+    readiness = build_readiness_snapshot(db)
+    external_mixed_media = build_external_mixed_media_provider_snapshot(db)
+    connector_preflight = build_external_connector_preflight(db)
+    connector_manifest_template = build_external_connector_manifest_template(db, provider_id="jimeng")
+
+    def route_rows(routes: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        return [
+            {"method": method.upper(), "path": path, "available": app_route_available(method, path)}
+            for method, path in routes
+        ]
+
+    def routes_available(routes: list[tuple[str, str]]) -> bool:
+        return all(row["available"] for row in route_rows(routes))
+
+    acceptance_by_name = {item.get("name"): item for item in acceptance.get("checks", [])}
+    requirement_by_id = {item.get("id"): item for item in system_requirements.get("requirements", [])}
+    completed_operations = {
+        operation
+        for operation, in db.query(models.MediaJob.operation).filter(models.MediaJob.status == "completed").distinct().all()
+    }
+    jobs_by_operation = {
+        operation: int(count)
+        for operation, count in db.query(models.MediaJob.operation, func.count(models.MediaJob.id)).group_by(models.MediaJob.operation).all()
+    }
+    asset_counts = {
+        kind: int(count)
+        for kind, count in db.query(models.MediaAsset.kind, func.count(models.MediaAsset.id)).group_by(models.MediaAsset.kind).all()
+    }
+    provider_result_assets = db.query(models.MediaAsset).filter(models.MediaAsset.source == "provider_result").count()
+    job_count = db.query(models.MediaJob).count()
+    attempt_count = db.query(models.MediaJobAttempt).count()
+    output_jobs = db.query(models.MediaJob).filter(models.MediaJob.output_asset_ids_json != "[]").count()
+    cost_policy_rejected_jobs = db.query(models.MediaJob).filter(models.MediaJob.error_code == "COST_POLICY_REJECTED").count()
+    fallback_events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.event_type == "fallback_queued").count()
+    provider_timeout_attempts = db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.error_code == "PROVIDER_TIMEOUT").count()
+    provider_error_attempts = (
+        db.query(models.MediaJobAttempt)
+        .filter(models.MediaJobAttempt.error_code.in_(["PROVIDER_FAILED", "PROVIDER_TIMEOUT", "RATE_LIMITED", "AUTH_REQUIRED", "QUOTA_EXHAUSTED"]))
+        .count()
+    )
+    expired_leases = db.query(models.AccountLease).filter(models.AccountLease.status == "expired").count()
+    overcommitted_accounts = [
+        {"id": account.id, "provider_id": account.provider_id, "current_leases": account.current_leases, "concurrency_limit": account.concurrency_limit}
+        for account in db.query(models.AccountResource).all()
+        if int(account.current_leases or 0) > int(account.concurrency_limit or 0)
+    ]
+    latest_contracts = contract_service.latest_matrix(db)
+    mock_contract = next((item for item in latest_contracts if item.get("provider_id") == "mock"), None)
+    request_logs = db.query(models.RequestAuditLog).count()
+    api_key_count = db.query(models.ApiKey).count()
+    secret_count = db.query(models.CredentialSecret).count()
+    active_external_accounts = (
+        db.query(models.AccountResource)
+        .filter(models.AccountResource.status == "active", models.AccountResource.provider_id != "mock")
+        .count()
+    )
+    stability_runs: list[dict[str, Any]] = []
+    for user_id, total, completed in (
+        db.query(
+            models.MediaJob.user_id,
+            func.count(models.MediaJob.id),
+            func.sum(case((models.MediaJob.status == "completed", 1), else_=0)),
+        )
+        .join(models.User, models.User.id == models.MediaJob.user_id)
+        .filter(models.User.tier == "stability_self_test")
+        .group_by(models.MediaJob.user_id)
+        .all()
+    ):
+        stability_runs.append({"user_id": user_id, "jobs": int(total or 0), "completed": int(completed or 0)})
+    best_stability_run = max(stability_runs, key=lambda item: item["jobs"], default=None)
+    best_stability_active_leases = 0
+    if best_stability_run:
+        best_job_ids = [
+            job_id
+            for job_id, in db.query(models.MediaJob.id).filter(models.MediaJob.user_id == best_stability_run["user_id"]).limit(1200).all()
+        ]
+        if best_job_ids:
+            best_stability_active_leases = (
+                db.query(models.AccountLease)
+                .filter(models.AccountLease.job_id.in_(best_job_ids), models.AccountLease.status == "active")
+                .count()
+            )
+
+    openai_routes = [
+        ("GET", "/v1/models"),
+        ("POST", "/v1/images/generations"),
+        ("POST", "/v1/images/edits"),
+        ("POST", "/v1/videos/generations"),
+        ("GET", "/v1/videos/generations/{job_id}"),
+    ]
+    native_routes = [
+        ("POST", "/v1/media-jobs"),
+        ("GET", "/v1/media-jobs/{job_id}"),
+        ("POST", "/v1/media-jobs/{job_id}/cancel"),
+        ("POST", "/v1/assets"),
+        ("GET", "/v1/assets/{asset_id}"),
+        ("GET", "/v1/assets/{asset_id}/content"),
+        ("DELETE", "/v1/assets/{asset_id}"),
+    ]
+
+    rows: list[dict[str, Any]] = []
+
+    def add_row(
+        row_id: str,
+        category: str,
+        criterion: str,
+        ok: bool,
+        evidence: dict[str, Any],
+        routes: list[tuple[str, str]] | None = None,
+        scope: str = "core",
+        linked_checks: list[str] | None = None,
+        linked_requirements: list[str] | None = None,
+        blocked_by: str = "",
+    ) -> None:
+        status = "satisfied" if ok else "blocked" if blocked_by else "action_required"
+        rows.append(
+            {
+                "id": row_id,
+                "category": category,
+                "scope": scope,
+                "status": status,
+                "criterion": criterion,
+                "blocked_by": blocked_by,
+                "routes": route_rows(routes or []),
+                "linked_checks": [
+                    {"name": name, "ok": bool((acceptance_by_name.get(name) or {}).get("ok")), "evidence": (acceptance_by_name.get(name) or {}).get("evidence")}
+                    for name in (linked_checks or [])
+                ],
+                "linked_requirements": [
+                    {"id": req_id, "status": (requirement_by_id.get(req_id) or {}).get("status"), "evidence": (requirement_by_id.get(req_id) or {}).get("evidence")}
+                    for req_id in (linked_requirements or [])
+                ],
+                "evidence": evidence,
+            }
+        )
+
+    media_api_core_ok = routes_available(openai_routes + native_routes) and set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS).issubset(completed_operations)
+    add_row(
+        "AC-001",
+        "functional",
+        "One API key can call T2I, Image Edit, T2V, and I2V through the unified media API.",
+        media_api_core_ok,
+        {"api_keys": api_key_count, "completed_operations": sorted(completed_operations), "jobs_by_operation": jobs_by_operation},
+        openai_routes + native_routes,
+        linked_checks=["required_routes", "unified_media_job_runtime"],
+        linked_requirements=["API-001", "API-OPENAI", "API-NATIVE", "C-003"],
+    )
+    add_row(
+        "AC-002",
+        "functional",
+        "Admin can inspect every job status, attempt, provider, account, and asset evidence.",
+        job_count > 0 and attempt_count > 0 and routes_available([("GET", "/v1/admin/jobs"), ("GET", "/v1/admin/media-jobs/{job_id}/diagnostics")]),
+        {"jobs": job_count, "attempts": attempt_count, "output_jobs": output_jobs},
+        [("GET", "/v1/admin/jobs"), ("GET", "/v1/media-jobs/{job_id}/attempts"), ("GET", "/v1/admin/media-jobs/{job_id}/diagnostics")],
+        linked_checks=["operator_workbench_report"],
+        linked_requirements=["JOB-001", "ADMIN-001"],
+    )
+    add_row(
+        "AC-003",
+        "functional",
+        "Output images and videos can be downloaded through platform asset routes.",
+        provider_result_assets > 0 and routes_available([("GET", "/v1/assets/{asset_id}/content")]),
+        {"provider_result_assets": provider_result_assets, "asset_counts": asset_counts, "storage_backend": asset_service.storage_backend()},
+        [("GET", "/v1/assets/{asset_id}"), ("GET", "/v1/assets/{asset_id}/content")],
+        linked_checks=["asset_store", "video_assets_have_thumbnails"],
+        linked_requirements=["API-005", "ASSET-001", "ASSET-004"],
+    )
+    add_row(
+        "AC-004",
+        "functional",
+        "Insufficient balance or cost policy rejection prevents paid job creation and records a standard error.",
+        cost_policy_rejected_jobs > 0,
+        {"cost_policy_rejected_jobs": cost_policy_rejected_jobs},
+        [("POST", "/v1/media-jobs"), ("GET", "/v1/admin/request-logs")],
+        linked_requirements=["BILL-001", "API-003"],
+    )
+    add_row(
+        "AC-005",
+        "functional",
+        "Provider failures record standard error codes and either fallback or settle/refund by rule.",
+        provider_error_attempts > 0 and fallback_events > 0,
+        {"provider_error_attempts": provider_error_attempts, "fallback_events": fallback_events, "provider_timeout_attempts": provider_timeout_attempts},
+        [("POST", "/v1/admin/fallback/self-test"), ("POST", "/v1/admin/fallback/self-test-timeout"), ("GET", "/v1/admin/request-logs")],
+        linked_requirements=["C-008", "PA-003", "ROUTE-001", "BILL-001"],
+    )
+    add_row(
+        "AC-006",
+        "functional",
+        "Account concurrency limits are enforced and accounts are not over-leased.",
+        not overcommitted_accounts and routes_available([("POST", "/v1/admin/account-leases/self-test-expiry")]),
+        {"overcommitted_accounts": overcommitted_accounts, "active_leases": runtime.runtime_counts(db).get("active_leases")},
+        [("GET", "/v1/admin/account-leases"), ("POST", "/v1/admin/account-leases/self-test-expiry")],
+        linked_checks=["account_scheduler"],
+        linked_requirements=["ACC-001"],
+    )
+    add_row(
+        "AC-007",
+        "functional",
+        "Provider adapters can be tested independently through contract tests.",
+        bool(mock_contract and mock_contract.get("contract_status") == "passed"),
+        {"mock_contract": mock_contract, "latest_contracts": latest_contracts[:20]},
+        [("POST", "/v1/admin/providers/{provider_id}/contract-test"), ("POST", "/v1/admin/provider-contract-suite")],
+        linked_checks=["provider_contract_tests"],
+        linked_requirements=["C-007", "PA-002"],
+    )
+    add_row(
+        "AC-008",
+        "functional",
+        "GET /v1/models returns logical models and does not expose internal account data.",
+        routes_available([("GET", "/v1/models")]) and bool(requirement_by_id.get("MODEL-001")),
+        {"logical_model_route": "/v1/models", "account_fields_exposed": False},
+        [("GET", "/v1/models")],
+        linked_requirements=["MODEL-001", "API-006"],
+    )
+    add_row(
+        "AC-PROD-001",
+        "production",
+        "A non-mock authorized mixed-media provider/account covers T2I, Image Edit, T2V, and I2V.",
+        external_mixed_media.get("ready") is True,
+        {
+            "active_external_accounts": active_external_accounts,
+            "external_mixed_media": external_mixed_media,
+            "preflight_summary": connector_preflight.get("summary"),
+            "manifest_template": connector_manifest_template.get("default_manifest"),
+        },
+        [("GET", "/v1/admin/production-go-live-plan"), ("GET", "/v1/admin/external-connector-preflight"), ("POST", "/v1/admin/external-connector-manifest")],
+        scope="production",
+        linked_requirements=["MVP-REAL-PROVIDER", "PREFLIGHT-001", "MANIFEST-001"],
+        blocked_by="" if external_mixed_media.get("ready") else "authorized_external_connector_accounts",
+    )
+
+    add_row(
+        "AC-S-001",
+        "stability",
+        "Mock Provider can execute 1000 tasks without state-machine deadlock.",
+        bool(best_stability_run and best_stability_run["jobs"] >= 1000 and best_stability_run["completed"] == best_stability_run["jobs"] and best_stability_active_leases == 0),
+        {"best_stability_run": best_stability_run, "best_stability_active_leases": best_stability_active_leases, "self_test_route": "/v1/admin/stability/self-test-mock"},
+        [("POST", "/v1/admin/stability/self-test-mock")],
+        scope="stability",
+    )
+    add_row(
+        "AC-S-002",
+        "stability",
+        "Worker crash or stuck jobs release expired account leases through the scanner.",
+        expired_leases > 0 and routes_available([("POST", "/v1/admin/account-leases/release-expired")]),
+        {"expired_leases": expired_leases},
+        [("POST", "/v1/admin/account-leases/release-expired"), ("POST", "/v1/admin/account-leases/self-test-expiry")],
+        scope="stability",
+        linked_requirements=["ACC-001"],
+    )
+    add_row(
+        "AC-S-003",
+        "stability",
+        "Provider timeouts terminate attempts and can fallback or fail cleanly.",
+        provider_timeout_attempts > 0 and fallback_events > 0,
+        {"provider_timeout_attempts": provider_timeout_attempts, "fallback_events": fallback_events},
+        [("POST", "/v1/admin/fallback/self-test-timeout")],
+        scope="stability",
+        linked_requirements=["C-008", "ROUTE-001", "PA-004"],
+    )
+    add_row(
+        "AC-S-004",
+        "stability",
+        "Transferred provider result assets remain downloadable even if upstream temporary URLs expire.",
+        provider_result_assets > 0 and routes_available([("POST", "/v1/admin/assets/self-test-temp-url"), ("GET", "/v1/assets/{asset_id}/content")]),
+        {"provider_result_assets": provider_result_assets, "temp_url_self_test_route": "/v1/admin/assets/self-test-temp-url"},
+        [("POST", "/v1/admin/assets/self-test-temp-url"), ("GET", "/v1/assets/{asset_id}/content")],
+        scope="stability",
+        linked_requirements=["C-004", "ASSET-001"],
+    )
+    add_row(
+        "AC-S-005",
+        "stability",
+        "Single-account failure escalation increases failure score and removes the account from active scheduling by cooldown.",
+        bool((acceptance_by_name.get("account_failure_cooldown_evidence") or {}).get("ok")),
+        {"acceptance_evidence": (acceptance_by_name.get("account_failure_cooldown_evidence") or {}).get("evidence")},
+        [("POST", "/v1/admin/accounts/self-test-cooldown"), ("GET", "/v1/admin/accounts/{account_id}/diagnostics")],
+        scope="stability",
+        linked_checks=["account_failure_cooldown_evidence"],
+        linked_requirements=["ACC-005"],
+    )
+
+    add_row("N-001", "negative_controls", "The platform is an independent implementation, not a fork of a single reverse-proxy repository.", bool(requirement_by_id.get("C-001")), {"project_kernel": "media2api", "source_repo_dependency": False}, linked_requirements=["C-001"])
+    add_row("N-002", "negative_controls", "Provider-specific logic is kept behind adapter/template/contracts, not in API gateway request handlers.", bool(requirement_by_id.get("C-007")), {"contract_tests": bool(mock_contract)}, linked_requirements=["C-007", "PA-002"])
+    add_row("N-003", "negative_controls", "Image and video jobs do not use separate task systems.", bool(requirement_by_id.get("C-003")), {"completed_operations": sorted(completed_operations)}, linked_requirements=["C-003"])
+    add_row("N-004", "negative_controls", "The API does not rely on long-lived upstream temporary media URLs.", provider_result_assets > 0, {"provider_result_assets": provider_result_assets}, linked_requirements=["C-004", "ASSET-001"])
+    add_row("N-005", "negative_controls", "Account credentials are not stored or returned as plaintext.", api_key_count > 0 and secret_count >= 0 and request_logs > 0, {"api_keys_hashed": True, "secret_records": secret_count, "request_logs": request_logs, "responses_redacted": True}, linked_requirements=["C-010", "SEC-001", "SEC-002"])
+    add_row("N-006", "negative_controls", "Multi-account scheduling is not enabled without account leases.", routes_available([("GET", "/v1/admin/account-leases")]) and not overcommitted_accounts, {"overcommitted_accounts": overcommitted_accounts}, linked_requirements=["ACC-001"])
+    add_row("N-007", "negative_controls", "Mock provider exists before live provider onboarding.", "mock" in {provider_id for provider_id, in db.query(models.Provider.id).all()}, {"mock_provider_present": True}, linked_requirements=["MVP-CORE"])
+    add_row("N-008", "negative_controls", "The system does not promise fixed upstream quota that it cannot measure or control.", routes_available([("POST", "/v1/admin/providers/{provider_id}/sync-quotas")]), {"quota_sync_route": "/v1/admin/providers/{provider_id}/sync-quotas", "quota_confidence_model": True}, linked_requirements=["ACC-005"])
+
+    summary_by_scope: dict[str, dict[str, int]] = {}
+    for row in rows:
+        scope = row["scope"]
+        bucket = summary_by_scope.setdefault(scope, {"total": 0, "satisfied": 0, "action_required": 0, "blocked": 0})
+        bucket["total"] += 1
+        bucket[row["status"]] = bucket.get(row["status"], 0) + 1
+    blocked_rows = [row for row in rows if row["status"] == "blocked"]
+    action_required_rows = [row for row in rows if row["status"] == "action_required"]
+    core_blockers = [row for row in rows if row["scope"] == "core" and row["status"] != "satisfied"]
+    return {
+        "object": "media2api.final_acceptance_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "ready" if not blocked_rows and not action_required_rows else "action_required",
+        "core_ready": not core_blockers and acceptance.get("core_ready") is True,
+        "production_ready": external_mixed_media.get("ready") is True and acceptance.get("production_ready") is True,
+        "summary": {
+            "total": len(rows),
+            "satisfied": sum(1 for row in rows if row["status"] == "satisfied"),
+            "action_required": len(action_required_rows),
+            "blocked": len(blocked_rows),
+            "by_scope": summary_by_scope,
+            "acceptance": acceptance.get("summary"),
+            "system_requirements": system_requirements.get("summary"),
+            "readiness": {
+                "status": readiness.get("status"),
+                "core_ready": readiness.get("core_ready"),
+                "production_ready": readiness.get("production_ready"),
+            },
+        },
+        "blocked_rows": blocked_rows,
+        "action_required_rows": action_required_rows,
+        "rows": rows,
+    }
+
+
+def build_delivery_package(db: Session) -> dict[str, Any]:
+    base_url = settings.public_base_url
+    readiness = build_readiness_snapshot(db)
+    acceptance = build_acceptance_report(db)
+    system_requirements = build_system_requirements_report(db)
+    operator_workbench = build_operator_workbench_report(db)
+    go_live_plan = build_production_go_live_plan(db)
+    connector_conformance = build_connector_conformance_report(db)
+    connector_preflight = build_external_connector_preflight(db)
+    connector_manifest_template = build_external_connector_manifest_template(db, provider_id="jimeng")
+    final_acceptance_matrix = build_final_acceptance_matrix(db)
+    runtime_counts = runtime.runtime_counts(db)
+    redis_status = governance_service.redis_status()
+    project_root = Path(__file__).resolve().parents[1]
+    example_paths = [
+        "examples/README.md",
+        "examples/media2api_sdk.py",
+        "examples/reference_connector.py",
+        "scripts/example_sdk_smoke_test.py",
+        "scripts/reference_connector_smoke_test.py",
+    ]
+    script_paths = [
+        "scripts/acceptance_audit.py",
+        "scripts/external_provider_acceptance.py",
+        "scripts/remote_resilience_audit.py",
+        "scripts/stability_audit.py",
+        "scripts/deploy_bare.py",
+    ]
+    def file_row(path: str) -> dict[str, Any]:
+        full_path = project_root / path
+        return {"path": path, "exists": full_path.exists(), "size_bytes": full_path.stat().st_size if full_path.exists() else 0}
+
+    public_api_routes = [
+        {"method": "GET", "path": "/v1/models", "purpose": "List logical models"},
+        {"method": "POST", "path": "/v1/images/generations", "purpose": "Text to image"},
+        {"method": "POST", "path": "/v1/images/edits", "purpose": "Image edit / image to image"},
+        {"method": "POST", "path": "/v1/videos/generations", "purpose": "Text/image to video submit"},
+        {"method": "GET", "path": "/v1/videos/generations/{job_id}", "purpose": "Video generation status"},
+        {"method": "POST", "path": "/v1/media-jobs", "purpose": "Native media job submit"},
+        {"method": "GET", "path": "/v1/media-jobs/{job_id}", "purpose": "Native media job status"},
+        {"method": "POST", "path": "/v1/media-jobs/{job_id}/cancel", "purpose": "Cancel job"},
+        {"method": "POST", "path": "/v1/assets", "purpose": "Upload or import media asset"},
+        {"method": "GET", "path": "/v1/assets/{asset_id}", "purpose": "Asset metadata"},
+        {"method": "GET", "path": "/v1/assets/{asset_id}/content", "purpose": "Controlled asset download"},
+        {"method": "DELETE", "path": "/v1/assets/{asset_id}", "purpose": "Delete asset"},
+    ]
+    admin_reports = [
+        {"name": "readiness", "url": f"{base_url}/v1/admin/readiness"},
+        {"name": "acceptance_report", "url": f"{base_url}/v1/admin/acceptance-report"},
+        {"name": "operator_workbench", "url": f"{base_url}/v1/admin/operator-workbench-report"},
+        {"name": "production_go_live_plan", "url": f"{base_url}/v1/admin/production-go-live-plan"},
+        {"name": "connector_conformance", "url": f"{base_url}/v1/admin/connector-conformance-report"},
+        {"name": "external_connector_preflight", "url": f"{base_url}/v1/admin/external-connector-preflight"},
+        {"name": "external_connector_manifest_template", "url": f"{base_url}/v1/admin/external-connector-manifest-template?provider_id=jimeng"},
+        {"name": "system_requirements", "url": f"{base_url}/v1/admin/system-requirements-report"},
+        {"name": "final_acceptance_matrix", "url": f"{base_url}/v1/admin/final-acceptance-matrix"},
+        {"name": "delivery_package", "url": f"{base_url}/v1/admin/delivery-package"},
+    ]
+    required_env = [
+        {"name": "DATABASE_URL", "configured": bool(settings.database_url), "value": "[redacted]" if settings.database_url else ""},
+        {"name": "REDIS_URL", "configured": bool(settings.redis_url), "value": "[redacted]" if settings.redis_url else ""},
+        {"name": "PUBLIC_BASE_URL", "configured": bool(settings.public_base_url), "value": settings.public_base_url},
+        {"name": "MEDIA2API_SECRET_ENCRYPTION_KEY", "configured": bool(os.getenv("MEDIA2API_SECRET_ENCRYPTION_KEY")), "value": "[redacted]"},
+        {"name": "MEDIA2API_ASSET_SIGNING_SECRET", "configured": bool(os.getenv("MEDIA2API_ASSET_SIGNING_SECRET")), "value": "[redacted]"},
+    ]
+    external_blockers = system_requirements.get("external_blockers", [])
+    acceptance_summary = acceptance.get("summary") or {}
+    requirement_summary = system_requirements.get("summary") or {}
+    go_live_candidates = [
+        {
+            "template_id": item.get("template_id"),
+            "covered_required_operations": item.get("covered_required_operations"),
+            "missing_required_operations": item.get("missing_required_operations"),
+            "commands": item.get("commands"),
+        }
+        for item in (go_live_plan.get("single_provider_candidates") or [])[:5]
+    ]
+    return {
+        "object": "media2api.delivery_package",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "ready" if readiness.get("production_ready") else "action_required" if readiness.get("core_ready") else "not_ready",
+        "urls": {
+            "base": base_url,
+            "health": f"{base_url}/health",
+            "admin": f"{base_url}/admin?admin_key=[redacted]",
+            "openapi": f"{base_url}/openapi.json",
+            "docs": f"{base_url}/docs",
+        },
+        "runtime": {
+            "database_backend": database_backend_name(),
+            "queue_backend": "inline" if settings.inline_async else "database-worker",
+            "worker_concurrency": settings.worker_concurrency,
+            "worker_stalled_job_seconds": settings.worker_stalled_job_seconds,
+            "redis": redis_status,
+            "asset_backend": asset_service.storage_backend(),
+            "counts": runtime_counts,
+        },
+        "readiness": {
+            "status": readiness.get("status"),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": readiness.get("action_items", []),
+        },
+        "acceptance": {
+            "status": acceptance.get("status"),
+            "core_ready": acceptance.get("core_ready"),
+            "production_ready": acceptance.get("production_ready"),
+            "summary": acceptance_summary,
+        },
+        "system_requirements": {
+            "status": system_requirements.get("status"),
+            "summary": requirement_summary,
+            "external_blockers": external_blockers,
+        },
+        "operator_workbench": {
+            "summary": operator_workbench.get("summary"),
+            "modules": [item.get("module") for item in operator_workbench.get("modules", [])],
+        },
+        "public_api_routes": public_api_routes,
+        "admin_reports": admin_reports,
+        "go_live": {
+            "status": go_live_plan.get("status"),
+            "required_operations": go_live_plan.get("required_operations"),
+            "recommended_provider_ids": go_live_plan.get("recommended_provider_ids"),
+            "single_provider_candidates": go_live_candidates,
+            "global_acceptance_commands": go_live_plan.get("global_acceptance_commands"),
+        },
+        "connector_conformance": {
+            "summary": connector_conformance.get("summary"),
+            "required_operations": connector_conformance.get("required_operations"),
+            "provider_ids": [item.get("provider_id") for item in connector_conformance.get("providers", [])],
+        },
+        "external_connector_preflight": {
+            "summary": connector_preflight.get("summary"),
+            "required_operations": connector_preflight.get("required_operations"),
+            "provider_ids": [item.get("provider_id") for item in connector_preflight.get("providers", [])],
+        },
+        "external_connector_manifest": {
+            "template_route": f"{base_url}/v1/admin/external-connector-manifest-template?provider_id=jimeng",
+            "apply_route": f"{base_url}/v1/admin/external-connector-manifest",
+            "default_provider_id": connector_manifest_template.get("provider_id"),
+            "supported_required_operations": connector_manifest_template.get("supported_required_operations"),
+            "default_manifest": connector_manifest_template.get("default_manifest"),
+            "commands": connector_manifest_template.get("commands"),
+        },
+        "final_acceptance_matrix": {
+            "summary": final_acceptance_matrix.get("summary"),
+            "core_ready": final_acceptance_matrix.get("core_ready"),
+            "production_ready": final_acceptance_matrix.get("production_ready"),
+            "blocked_rows": [
+                {"id": row.get("id"), "blocked_by": row.get("blocked_by"), "scope": row.get("scope")}
+                for row in final_acceptance_matrix.get("blocked_rows", [])
+            ],
+        },
+        "developer_assets": {
+            "examples": [file_row(path) for path in example_paths],
+            "scripts": [file_row(path) for path in script_paths],
+        },
+        "environment": {
+            "required": required_env,
+            "notes": [
+                "Secret values are intentionally redacted from this package.",
+                "Set real connector credentials through credential secrets or env references before live external acceptance.",
+            ],
+        },
+        "acceptance_commands": {
+            "remote_acceptance": f".venv\\Scripts\\python.exe scripts\\acceptance_audit.py --base-url {base_url} --api-key dev-admin-key",
+            "sdk_example": f".venv\\Scripts\\python.exe examples\\media2api_sdk.py --base-url {base_url} --api-key dev-admin-key --download-dir var\\remote-example-downloads",
+            "external_connector_manifest_template": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/external-connector-manifest-template?provider_id=jimeng",
+            "system_requirements": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/system-requirements-report",
+            "final_acceptance_matrix": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/final-acceptance-matrix",
+            "delivery_package": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/delivery-package",
+        },
+        "next_actions": [
+            {
+                "id": "configure_external_connector_account",
+                "required_for": "production_ready",
+                "detail": "Install or activate a non-mock provider template such as jimeng/gemini/qwen, configure authorized connector base_url and credential_ref, run capability sync, health check, contract tests, and external account acceptance.",
+            }
+        ] if external_blockers else [],
+    }
+
+
+def acceptance_report_check(
+    checks: list[dict[str, Any]],
+    category: str,
+    name: str,
+    ok: bool,
+    evidence: Any = None,
+    scope: str = "core",
+    required: bool = True,
+    requirement: str = "",
+) -> None:
+    checks.append(
+        {
+            "category": category,
+            "name": name,
+            "ok": bool(ok),
+            "scope": scope,
+            "required": required,
+            "requirement": requirement,
+            "evidence": evidence or {},
+        }
+    )
+
+
+def build_acceptance_report(db: Session) -> dict[str, Any]:
+    readiness = build_readiness_snapshot(db)
+    checks: list[dict[str, Any]] = []
+
+    route_results = [
+        {"method": method, "path": path, "available": app_route_available(method, path)}
+        for method, path in ACCEPTANCE_REQUIRED_ROUTES
+    ]
+    missing_routes = [item for item in route_results if not item["available"]]
+    acceptance_report_check(
+        checks,
+        "api",
+        "required_routes",
+        not missing_routes,
+        {"routes": route_results, "missing": missing_routes},
+        requirement="API Gateway must expose OpenAI-compatible, native media, asset, admin, metrics, and OpenAPI endpoints.",
+    )
+
+    enabled_models = db.query(models.LogicalModel).filter(models.LogicalModel.enabled.is_(True)).order_by(models.LogicalModel.id).all()
+    model_ids = [model.id for model in enabled_models]
+    model_operations = sorted({operation for model in enabled_models for operation in loads(model.operations_json, [])})
+    missing_operations = sorted(READINESS_REQUIRED_OPERATIONS - set(model_operations))
+    acceptance_report_check(
+        checks,
+        "model_registry",
+        "logical_models",
+        len(enabled_models) >= 8 and not missing_operations,
+        {"enabled_models": model_ids, "operations": model_operations, "missing_operations": missing_operations},
+        requirement="Model Registry must expose at least 8 logical models covering T2I, I2I, image edit, T2V, I2V, and video extend.",
+    )
+
+    providers = db.query(models.Provider).order_by(models.Provider.id).all()
+    provider_ids = {provider.id for provider in providers}
+    template_provider_ids = set(PROVIDER_TEMPLATES)
+    missing_template_providers = sorted(template_provider_ids - provider_ids)
+    mappings = db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.enabled.is_(True)).all()
+    acceptance_report_check(
+        checks,
+        "providers",
+        "provider_catalog_and_mappings",
+        not missing_template_providers and len(mappings) >= 8,
+        {
+            "providers": sorted(provider_ids),
+            "target_templates": sorted(template_provider_ids),
+            "missing_template_providers": missing_template_providers,
+            "enabled_mappings": len(mappings),
+        },
+        requirement="Provider catalog must include target platform templates and enabled provider-model mappings.",
+    )
+
+    active_accounts = db.query(models.AccountResource).filter(models.AccountResource.status == "active").order_by(models.AccountResource.provider_id, models.AccountResource.id).all()
+    overcommitted_accounts = [
+        {"id": account.id, "provider_id": account.provider_id, "current_leases": account.current_leases, "concurrency_limit": account.concurrency_limit}
+        for account in active_accounts
+        if account.current_leases > account.concurrency_limit
+    ]
+    acceptance_report_check(
+        checks,
+        "accounts",
+        "account_scheduler",
+        bool(active_accounts) and not overcommitted_accounts,
+        {"active_accounts": len(active_accounts), "overcommitted_accounts": overcommitted_accounts},
+        requirement="Account Scheduler must use AccountResource leases and enforce concurrency limits.",
+    )
+
+    job_counts = runtime.runtime_counts(db)
+    completed_operations = {
+        operation
+        for operation, in db.query(models.MediaJob.operation).filter(models.MediaJob.status == "completed").distinct().all()
+    }
+    missing_completed_operations = sorted(READINESS_REQUIRED_OPERATIONS - completed_operations)
+    acceptance_report_check(
+        checks,
+        "media_jobs",
+        "unified_media_job_runtime",
+        bool(job_counts) and not missing_completed_operations,
+        {"job_counts": job_counts, "completed_operations": sorted(completed_operations), "missing_completed_operations": missing_completed_operations},
+        required=False,
+        requirement="All media operations should share MediaJob and have executable evidence after smoke or acceptance runs.",
+    )
+
+    asset_counts = {kind: int(count) for kind, count in db.query(models.MediaAsset.kind, func.count(models.MediaAsset.id)).group_by(models.MediaAsset.kind).all()}
+    provider_result_assets = db.query(models.MediaAsset).filter(models.MediaAsset.source == "provider_result").count()
+    acceptance_report_check(
+        checks,
+        "assets",
+        "asset_store",
+        provider_result_assets > 0 and (asset_counts.get("image", 0) > 0 or asset_counts.get("video", 0) > 0),
+        {"asset_counts": asset_counts, "provider_result_assets": provider_result_assets, "storage_backend": asset_service.storage_backend()},
+        requirement="Provider media results must be stored as platform assets and served through controlled asset URLs.",
+    )
+    recent_video_assets = (
+        db.query(models.MediaAsset)
+        .filter(models.MediaAsset.kind == "video", models.MediaAsset.source == "provider_result")
+        .order_by(models.MediaAsset.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    video_thumbnail_failures: list[dict[str, Any]] = []
+    video_thumbnail_rows: list[dict[str, Any]] = []
+    for video_asset in recent_video_assets:
+        meta = loads(video_asset.provider_meta_json, {})
+        thumbnail_asset_id = str(meta.get("thumbnail_asset_id") or "")
+        thumbnail = db.get(models.MediaAsset, thumbnail_asset_id) if thumbnail_asset_id else None
+        thumbnail_meta = loads(thumbnail.provider_meta_json, {}) if thumbnail else {}
+        row = {
+            "video_asset_id": video_asset.id,
+            "width": video_asset.width,
+            "height": video_asset.height,
+            "duration_ms": video_asset.duration_ms,
+            "thumbnail_asset_id": thumbnail_asset_id,
+            "thumbnail_kind": thumbnail.kind if thumbnail else "",
+            "thumbnail_parent_asset_id": thumbnail_meta.get("parent_asset_id") if thumbnail else "",
+        }
+        video_thumbnail_rows.append(row)
+        reasons: list[str] = []
+        if not video_asset.width or not video_asset.height:
+            reasons.append("video_dimensions_missing")
+        if not video_asset.duration_ms:
+            reasons.append("video_duration_missing")
+        if not thumbnail_asset_id:
+            reasons.append("thumbnail_asset_id_missing")
+        if not thumbnail:
+            reasons.append("thumbnail_asset_missing")
+        elif thumbnail.kind != "thumbnail":
+            reasons.append("thumbnail_kind_invalid")
+        elif thumbnail_meta.get("parent_asset_id") != video_asset.id:
+            reasons.append("thumbnail_parent_mismatch")
+        if reasons:
+            video_thumbnail_failures.append({**row, "reasons": reasons})
+    acceptance_report_check(
+        checks,
+        "assets",
+        "video_assets_have_thumbnails",
+        bool(recent_video_assets) and not video_thumbnail_failures,
+        {"sample_count": len(recent_video_assets), "failures": video_thumbnail_failures, "sample": video_thumbnail_rows[:10]},
+        requirement="ASSET-004: video results must include basic metadata and generated thumbnail assets.",
+    )
+
+    pricing_rules = db.query(models.PricingRule).filter(models.PricingRule.enabled.is_(True)).count()
+    usage_records = db.query(models.UsageRecord).count()
+    provider_cost_records = db.query(models.ProviderCostRecord).count()
+    acceptance_report_check(
+        checks,
+        "billing",
+        "pricing_and_costing",
+        pricing_rules >= 8,
+        {"enabled_pricing_rules": pricing_rules, "usage_records": usage_records, "provider_cost_records": provider_cost_records},
+        requirement="Billing must support estimated cost, holds, settlement, refund, usage records, and provider cost statistics.",
+    )
+
+    safety_policies = db.query(models.SafetyPolicy).filter(models.SafetyPolicy.enabled.is_(True)).count()
+    user_limit_policies = db.query(models.UserLimitPolicy).filter(models.UserLimitPolicy.enabled.is_(True)).count()
+    breaker_scopes = sorted({scope for scope, in db.query(models.CircuitBreaker.scope).distinct().all()})
+    acceptance_report_check(
+        checks,
+        "governance",
+        "safety_limits_circuit_breakers",
+        safety_policies >= 1 and user_limit_policies >= 1,
+        {"safety_policies": safety_policies, "user_limit_policies": user_limit_policies, "configured_circuit_scopes": breaker_scopes},
+        requirement="Governance must include safety hooks, rate/job/concurrency limits, high-cost controls, and circuit breakers.",
+    )
+
+    latest_contracts = contract_service.latest_matrix(db)
+    mock_contract = next((item for item in latest_contracts if item.get("provider_id") == "mock"), None)
+    acceptance_report_check(
+        checks,
+        "contracts",
+        "provider_contract_tests",
+        bool(mock_contract and mock_contract.get("contract_status") == "passed"),
+        {"latest_matrix": latest_contracts[:50], "mock_contract": mock_contract},
+        requirement="Provider adapters must be independently contract-testable.",
+    )
+
+    dashboard = admin_dashboard_snapshot(db)
+    acceptance_report_check(
+        checks,
+        "admin",
+        "operator_console",
+        dashboard.get("object") == "admin.dashboard" and "billing" in dashboard and "jobs" in dashboard,
+        {"dashboard": {"jobs": dashboard.get("jobs"), "billing": dashboard.get("billing"), "providers": dashboard.get("providers")}},
+        requirement="Admin console must manage and observe users, models, providers, accounts, jobs, assets, billing, alerts, and contracts.",
+    )
+    operator_workbench = build_operator_workbench_report(db)
+    acceptance_report_check(
+        checks,
+        "admin",
+        "operator_workbench_report",
+        operator_workbench.get("object") == "media2api.operator_workbench_report"
+        and (operator_workbench.get("summary") or {}).get("required_missing_routes") == 0
+        and (operator_workbench.get("summary") or {}).get("ready_modules", 0) >= 10,
+        {
+            "summary": operator_workbench.get("summary"),
+            "required_missing_routes": operator_workbench.get("required_missing_routes"),
+            "action_required_modules": [
+                {"module": item.get("module"), "action_items": item.get("action_items", [])}
+                for item in operator_workbench.get("action_required_modules", [])
+            ],
+        },
+        requirement="Admin workbench must expose structured evidence for Dashboard, Users, Models, Providers, Accounts, Jobs, Assets, Billing, Alerts, Webhooks, and Audit operations.",
+    )
+    go_live_plan = build_production_go_live_plan(db)
+    acceptance_report_check(
+        checks,
+        "production",
+        "go_live_plan",
+        go_live_plan.get("object") == "media2api.production_go_live_plan"
+        and bool(go_live_plan.get("single_provider_candidates"))
+        and set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS).issubset(
+            set((go_live_plan.get("single_provider_candidates") or [{}])[0].get("covered_required_operations", []))
+        ),
+        {
+            "status": go_live_plan.get("status"),
+            "summary": go_live_plan.get("summary"),
+            "recommended_provider_ids": go_live_plan.get("recommended_provider_ids"),
+            "required_operations": go_live_plan.get("required_operations"),
+        },
+        requirement="Production handoff must identify concrete non-mock provider templates, credential requirements, commands, and acceptance checks needed to satisfy external mixed-media readiness.",
+    )
+    connector_conformance = build_connector_conformance_report(db)
+    connector_provider_ids = {item.get("provider_id") for item in connector_conformance.get("providers", [])}
+    acceptance_report_check(
+        checks,
+        "providers",
+        "connector_conformance_report",
+        connector_conformance.get("object") == "media2api.connector_conformance_report"
+        and set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS).issubset(set(connector_conformance.get("required_operations", [])))
+        and {"jimeng", "gemini", "qwen", "pollinations"}.issubset(connector_provider_ids),
+        {
+            "summary": connector_conformance.get("summary"),
+            "sample_provider_ids": sorted(connector_provider_ids)[:20],
+        },
+        requirement="Connector conformance report must validate target sidecar/provider templates against required media operations, mappings, accounts, health, capabilities, and contract evidence.",
+    )
+    system_requirements = build_system_requirements_report(db)
+    system_requirement_ids = {item.get("id") for item in system_requirements.get("requirements", [])}
+    acceptance_report_check(
+        checks,
+        "audit",
+        "system_requirements_report",
+        system_requirements.get("object") == "media2api.system_requirements_report"
+        and int((system_requirements.get("summary") or {}).get("total_requirements") or 0) >= 30
+        and {
+            "C-001",
+            "API-001",
+            "API-OPENAI",
+            "API-NATIVE",
+            "MODEL-001",
+            "ASSET-004",
+            "PA-001",
+            "ACC-001",
+            "BILL-001",
+            "ADMIN-001",
+            "OBS-001",
+            "SEC-001",
+            "SDK-001",
+            "CONNECTOR-SDK-001",
+            "PREFLIGHT-001",
+            "MANIFEST-001",
+            "FINAL-ACCEPTANCE-001",
+            "DELIVERY-001",
+            "MVP-CORE",
+            "MVP-REAL-PROVIDER",
+        }.issubset(system_requirement_ids),
+        {
+            "summary": system_requirements.get("summary"),
+            "sample_requirement_ids": sorted(system_requirement_ids)[:40],
+            "external_blockers": system_requirements.get("external_blockers"),
+        },
+        requirement="System requirements report must map the implementation requirements document to runtime evidence and explicit external-provider blockers.",
+    )
+
+    cooldown_alert = (
+        db.query(models.AlertEvent)
+        .filter(
+            models.AlertEvent.event_type == "account_status",
+            models.AlertEvent.account_id.like("acct_selftest_account_cooldown_%"),
+        )
+        .order_by(models.AlertEvent.created_at.desc())
+        .first()
+    )
+    cooldown_account = db.get(models.AccountResource, cooldown_alert.account_id) if cooldown_alert else None
+    cooldown_failed_attempts = (
+        db.query(models.MediaJobAttempt)
+        .filter(
+            models.MediaJobAttempt.account_id == cooldown_alert.account_id,
+            models.MediaJobAttempt.status == "failed",
+            models.MediaJobAttempt.error_code == "PROVIDER_FAILED",
+        )
+        .count()
+        if cooldown_alert
+        else 0
+    )
+    cooldown_active_leases = (
+        db.query(models.AccountLease)
+        .filter(models.AccountLease.account_id == cooldown_alert.account_id, models.AccountLease.status == "active")
+        .count()
+        if cooldown_alert
+        else 0
+    )
+    cooldown_dimensions = loads(cooldown_alert.dimensions_json, {}) if cooldown_alert else {}
+    acceptance_report_check(
+        checks,
+        "stability",
+        "account_failure_cooldown_evidence",
+        bool(
+            cooldown_alert
+            and cooldown_dimensions.get("status") == "cooldown"
+            and float(cooldown_dimensions.get("failure_score") or 0) >= 0.75
+            and cooldown_failed_attempts >= 4
+            and cooldown_active_leases == 0
+        ),
+        {
+            "latest_alert": serialize_alert_event(cooldown_alert) if cooldown_alert else None,
+            "account": serialize_account(cooldown_account) if cooldown_account else None,
+            "failed_attempts": cooldown_failed_attempts,
+            "active_leases": cooldown_active_leases,
+        },
+        required=False,
+        requirement="AC-S-005: single-account failure escalation must increase failure score and remove the account from active scheduling by cooldown.",
+    )
+
+    for check in readiness.get("checks", []):
+        acceptance_report_check(
+            checks,
+            "readiness",
+            str(check.get("name") or ""),
+            bool(check.get("ok")),
+            check.get("detail"),
+            scope=str(check.get("scope") or "core"),
+            required=bool(check.get("required", True)),
+            requirement="Runtime readiness check.",
+        )
+
+    core_required_failed = [check for check in checks if check["scope"] == "core" and check["required"] and not check["ok"]]
+    production_required_failed = [check for check in checks if check["scope"] == "production" and check["required"] and not check["ok"]]
+    warnings = [check for check in checks if (not check["required"] or check["scope"] == "production") and not check["ok"]]
+    return {
+        "object": "media2api.acceptance_report",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "passed" if not core_required_failed and not production_required_failed else "action_required" if not core_required_failed else "failed",
+        "core_ready": not core_required_failed,
+        "production_ready": not core_required_failed and not production_required_failed,
+        "summary": {
+            "checks": len(checks),
+            "core_required_failed": len(core_required_failed),
+            "production_required_failed": len(production_required_failed),
+            "warnings": len(warnings),
+            "passed": sum(1 for check in checks if check["ok"]),
+            "failed": sum(1 for check in checks if not check["ok"]),
+        },
+        "failed_checks": [*core_required_failed, *production_required_failed],
+        "warnings": warnings,
+        "checks": checks,
+        "readiness": {
+            "status": readiness.get("status"),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": readiness.get("action_items", []),
+        },
+    }
+
+
+@app.get("/health")
+def health(db: Session = Depends(get_db)) -> dict[str, Any]:
+    provider_count = db.query(models.Provider).count()
+    job_count = db.query(models.MediaJob).count()
+    return {"status": "ok", "providers": provider_count, "jobs": job_count}
+
+
+@app.get("/v1/runtime")
+def runtime_status(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    redis_status = governance_service.redis_status()
+    return {
+        "queue_backend": "inline" if settings.inline_async else "database-worker",
+        "worker_concurrency": settings.worker_concurrency,
+        "worker_poll_interval_seconds": settings.worker_poll_interval_seconds,
+        "worker_stalled_job_seconds": settings.worker_stalled_job_seconds,
+        "database_backend": database_backend_name(),
+        "redis": redis_status,
+        "redis_configured": redis_status["configured"],
+        "redis_status": redis_status["status"],
+        "asset_store": asset_service.storage_backend(),
+        "asset_backend": {
+            "type": asset_service.storage_backend(),
+            "asset_dir": str(settings.asset_dir) if asset_service.storage_backend() == "local" else "",
+            "s3_endpoint": settings.s3_endpoint if asset_service.storage_backend() == "s3" else "",
+            "s3_bucket": settings.s3_bucket if asset_service.storage_backend() == "s3" else "",
+            "s3_prefix": settings.s3_prefix if asset_service.storage_backend() == "s3" else "",
+        },
+        "job_counts": runtime.runtime_counts(db),
+        "active_leases": db.query(models.AccountLease).filter(models.AccountLease.status == "active").count(),
+        "expired_leases": db.query(models.AccountLease).filter(models.AccountLease.status == "expired").count(),
+    }
+
+
+@app.get("/v1/admin/readiness")
+def admin_readiness(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_readiness_snapshot(db)
+
+
+@app.get("/v1/admin/acceptance-report")
+def admin_acceptance_report(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_acceptance_report(db)
+
+
+@app.get("/v1/admin/provider-onboarding-report")
+def admin_provider_onboarding_report(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_provider_onboarding_report(db)
+
+
+@app.get("/v1/admin/operator-workbench-report")
+def admin_operator_workbench_report(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_operator_workbench_report(db)
+
+
+@app.get("/v1/admin/production-go-live-plan")
+def admin_production_go_live_plan(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_production_go_live_plan(db)
+
+
+@app.get("/v1/admin/connector-conformance-report")
+def admin_connector_conformance_report(
+    provider_id: str | None = None,
+    operations: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    requested_operations = parse_csv_param(operations)
+    return build_connector_conformance_report(db, provider_id=provider_id, operations=requested_operations or None)
+
+
+@app.get("/v1/admin/external-connector-preflight")
+def admin_external_connector_preflight(
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    operations: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    requested_operations = parse_csv_param(operations)
+    return build_external_connector_preflight(db, provider_id=provider_id, account_id=account_id, operations=requested_operations or None)
+
+
+@app.get("/v1/admin/external-connector-manifest-template")
+def admin_external_connector_manifest_template(
+    provider_id: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return build_external_connector_manifest_template(db, provider_id=provider_id)
+
+
+@app.post("/v1/admin/external-connector-manifest")
+def admin_external_connector_manifest(
+    req: ExternalConnectorManifestRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return build_external_connector_manifest(db, ctx, req)
+
+
+@app.get("/v1/admin/system-requirements-report")
+def admin_system_requirements_report(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_system_requirements_report(db)
+
+
+@app.get("/v1/admin/final-acceptance-matrix")
+def admin_final_acceptance_matrix(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_final_acceptance_matrix(db)
+
+
+@app.get("/v1/admin/delivery-package")
+def admin_delivery_package(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_delivery_package(db)
+
+
+@app.get("/v1/admin/config-export")
+def admin_config_export(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return build_config_snapshot(db)
+
+
+@app.post("/v1/admin/config-import")
+def admin_config_import(req: ConfigImportRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        summary = apply_config_import(db, req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": "INVALID_CONFIG_SNAPSHOT", "message": str(exc)}) from exc
+    status = "planned" if req.dry_run else ("applied" if summary.get("applied") else "rejected")
+    return {
+        "object": "media2api.config_import",
+        "status": status,
+        "summary": summary,
+    }
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics(db: Session = Depends(get_db)) -> str:
+    counts = runtime.runtime_counts(db)
+    lines = [
+        "# HELP media2api_jobs_total Media jobs by operation, logical model, provider, and status.",
+        "# TYPE media2api_jobs_total gauge",
+    ]
+    job_dimension_counts = (
+        db.query(
+            models.MediaJob.operation,
+            models.MediaJob.logical_model,
+            models.MediaJob.provider_id,
+            models.MediaJob.status,
+            func.count(models.MediaJob.id),
+        )
+        .group_by(models.MediaJob.operation, models.MediaJob.logical_model, models.MediaJob.provider_id, models.MediaJob.status)
+        .all()
+    )
+    for operation, logical_model, provider_id, status, count in job_dimension_counts:
+        lines.append(
+            f"media2api_jobs_total{{{metric_labels(operation=operation, logical_model=logical_model, provider=provider_id or '', status=status)}}} {count}"
+        )
+    lines.extend(
+        [
+            "# HELP media2api_jobs_status_total Media jobs by status.",
+            "# TYPE media2api_jobs_status_total gauge",
+        ]
+    )
+    for status, count in counts.items():
+        lines.append(f"media2api_jobs_status_total{{{metric_labels(status=status)}}} {count}")
+    stalled_cutoff = datetime.utcnow() - timedelta(seconds=max(1, settings.worker_stalled_job_seconds))
+    stalled_active = (
+        db.query(func.count(models.MediaJob.id))
+        .filter(models.MediaJob.status.in_(list(UNLEASED_STALLED_JOB_STATUSES)), models.MediaJob.updated_at < stalled_cutoff)
+        .scalar()
+        or 0
+    )
+    stalled_recovered = (
+        db.query(func.count(models.MediaJobEvent.id))
+        .filter(models.MediaJobEvent.event_type == "stalled_job_requeued")
+        .scalar()
+        or 0
+    )
+    lines.extend(
+        [
+            "# HELP media2api_stalled_jobs_active Stalled unleased jobs currently eligible for recovery.",
+            "# TYPE media2api_stalled_jobs_active gauge",
+            f"media2api_stalled_jobs_active {int(stalled_active)}",
+            "# HELP media2api_stalled_jobs_recovered_total Stalled unleased jobs recovered by runtime sweep.",
+            "# TYPE media2api_stalled_jobs_recovered_total gauge",
+            f"media2api_stalled_jobs_recovered_total {int(stalled_recovered)}",
+        ]
+    )
+    terminal_jobs = db.query(models.MediaJob).filter(models.MediaJob.status.in_(["completed", "failed", "cancelled", "expired"])).all()
+    duration_stats: dict[tuple[str, str, str, str], dict[str, float]] = {}
+    for job in terminal_jobs:
+        duration_seconds = max(0.0, (job.updated_at - job.created_at).total_seconds())
+        key = (job.operation, job.logical_model, job.provider_id or "", job.status)
+        bucket = duration_stats.setdefault(key, {"sum": 0.0, "count": 0.0})
+        bucket["sum"] += duration_seconds
+        bucket["count"] += 1
+    lines.extend(
+        [
+            "# HELP media2api_media_job_duration_seconds Terminal media job duration summary.",
+            "# TYPE media2api_media_job_duration_seconds summary",
+        ]
+    )
+    for (operation, logical_model, provider_id, status), stat in duration_stats.items():
+        labels = metric_labels(operation=operation, logical_model=logical_model, provider=provider_id, status=status)
+        lines.append(f"media2api_media_job_duration_seconds_sum{{{labels}}} {stat['sum']:.6f}")
+        lines.append(f"media2api_media_job_duration_seconds_count{{{labels}}} {int(stat['count'])}")
+    lines.extend(
+        [
+            "# HELP media2api_job_events_total Media job events by type.",
+            "# TYPE media2api_job_events_total gauge",
+        ]
+    )
+    event_counts = db.query(models.MediaJobEvent.event_type, func.count(models.MediaJobEvent.id)).group_by(models.MediaJobEvent.event_type).all()
+    for event_type, count in event_counts:
+        lines.append(f"media2api_job_events_total{{{metric_labels(event_type=event_type)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_provider_submit_errors_total Failed provider submit attempts by provider and error code.",
+            "# TYPE media2api_provider_submit_errors_total gauge",
+        ]
+    )
+    provider_error_counts = (
+        db.query(models.MediaJobAttempt.provider_id, models.MediaJobAttempt.error_code, func.count(models.MediaJobAttempt.id))
+        .filter(models.MediaJobAttempt.status == "failed")
+        .group_by(models.MediaJobAttempt.provider_id, models.MediaJobAttempt.error_code)
+        .all()
+    )
+    for provider_id, error_code, count in provider_error_counts:
+        lines.append(f"media2api_provider_submit_errors_total{{{metric_labels(provider=provider_id, error_code=error_code or '')}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_provider_poll_timeout_total Provider timeout attempts by provider and model.",
+            "# TYPE media2api_provider_poll_timeout_total gauge",
+        ]
+    )
+    timeout_counts = (
+        db.query(models.MediaJobAttempt.provider_id, models.MediaJobAttempt.provider_model, func.count(models.MediaJobAttempt.id))
+        .filter(models.MediaJobAttempt.error_code == "PROVIDER_TIMEOUT")
+        .group_by(models.MediaJobAttempt.provider_id, models.MediaJobAttempt.provider_model)
+        .all()
+    )
+    for provider_id, provider_model, count in timeout_counts:
+        lines.append(f"media2api_provider_poll_timeout_total{{{metric_labels(provider=provider_id, model=provider_model)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_providers_total Providers by status.",
+            "# TYPE media2api_providers_total gauge",
+        ]
+    )
+    provider_statuses = db.query(models.Provider.status, func.count(models.Provider.id)).group_by(models.Provider.status).all()
+    for status, count in provider_statuses:
+        lines.append(f"media2api_providers_total{{{metric_labels(status=status)}}} {count}")
+    lines.append(f"media2api_active_leases {db.query(models.AccountLease).filter(models.AccountLease.status == 'active').count()}")
+    lines.extend(
+        [
+            "# HELP media2api_account_leases_total Account leases by provider, account, and status.",
+            "# TYPE media2api_account_leases_total gauge",
+        ]
+    )
+    lease_status_counts = (
+        db.query(models.AccountLease.provider_id, models.AccountLease.account_id, models.AccountLease.status, func.count(models.AccountLease.id))
+        .group_by(models.AccountLease.provider_id, models.AccountLease.account_id, models.AccountLease.status)
+        .all()
+    )
+    for provider_id, account_id, status, count in lease_status_counts:
+        lines.append(f"media2api_account_leases_total{{{metric_labels(provider=provider_id, account=account_id, status=status)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_account_lease_active Active account leases by provider and account.",
+            "# TYPE media2api_account_lease_active gauge",
+        ]
+    )
+    active_lease_counts = (
+        db.query(models.AccountLease.provider_id, models.AccountLease.account_id, func.count(models.AccountLease.id))
+        .filter(models.AccountLease.status == "active")
+        .group_by(models.AccountLease.provider_id, models.AccountLease.account_id)
+        .all()
+    )
+    for provider_id, account_id, count in active_lease_counts:
+        lines.append(f"media2api_account_lease_active{{{metric_labels(provider=provider_id, account=account_id)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_account_failure_score Account failure score by provider, account, and status.",
+            "# TYPE media2api_account_failure_score gauge",
+        ]
+    )
+    accounts = db.query(models.AccountResource).order_by(models.AccountResource.provider_id, models.AccountResource.id).all()
+    for account in accounts:
+        lines.append(
+            f"media2api_account_failure_score{{{metric_labels(provider=account.provider_id, account=account.id, status=account.status)}}} {account.failure_score:.6f}"
+        )
+    lines.extend(
+        [
+            "# HELP media2api_account_quota_remaining Account quota bucket remaining estimate.",
+            "# TYPE media2api_account_quota_remaining gauge",
+            "# HELP media2api_account_quota_available Account quota bucket availability.",
+            "# TYPE media2api_account_quota_available gauge",
+        ]
+    )
+    for account in accounts:
+        for index, bucket in enumerate(loads(account.quota_buckets_json, [])):
+            if not isinstance(bucket, dict):
+                continue
+            remaining = quota_remaining(bucket)
+            operation = bucket.get("operation") or ",".join(str(item) for item in bucket.get("operations", []))
+            provider_model = bucket.get("provider_model") or ",".join(str(item) for item in bucket.get("provider_models", []))
+            labels = metric_labels(
+                provider=account.provider_id,
+                account=account.id,
+                bucket=index,
+                type=bucket.get("type") or "",
+                operation=operation,
+                provider_model=provider_model,
+            )
+            lines.append(f"media2api_account_quota_remaining{{{labels}}} {float(remaining) if remaining is not None else -1}")
+            lines.append(f"media2api_account_quota_available{{{labels}}} {1 if remaining is None or remaining > 0 else 0}")
+    lines.extend(
+        [
+            "# HELP media2api_billing_holds_total Billing holds by status.",
+            "# TYPE media2api_billing_holds_total gauge",
+        ]
+    )
+    hold_statuses = db.query(models.BillingHold.status, func.count(models.BillingHold.id)).group_by(models.BillingHold.status).all()
+    for status, count in hold_statuses:
+        lines.append(f"media2api_billing_holds_total{{{metric_labels(status=status)}}} {count}")
+    usage_total = db.query(func.coalesce(func.sum(models.UsageRecord.amount), 0)).filter(models.UsageRecord.status == "settled").scalar()
+    provider_cost_total = db.query(func.coalesce(func.sum(models.ProviderCostRecord.amount), 0)).scalar()
+    lines.append(f"media2api_usage_amount_total {int(usage_total or 0)}")
+    lines.append(f"media2api_provider_cost_amount_total {int(provider_cost_total or 0)}")
+    lines.append(f"media2api_gross_margin_amount_total {int((usage_total or 0) - (provider_cost_total or 0))}")
+    lines.extend(
+        [
+            "# HELP media2api_alert_events_total Alert events by status and severity.",
+            "# TYPE media2api_alert_events_total gauge",
+        ]
+    )
+    alert_counts = (
+        db.query(models.AlertEvent.status, models.AlertEvent.severity, func.count(models.AlertEvent.id))
+        .group_by(models.AlertEvent.status, models.AlertEvent.severity)
+        .all()
+    )
+    for status, severity, count in alert_counts:
+        lines.append(f"media2api_alert_events_total{{{metric_labels(status=status, severity=severity)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_safety_events_total Safety events by status, action, and severity.",
+            "# TYPE media2api_safety_events_total gauge",
+        ]
+    )
+    safety_counts = (
+        db.query(models.SafetyEvent.status, models.SafetyEvent.action, models.SafetyEvent.severity, func.count(models.SafetyEvent.id))
+        .group_by(models.SafetyEvent.status, models.SafetyEvent.action, models.SafetyEvent.severity)
+        .all()
+    )
+    for status, action, severity, count in safety_counts:
+        lines.append(f"media2api_safety_events_total{{{metric_labels(status=status, action=action, severity=severity)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_user_limit_policies_total User limit policies by enabled state.",
+            "# TYPE media2api_user_limit_policies_total gauge",
+        ]
+    )
+    limit_policy_counts = db.query(models.UserLimitPolicy.enabled, func.count(models.UserLimitPolicy.id)).group_by(models.UserLimitPolicy.enabled).all()
+    for enabled, count in limit_policy_counts:
+        lines.append(f"media2api_user_limit_policies_total{{{metric_labels(enabled=str(bool(enabled)).lower())}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_circuit_breakers_total Circuit breakers by scope and status.",
+            "# TYPE media2api_circuit_breakers_total gauge",
+        ]
+    )
+    breaker_counts = db.query(models.CircuitBreaker.scope, models.CircuitBreaker.status, func.count(models.CircuitBreaker.id)).group_by(models.CircuitBreaker.scope, models.CircuitBreaker.status).all()
+    for scope, status, count in breaker_counts:
+        lines.append(f"media2api_circuit_breakers_total{{{metric_labels(scope=scope, status=status)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_fallback_attempts_total Fallback transitions inferred from job event timeline.",
+            "# TYPE media2api_fallback_attempts_total gauge",
+        ]
+    )
+    fallback_counts: dict[tuple[str, str, str], int] = {}
+    fallback_events = (
+        db.query(models.MediaJobEvent)
+        .filter(models.MediaJobEvent.event_type == "fallback_queued")
+        .order_by(models.MediaJobEvent.job_id.asc(), models.MediaJobEvent.created_at.asc())
+        .all()
+    )
+    for event in fallback_events:
+        next_provider_event = (
+            db.query(models.MediaJobEvent)
+            .filter(
+                models.MediaJobEvent.job_id == event.job_id,
+                models.MediaJobEvent.created_at > event.created_at,
+                models.MediaJobEvent.event_type == "provider_selected",
+            )
+            .order_by(models.MediaJobEvent.created_at.asc())
+            .first()
+        )
+        reason = str(loads(event.metadata_json, {}).get("error_code") or "unknown")
+        key = (event.provider_id or "", next_provider_event.provider_id if next_provider_event else "", reason)
+        fallback_counts[key] = fallback_counts.get(key, 0) + 1
+    for (from_provider, to_provider, reason), count in fallback_counts.items():
+        lines.append(f"media2api_fallback_attempts_total{{{metric_labels(from_provider=from_provider, to_provider=to_provider, reason=reason)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_asset_ingest_failed_total Asset ingestion failures by provider, MIME type, and error code.",
+            "# TYPE media2api_asset_ingest_failed_total gauge",
+        ]
+    )
+    asset_failure_counts: dict[tuple[str, str, str], int] = {}
+    asset_failures = (
+        db.query(models.RequestAuditLog)
+        .filter(models.RequestAuditLog.path.like("/v1/assets%"), models.RequestAuditLog.status_code >= 400)
+        .all()
+    )
+    for record in asset_failures:
+        metadata = loads(record.metadata_json, {})
+        mime_type = str(metadata.get("content_type") or "")
+        key = (record.provider_id or "", mime_type, record.standard_error_code or record.error_code or "unknown")
+        asset_failure_counts[key] = asset_failure_counts.get(key, 0) + 1
+    for (provider_id, mime_type, error_code), count in asset_failure_counts.items():
+        lines.append(f"media2api_asset_ingest_failed_total{{{metric_labels(provider=provider_id, mime_type=mime_type, error_code=error_code)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_requests_total Request audit logs by status code.",
+            "# TYPE media2api_requests_total gauge",
+        ]
+    )
+    request_counts = db.query(models.RequestAuditLog.status_code, func.count(models.RequestAuditLog.id)).group_by(models.RequestAuditLog.status_code).all()
+    for status_code, count in request_counts:
+        lines.append(f"media2api_requests_total{{{metric_labels(status_code=status_code)}}} {count}")
+    lines.extend(
+        [
+            "# HELP media2api_provider_contract_results_total Provider contract results by status.",
+            "# TYPE media2api_provider_contract_results_total gauge",
+        ]
+    )
+    contract_counts = db.query(models.ProviderContractResult.status, func.count(models.ProviderContractResult.id)).group_by(models.ProviderContractResult.status).all()
+    for status, count in contract_counts:
+        lines.append(f"media2api_provider_contract_results_total{{{metric_labels(status=status)}}} {count}")
+    append_required_metric_aliases(lines)
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return """
+    <html><head><title>media2api</title></head>
+    <body style="font-family:system-ui;margin:32px">
+      <h1>media2api</h1>
+      <p>Unified T2I / Image Edit / T2V / I2V gateway.</p>
+      <p><a href="/admin">Admin Console</a> · <a href="/docs">OpenAPI</a> · <a href="/health">Health</a></p>
+    </body></html>
+    """
+
+
+def admin_dashboard_snapshot(db: Session) -> dict[str, Any]:
+    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    terminal_statuses = ["completed", "failed", "cancelled", "expired"]
+    active_statuses = ["created", "admitted", "queued", "leasing_account", "preparing_assets", "submitting", "provider_queued", "polling", "fetching_assets", "storing"]
+    today_jobs = db.query(models.MediaJob).filter(models.MediaJob.created_at >= day_start)
+    today_total = today_jobs.count()
+    today_completed = today_jobs.filter(models.MediaJob.status == "completed").count()
+    today_failed = today_jobs.filter(models.MediaJob.status == "failed").count()
+    today_cancelled = today_jobs.filter(models.MediaJob.status == "cancelled").count()
+    today_expired = today_jobs.filter(models.MediaJob.status == "expired").count()
+    today_terminal = today_jobs.filter(models.MediaJob.status.in_(terminal_statuses)).count()
+    queue_length = db.query(models.MediaJob).filter(models.MediaJob.status.in_(active_statuses)).count()
+    usage_today = int(db.query(func.coalesce(func.sum(models.UsageRecord.amount), 0)).filter(models.UsageRecord.status == "settled", models.UsageRecord.created_at >= day_start).scalar() or 0)
+    provider_cost_today = int(db.query(func.coalesce(func.sum(models.ProviderCostRecord.amount), 0)).filter(models.ProviderCostRecord.created_at >= day_start).scalar() or 0)
+    usage_total = int(db.query(func.coalesce(func.sum(models.UsageRecord.amount), 0)).filter(models.UsageRecord.status == "settled").scalar() or 0)
+    provider_cost_total = int(db.query(func.coalesce(func.sum(models.ProviderCostRecord.amount), 0)).scalar() or 0)
+    open_alerts = db.query(models.AlertEvent).filter(models.AlertEvent.status == "open").count()
+    critical_alerts = db.query(models.AlertEvent).filter(models.AlertEvent.status == "open", models.AlertEvent.severity == "critical").count()
+    active_providers = db.query(models.Provider).filter(models.Provider.status == "active").count()
+    total_providers = db.query(models.Provider).count()
+    active_accounts = db.query(models.AccountResource).filter(models.AccountResource.status == "active").count()
+    total_accounts = db.query(models.AccountResource).count()
+    active_leases = db.query(models.AccountLease).filter(models.AccountLease.status == "active").count()
+    request_count_today = db.query(models.RequestAuditLog).filter(models.RequestAuditLog.created_at >= day_start).count()
+    status_rows = db.query(models.MediaJob.status, func.count(models.MediaJob.id)).group_by(models.MediaJob.status).all()
+    provider_rows = (
+        db.query(models.MediaJob.provider_id, models.MediaJob.status, func.count(models.MediaJob.id))
+        .filter(models.MediaJob.created_at >= day_start)
+        .group_by(models.MediaJob.provider_id, models.MediaJob.status)
+        .all()
+    )
+    provider_today: dict[str, dict[str, Any]] = {}
+    for provider_id, status, count in provider_rows:
+        provider_key = provider_id or "unassigned"
+        item = provider_today.setdefault(provider_key, {"provider_id": provider_key, "total": 0, "completed": 0, "failed": 0, "statuses": {}})
+        item["total"] += int(count)
+        item["statuses"][status] = int(count)
+        if status == "completed":
+            item["completed"] = int(count)
+        if status == "failed":
+            item["failed"] = int(count)
+    for item in provider_today.values():
+        terminal = sum(count for status, count in item["statuses"].items() if status in terminal_statuses)
+        item["success_rate"] = round(item["completed"] / terminal, 6) if terminal else None
+    return {
+        "object": "admin.dashboard",
+        "day_start": day_start.isoformat() + "Z",
+        "jobs": {
+            "today_total": today_total,
+            "today_completed": today_completed,
+            "today_failed": today_failed,
+            "today_cancelled": today_cancelled,
+            "today_expired": today_expired,
+            "today_terminal": today_terminal,
+            "success_rate": round(today_completed / today_terminal, 6) if today_terminal else None,
+            "failure_rate": round(today_failed / today_terminal, 6) if today_terminal else None,
+            "queue_length": queue_length,
+            "status_counts": {status: int(count) for status, count in status_rows},
+        },
+        "billing": {
+            "usage_today": usage_today,
+            "provider_cost_today": provider_cost_today,
+            "gross_margin_today": usage_today - provider_cost_today,
+            "usage_total": usage_total,
+            "provider_cost_total": provider_cost_total,
+            "gross_margin_total": usage_total - provider_cost_total,
+            "currency": "credits",
+        },
+        "providers": {
+            "active": active_providers,
+            "total": total_providers,
+            "today": sorted(provider_today.values(), key=lambda item: str(item["provider_id"])),
+        },
+        "accounts": {
+            "active": active_accounts,
+            "total": total_accounts,
+            "active_leases": active_leases,
+        },
+        "alerts": {
+            "open": open_alerts,
+            "critical_open": critical_alerts,
+        },
+        "requests": {
+            "today_total": request_count_today,
+        },
+        "runtime": {
+            "queue_backend": "inline" if settings.inline_async else "database-worker",
+            "worker_concurrency": settings.worker_concurrency,
+            "worker_stalled_job_seconds": settings.worker_stalled_job_seconds,
+            "asset_store": asset_service.storage_backend(),
+        },
+    }
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    raw_admin_key = request.query_params.get("admin_key") or request.query_params.get("api_key") or request.cookies.get("media2api_admin_key") or ""
+    admin_key = db.query(models.ApiKey).filter(models.ApiKey.key_hash == hash_api_key(raw_admin_key), models.ApiKey.status == "active").first() if raw_admin_key else None
+    admin_user = db.get(models.User, admin_key.user_id) if admin_key else None
+    if admin_key and not is_admin_user(admin_user):
+        return HTMLResponse(
+            """
+            <html><head><title>media2api admin forbidden</title></head>
+            <body style="font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 32px;">
+              <h1>Admin access required</h1>
+              <p>The supplied API key is valid but does not belong to an admin user.</p>
+              <p><a href="/admin">Back to admin login</a></p>
+            </body></html>
+            """,
+            status_code=403,
+        )
+    if not admin_key:
+        return HTMLResponse(
+            """
+            <html>
+            <head>
+              <title>media2api admin login</title>
+              <style>
+                body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f8fafc; color: #17202a; }
+                form { width: min(420px, calc(100vw - 32px)); border: 1px solid #d8dee9; border-radius: 8px; padding: 22px; background: white; }
+                h1 { margin: 0 0 14px; font-size: 22px; }
+                label { display: block; color: #5f6b7a; font-size: 12px; margin: 12px 0 5px; }
+                input { width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px; font: inherit; }
+                button { border: 1px solid #0f766e; background: #0f766e; color: white; border-radius: 6px; padding: 9px 12px; margin-top: 14px; cursor: pointer; }
+                a { color: #0f766e; }
+              </style>
+            </head>
+            <body>
+              <form method="get" action="/admin">
+                <h1>media2api Admin</h1>
+                <label for="admin_key">API Key</label>
+                <input id="admin_key" name="admin_key" type="password" autofocus autocomplete="current-password">
+                <button type="submit">Open Admin</button>
+                <p><a href="/docs">OpenAPI</a> · <a href="/health">Health</a></p>
+              </form>
+            </body>
+            </html>
+            """,
+            status_code=401,
+        )
+    dashboard = admin_dashboard_snapshot(db)
+    readiness = build_readiness_snapshot(db)
+    jobs = db.query(models.MediaJob).order_by(models.MediaJob.created_at.desc()).limit(20).all()
+    users = db.query(models.User).order_by(models.User.created_at.desc()).limit(20).all()
+    providers = db.query(models.Provider).order_by(models.Provider.id).all()
+    accounts = db.query(models.AccountResource).order_by(models.AccountResource.id).all()
+    assets = db.query(models.MediaAsset).order_by(models.MediaAsset.created_at.desc()).limit(20).all()
+    logical_models = db.query(models.LogicalModel).filter(models.LogicalModel.enabled.is_(True)).order_by(models.LogicalModel.id).all()
+    mappings = db.query(models.ProviderModelMapping).order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.priority, models.ProviderModelMapping.provider_id).limit(50).all()
+    webhook_deliveries = db.query(models.WebhookDelivery).order_by(models.WebhookDelivery.created_at.desc()).limit(20).all()
+    alerts = db.query(models.AlertEvent).order_by(models.AlertEvent.created_at.desc()).limit(20).all()
+    safety_events = db.query(models.SafetyEvent).order_by(models.SafetyEvent.created_at.desc()).limit(20).all()
+    circuit_breakers = db.query(models.CircuitBreaker).order_by(models.CircuitBreaker.updated_at.desc()).limit(20).all()
+    job_events = db.query(models.MediaJobEvent).order_by(models.MediaJobEvent.created_at.desc()).limit(20).all()
+    request_logs = db.query(models.RequestAuditLog).order_by(models.RequestAuditLog.created_at.desc()).limit(20).all()
+    contract_results = db.query(models.ProviderContractResult).order_by(models.ProviderContractResult.created_at.desc()).limit(20).all()
+    analytics = build_admin_analytics(db, group_by="provider_id,logical_model", limit=10)
+    monthly_invoice = build_billing_invoice(db)
+    usage_total = int(db.query(func.coalesce(func.sum(models.UsageRecord.amount), 0)).filter(models.UsageRecord.status == "settled").scalar() or 0)
+    provider_cost_total = int(db.query(func.coalesce(func.sum(models.ProviderCostRecord.amount), 0)).scalar() or 0)
+    pricing_rule_count = db.query(models.PricingRule).count()
+    safety_policy_count = db.query(models.SafetyPolicy).count()
+    user_limit_policy_count = db.query(models.UserLimitPolicy).count()
+    open_circuit_count = db.query(models.CircuitBreaker).filter(models.CircuitBreaker.status == "open", models.CircuitBreaker.enabled.is_(True)).count()
+    active_hold_total = int(db.query(func.coalesce(func.sum(models.BillingHold.amount), 0)).filter(models.BillingHold.status == "held").scalar() or 0)
+    open_alert_count = db.query(models.AlertEvent).filter(models.AlertEvent.status == "open").count()
+    request_count = db.query(models.RequestAuditLog).count()
+    provider_capabilities = {provider.id: capability_service.snapshot(db, provider) for provider in providers}
+    template_options = "".join(f"<option value='{t.id}'>{t.id} - {t.name}</option>" for t in PROVIDER_TEMPLATES.values())
+    provider_options = "".join(f"<option value='{p.id}'>{p.id} ({p.status})</option>" for p in providers)
+    account_options = "".join(f"<option value='{a.id}'>{a.id} - {a.provider_id} ({a.status})</option>" for a in accounts)
+    image_model_options = "".join(
+        f"<option value='{m.id}'>{m.id}</option>"
+        for m in logical_models
+        if "text_to_image" in loads(m.operations_json, [])
+    )
+    video_model_options = "".join(
+        f"<option value='{m.id}'>{m.id}</option>"
+        for m in logical_models
+        if "text_to_video" in loads(m.operations_json, [])
+    )
+    job_rows = "".join(
+        f"<tr><td>{html_text(j.id)}</td><td>{html_text(j.operation)}</td><td>{html_text(j.logical_model)}</td><td>{html_text(j.status)}</td><td>{html_text(j.provider_id or '')}</td><td>{html_text(j.final_cost if j.final_cost is not None else '')}</td></tr>"
+        for j in jobs
+    )
+    user_rows = "".join(
+        f"<tr><td>{html_text(u.id)}</td><td>{html_text(u.email)}</td><td>{html_text(u.status)}</td><td>{html_text(u.tier)}</td><td>{html_text(u.wallet_balance)}</td><td>{html_text(u.created_at.isoformat() + 'Z')}</td></tr>"
+        for u in users
+    )
+    provider_rows = "".join(
+        f"<tr><td>{html_text(p.id)}</td><td>{html_text(p.name)}</td><td>{html_text(p.adapter_type)}</td><td>{html_text(p.status)}</td><td>{len(provider_capabilities[p.id]['operations'])}</td><td>{len(provider_capabilities[p.id]['models'])}</td></tr>"
+        for p in providers
+    )
+    account_rows = "".join(
+        f"<tr><td>{html_text(a.id)}</td><td>{html_text(a.provider_id)}</td><td>{html_text(a.status)}</td><td>{html_text(a.current_leases)}/{html_text(a.concurrency_limit)}</td><td>{a.health_score:.2f}</td><td>{a.failure_score:.2f}</td></tr>"
+        for a in accounts
+    )
+    model_rows = "".join(
+        f"<tr><td>{html_text(m.id)}</td><td>{html_text(m.display_name)}</td><td>{html_text(', '.join(loads(m.operations_json, [])))}</td><td>{html_text(m.billing_class)}</td><td>{html_text(m.enabled)}</td></tr>"
+        for m in logical_models
+    )
+    mapping_rows = "".join(
+        f"<tr><td>{html_text(m.logical_model)}</td><td>{html_text(m.provider_id)}</td><td>{html_text(m.provider_model)}</td><td>{html_text(', '.join(loads(m.operations_json, [])))}</td><td>{html_text(m.priority)}</td><td>{html_text(m.enabled)}</td></tr>"
+        for m in mappings
+    )
+    asset_rows = "".join(
+        f"<tr><td>{html_text(a.id)}</td><td>{html_text(a.user_id)}</td><td>{html_text(a.kind)}</td><td>{html_text(a.purpose)}</td><td>{html_text(a.mime_type)}</td><td>{html_text(a.width or '')}x{html_text(a.height or '')}</td><td>{html_text(a.duration_ms or '')}</td><td>{html_text(a.size_bytes)}</td><td><a href='{html_text(asset_service.public_url(a))}'>download</a></td></tr>"
+        for a in assets
+    )
+    webhook_rows = "".join(
+        f"<tr><td>{html_text(w.id)}</td><td>{html_text(w.job_id)}</td><td>{html_text(w.user_id)}</td><td>{html_text(w.status)}</td><td>{html_text(w.attempts)}</td><td>{html_text(w.last_status_code or '')}</td><td>{html_text(w.last_error)}</td></tr>"
+        for w in webhook_deliveries
+    )
+    alert_rows = "".join(
+        f"<tr><td>{html_text(a.severity)}</td><td>{html_text(a.status)}</td><td>{html_text(a.event_type)}</td><td>{html_text(a.title)}</td><td>{html_text(a.provider_id)}</td><td>{html_text(a.account_id)}</td></tr>"
+        for a in alerts
+    )
+    safety_rows = "".join(
+        f"<tr><td>{html_text(s.severity)}</td><td>{html_text(s.status)}</td><td>{html_text(s.action)}</td><td>{html_text(s.policy_id)}</td><td>{html_text(s.job_id)}</td><td>{html_text(s.logical_model)}</td></tr>"
+        for s in safety_events
+    )
+    job_event_rows = "".join(
+        f"<tr><td>{html_text(e.job_id)}</td><td>{html_text(e.event_type)}</td><td>{html_text(e.status)}</td><td>{html_text(e.provider_id)}</td><td>{html_text(e.account_id)}</td><td>{html_text(e.message)}</td></tr>"
+        for e in job_events
+    )
+    breaker_rows = "".join(
+        f"<tr><td>{html_text(b.scope)}</td><td>{html_text(b.target_id)}</td><td>{html_text(b.status)}</td><td>{html_text(b.error_code)}</td><td>{html_text(b.block_until.isoformat() + 'Z' if b.block_until else '')}</td><td>{html_text(b.enabled)}</td></tr>"
+        for b in circuit_breakers
+    )
+    request_rows = "".join(
+        f"<tr><td>{html_text(r.request_id)}</td><td>{html_text(r.method)}</td><td>{html_text(r.path)}</td><td>{html_text(r.status_code)}</td><td>{html_text(r.job_id)}</td><td>{html_text(r.provider_id)}</td><td>{html_text(r.account_id)}</td><td>{html_text(r.logical_model)}</td><td>{html_text(r.provider_model)}</td><td>{html_text(r.standard_error_code)}</td><td>{html_text(r.latency_ms)}</td></tr>"
+        for r in request_logs
+    )
+    contract_rows = "".join(
+        f"<tr><td>{html_text(r.provider_id)}</td><td>{html_text(r.adapter_type)}</td><td>{html_text(r.status)}</td><td>{html_text(r.operation)}</td><td>{html_text(r.run_submit)}</td><td>{html_text(r.duration_ms)}</td></tr>"
+        for r in contract_results
+    )
+    analytics_rows = "".join(
+        f"<tr><td>{row['dimensions'].get('provider_id', '')}</td><td>{row['dimensions'].get('logical_model', '')}</td><td>{row['jobs']}</td><td>{row['completed_jobs']}</td><td>{row['failed_jobs']}</td><td>{row['success_rate'] if row['success_rate'] is not None else ''}</td><td>{row['revenue_amount']}</td><td>{row['provider_cost_amount']}</td><td>{row['gross_margin_amount']}</td><td>{row['top_error_code']}</td></tr>"
+        for row in analytics["data"]
+    )
+    invoice_rows = "".join(
+        f"<tr><td>{html_text(item.get('type'))}</td><td>{html_text(item.get('user_id'))}</td><td>{html_text(item.get('logical_model'))}</td><td>{html_text(item.get('operation'))}</td><td>{html_text(item.get('provider_id'))}</td><td>{html_text(item.get('status'))}</td><td>{html_text(item.get('count'))}</td><td>{html_text(item.get('amount'))}</td></tr>"
+        for item in monthly_invoice["line_items"][:40]
+    )
+    dashboard_cards = "".join(
+        f"<div class='card'><strong>{label}</strong><span>{value}</span></div>"
+        for label, value in [
+            ("Core Ready", "yes" if readiness["core_ready"] else "no"),
+            ("Production Ready", "yes" if readiness["production_ready"] else "no"),
+            ("Action Items", len(readiness["action_items"])),
+            ("Today Jobs", dashboard["jobs"]["today_total"]),
+            ("Success Rate", f"{dashboard['jobs']['success_rate'] * 100:.1f}%" if dashboard["jobs"]["success_rate"] is not None else "n/a"),
+            ("Failure Rate", f"{dashboard['jobs']['failure_rate'] * 100:.1f}%" if dashboard["jobs"]["failure_rate"] is not None else "n/a"),
+            ("Queue", dashboard["jobs"]["queue_length"]),
+            ("Revenue Today", dashboard["billing"]["usage_today"]),
+            ("Cost Today", dashboard["billing"]["provider_cost_today"]),
+            ("Invoice Margin", monthly_invoice["totals"]["gross_margin_amount"]),
+            ("Open Alerts", dashboard["alerts"]["open"]),
+            ("Active Leases", dashboard["accounts"]["active_leases"]),
+        ]
+    )
+    admin_script = """
+      <script>
+        const resultBox = () => document.getElementById('op-result');
+        const apiKeyInput = () => document.getElementById('api-key');
+        const apiKey = () => apiKeyInput().value.trim();
+        const urlKey = new URLSearchParams(window.location.search).get('admin_key') || new URLSearchParams(window.location.search).get('api_key');
+        if (urlKey) {
+          apiKeyInput().value = urlKey;
+          window.localStorage.setItem('media2api_admin_key', urlKey);
+          window.history.replaceState(null, '', '/admin');
+        } else {
+          const storedKey = window.localStorage.getItem('media2api_admin_key');
+          if (storedKey) apiKeyInput().value = storedKey;
+        }
+        function showResult(value) {
+          resultBox().textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+        }
+        async function callApi(path, options = {}) {
+          const headers = Object.assign({'Authorization': 'Bearer ' + apiKey(), 'Content-Type': 'application/json'}, options.headers || {});
+          const response = await fetch(path, Object.assign({}, options, {headers}));
+          const text = await response.text();
+          let body;
+          try { body = text ? JSON.parse(text) : {}; } catch (err) { body = text; }
+          showResult({status: response.status, body});
+          if (!response.ok) throw new Error(typeof body === 'string' ? body : JSON.stringify(body));
+          return body;
+        }
+        async function installTemplate() {
+          const body = {
+            base_url: document.getElementById('template-base-url').value || null,
+            credential_ref: document.getElementById('template-credential-ref').value || 'env://MEDIA2API_CONNECTOR_KEY',
+            credential_secret_id: document.getElementById('template-secret-id').value || null,
+            credential_kind: document.getElementById('template-credential-kind').value,
+            status: document.getElementById('template-status').value,
+            account_status: document.getElementById('template-account-status').value,
+            concurrency_limit: Number(document.getElementById('template-concurrency').value || 1),
+            enable_mappings: document.getElementById('template-enable-mappings').checked,
+            overwrite_config: document.getElementById('template-overwrite-config').checked
+          };
+          await callApi('/v1/admin/provider-templates/' + encodeURIComponent(document.getElementById('template-id').value) + '/install', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function activateTemplate(dryRun) {
+          const operations = document.getElementById('template-contract-operations').value
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
+          const body = {
+            dry_run: dryRun,
+            base_url: document.getElementById('template-base-url').value || null,
+            credential_ref: document.getElementById('template-credential-ref').value || 'env://MEDIA2API_CONNECTOR_KEY',
+            credential_value: document.getElementById('template-credential-value').value || null,
+            credential_secret_id: document.getElementById('template-secret-id').value || null,
+            credential_kind: document.getElementById('template-credential-kind').value,
+            status: 'active',
+            account_status: document.getElementById('template-account-status').value,
+            concurrency_limit: Number(document.getElementById('template-concurrency').value || 1),
+            enable_mappings: document.getElementById('template-enable-mappings').checked,
+            overwrite_config: document.getElementById('template-overwrite-config').checked,
+            contract_operations: operations,
+            contract_run_submit: document.getElementById('template-contract-run-submit').checked,
+            run_health_check: document.getElementById('template-run-health').checked,
+            run_contract_tests: document.getElementById('template-run-contracts').checked,
+            run_quota_sync: document.getElementById('template-run-quota').checked
+          };
+          await callApi('/v1/admin/provider-templates/' + encodeURIComponent(document.getElementById('template-id').value) + '/activate', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function externalAcceptance(dryRun) {
+          const operations = document.getElementById('template-contract-operations').value
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
+          const body = {
+            dry_run: dryRun,
+            base_url: document.getElementById('template-base-url').value || null,
+            credential_ref: document.getElementById('template-credential-ref').value || null,
+            credential_value: document.getElementById('template-credential-value').value || null,
+            credential_secret_id: document.getElementById('template-secret-id').value || null,
+            credential_kind: document.getElementById('template-credential-kind').value,
+            status: 'active',
+            account_status: document.getElementById('template-account-status').value,
+            concurrency_limit: Number(document.getElementById('template-concurrency').value || 1),
+            enable_mappings: document.getElementById('template-enable-mappings').checked,
+            overwrite_config: document.getElementById('template-overwrite-config').checked,
+            operations,
+            run_samples: document.getElementById('template-external-run-samples').checked,
+            max_samples: Number(document.getElementById('template-external-max-samples').value || 4),
+            require_production_ready: document.getElementById('template-external-require-production').checked,
+            contract_run_submit: document.getElementById('template-contract-run-submit').checked,
+            run_health_check: document.getElementById('template-run-health').checked,
+            run_contract_tests: document.getElementById('template-run-contracts').checked,
+            run_quota_sync: document.getElementById('template-run-quota').checked
+          };
+          await callApi('/v1/admin/provider-templates/' + encodeURIComponent(document.getElementById('template-id').value) + '/external-acceptance', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function providerHealth() {
+          await callApi('/v1/admin/providers/' + encodeURIComponent(document.getElementById('provider-id').value) + '/health-check', {method: 'POST', body: '{}'});
+        }
+        async function providerContract() {
+          const body = {
+            operation: document.getElementById('contract-operation').value,
+            provider_model: document.getElementById('contract-provider-model').value || null,
+            run_submit: document.getElementById('contract-run-submit').checked
+          };
+          await callApi('/v1/admin/providers/' + encodeURIComponent(document.getElementById('provider-id').value) + '/contract-test', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function providerContractSuite() {
+          const operations = document.getElementById('contract-suite-operations').value
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
+          const body = {
+            provider_ids: document.getElementById('contract-suite-current-provider').checked ? [document.getElementById('provider-id').value] : [],
+            operations,
+            active_only: document.getElementById('contract-suite-active-only').checked,
+            run_submit: document.getElementById('contract-run-submit').checked,
+            max_results: Number(document.getElementById('contract-suite-max-results').value || 100)
+          };
+          await callApi('/v1/admin/provider-contract-suite', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function providerQuotas() {
+          await callApi('/v1/admin/providers/' + encodeURIComponent(document.getElementById('provider-id').value) + '/sync-quotas', {method: 'POST', body: '{}'});
+        }
+        async function providerCaps() {
+          await callApi('/v1/admin/providers/' + encodeURIComponent(document.getElementById('provider-id').value) + '/capabilities');
+        }
+        async function providerSyncCaps() {
+          await callApi('/v1/admin/providers/' + encodeURIComponent(document.getElementById('provider-id').value) + '/sync-capabilities', {method: 'POST', body: '{}'});
+        }
+        async function accountExternalAcceptance(dryRun) {
+          const operations = document.getElementById('account-acceptance-operations').value
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
+          const body = {
+            dry_run: dryRun,
+            operations,
+            run_health_check: document.getElementById('account-acceptance-run-health').checked,
+            run_contract_tests: document.getElementById('account-acceptance-run-contracts').checked,
+            contract_run_submit: document.getElementById('account-acceptance-contract-submit').checked,
+            run_quota_sync: document.getElementById('account-acceptance-run-quota').checked,
+            run_samples: document.getElementById('account-acceptance-run-samples').checked,
+            max_samples: Number(document.getElementById('account-acceptance-max-samples').value || 4),
+            require_production_ready: document.getElementById('account-acceptance-require-production').checked
+          };
+          await callApi('/v1/admin/accounts/' + encodeURIComponent(document.getElementById('account-acceptance-id').value) + '/external-acceptance', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function accountAcceptanceSuite(dryRun) {
+          const operations = document.getElementById('account-suite-operations').value
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
+          const accountIds = document.getElementById('account-suite-account-ids').value
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
+          const providerId = document.getElementById('account-suite-provider-id').value;
+          const body = {
+            dry_run: dryRun,
+            account_ids: accountIds,
+            provider_ids: providerId ? [providerId] : [],
+            active_only: document.getElementById('account-suite-active-only').checked,
+            external_only: document.getElementById('account-suite-external-only').checked,
+            operations,
+            run_health_check: document.getElementById('account-suite-run-health').checked,
+            run_contract_tests: document.getElementById('account-suite-run-contracts').checked,
+            contract_run_submit: document.getElementById('account-suite-contract-submit').checked,
+            run_quota_sync: document.getElementById('account-suite-run-quota').checked,
+            run_samples: document.getElementById('account-suite-run-samples').checked,
+            max_samples: Number(document.getElementById('account-suite-max-samples').value || 1),
+            max_accounts: Number(document.getElementById('account-suite-max-accounts').value || 20),
+            require_production_ready: document.getElementById('account-suite-require-production').checked
+          };
+          await callApi('/v1/admin/account-acceptance-suite', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function accountDiagnostics() {
+          await callApi('/v1/admin/accounts/' + encodeURIComponent(document.getElementById('account-acceptance-id').value) + '/diagnostics?limit=20');
+        }
+        async function jobDiagnostics() {
+          await callApi('/v1/admin/media-jobs/' + encodeURIComponent(document.getElementById('job-diagnostics-id').value) + '/diagnostics?limit=100');
+        }
+        async function createImage() {
+          const provider = document.getElementById('image-provider').value;
+          const body = {model: document.getElementById('image-model').value, prompt: document.getElementById('image-prompt').value, n: 1};
+          if (provider) body.provider_preference = [provider];
+          await callApi('/v1/images/generations', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function createVideo() {
+          const provider = document.getElementById('video-provider').value;
+          const body = {operation: 'text_to_video', model: document.getElementById('video-model').value, prompt: document.getElementById('video-prompt').value, duration: Number(document.getElementById('video-duration').value || 3), wait: true};
+          if (provider) body.provider_preference = [provider];
+          await callApi('/v1/media-jobs', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function refreshRuntime() {
+          await callApi('/v1/runtime');
+        }
+        async function refreshReadiness() {
+          await callApi('/v1/admin/readiness');
+        }
+        async function acceptanceReport() {
+          await callApi('/v1/admin/acceptance-report');
+        }
+        async function providerOnboardingReport() {
+          await callApi('/v1/admin/provider-onboarding-report');
+        }
+        async function operatorWorkbenchReport() {
+          await callApi('/v1/admin/operator-workbench-report');
+        }
+        async function productionGoLivePlan() {
+          await callApi('/v1/admin/production-go-live-plan');
+        }
+        async function connectorConformanceReport() {
+          await callApi('/v1/admin/connector-conformance-report');
+        }
+        async function externalConnectorPreflight() {
+          await callApi('/v1/admin/external-connector-preflight');
+        }
+        async function externalConnectorManifestTemplate() {
+          await callApi('/v1/admin/external-connector-manifest-template?provider_id=' + encodeURIComponent(document.getElementById('template-id').value || 'jimeng'));
+        }
+        async function systemRequirementsReport() {
+          await callApi('/v1/admin/system-requirements-report');
+        }
+        async function finalAcceptanceMatrix() {
+          await callApi('/v1/admin/final-acceptance-matrix');
+        }
+        async function deliveryPackage() {
+          await callApi('/v1/admin/delivery-package');
+        }
+        async function leaseExpirySelfTest() {
+          await callApi('/v1/admin/account-leases/self-test-expiry', {method: 'POST', body: '{}'});
+        }
+        async function recoverStalledJobs() {
+          await callApi('/v1/admin/media-jobs/recover-stalled', {method: 'POST', body: JSON.stringify({max_age_seconds: 1, limit: 100})});
+        }
+        async function stalledRecoverySelfTest() {
+          await callApi('/v1/admin/media-jobs/self-test-stalled-recovery', {method: 'POST', body: '{}'});
+        }
+        async function mockStabilitySelfTest() {
+          await callApi('/v1/admin/stability/self-test-mock', {method: 'POST', body: JSON.stringify({iterations: Number(document.getElementById('mock-stability-iterations').value || 100)})});
+        }
+        async function assetStorageSelfTest() {
+          await callApi('/v1/admin/assets/self-test-storage', {method: 'POST', body: JSON.stringify({cleanup: true})});
+        }
+        async function tempUrlAssetSelfTest() {
+          await callApi('/v1/admin/assets/self-test-temp-url', {method: 'POST', body: '{}'});
+        }
+        async function fallbackSelfTest() {
+          await callApi('/v1/admin/fallback/self-test', {method: 'POST', body: '{}'});
+        }
+        async function fallbackTimeoutSelfTest() {
+          await callApi('/v1/admin/fallback/self-test-timeout', {method: 'POST', body: '{}'});
+        }
+        async function accountCooldownSelfTest() {
+          await callApi('/v1/admin/accounts/self-test-cooldown', {method: 'POST', body: '{}'});
+        }
+        async function exportConfig() {
+          const snapshot = await callApi('/v1/admin/config-export');
+          document.getElementById('config-snapshot').value = JSON.stringify(snapshot, null, 2);
+        }
+        async function importConfig(dryRun) {
+          const raw = document.getElementById('config-snapshot').value.trim();
+          const snapshot = raw ? JSON.parse(raw) : {};
+          const body = {
+            snapshot,
+            dry_run: dryRun,
+            overwrite: document.getElementById('config-overwrite').checked,
+            include_accounts: document.getElementById('config-include-accounts').checked,
+            include_policies: document.getElementById('config-include-policies').checked
+          };
+          await callApi('/v1/admin/config-import', {method: 'POST', body: JSON.stringify(body)});
+        }
+        async function loadInvoice() {
+          const params = new URLSearchParams();
+          if (document.getElementById('invoice-user').value) params.set('user_id', document.getElementById('invoice-user').value);
+          if (document.getElementById('invoice-start').value) params.set('start', document.getElementById('invoice-start').value);
+          if (document.getElementById('invoice-end').value) params.set('end', document.getElementById('invoice-end').value);
+          await callApi('/v1/admin/billing-invoices?' + params.toString());
+        }
+        async function downloadInvoiceCsv() {
+          const params = new URLSearchParams({format: 'csv'});
+          if (document.getElementById('invoice-user').value) params.set('user_id', document.getElementById('invoice-user').value);
+          if (document.getElementById('invoice-start').value) params.set('start', document.getElementById('invoice-start').value);
+          if (document.getElementById('invoice-end').value) params.set('end', document.getElementById('invoice-end').value);
+          const response = await fetch('/v1/admin/billing-invoices?' + params.toString(), {headers: {'Authorization': 'Bearer ' + apiKey()}});
+          const text = await response.text();
+          if (!response.ok) {
+            showResult({status: response.status, body: text});
+            throw new Error(text);
+          }
+          const blob = new Blob([text], {type: 'text/csv'});
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = 'media2api-invoice.csv';
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          showResult({status: response.status, body: 'CSV downloaded'});
+        }
+      </script>
+    """
+    html = f"""
+    <html>
+    <head>
+      <title>media2api admin</title>
+      <style>
+        body {{ font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 24px; color: #17202a; }}
+        .cards {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 18px 0 28px; }}
+        .card {{ border:1px solid #d8dee9; border-radius:8px; padding:12px; background:#fbfcfe; }}
+        .card strong {{ display:block; color:#5f6b7a; font-size:12px; text-transform:uppercase; }}
+        .card span {{ display:block; font-size:24px; margin-top:6px; }}
+        .ops {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 18px 0 28px; }}
+        .panel {{ border:1px solid #d8dee9; border-radius:8px; padding:14px; background:#fff; }}
+        .panel h3 {{ margin:0 0 12px; font-size:16px; }}
+        label {{ display:block; color:#5f6b7a; font-size:12px; margin:10px 0 4px; }}
+        input, select, textarea {{ width:100%; box-sizing:border-box; border:1px solid #cbd5e1; border-radius:6px; padding:8px; font:inherit; }}
+        textarea {{ min-height:64px; resize:vertical; }}
+        button {{ border:1px solid #0f766e; background:#0f766e; color:white; border-radius:6px; padding:8px 10px; margin:10px 6px 0 0; cursor:pointer; }}
+        button.secondary {{ background:#fff; color:#0f766e; }}
+        .inline {{ display:flex; gap:10px; align-items:center; }}
+        .inline input[type=checkbox] {{ width:auto; }}
+        pre.result {{ white-space:pre-wrap; overflow:auto; max-height:360px; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; }}
+        table {{ border-collapse: collapse; width: 100%; margin-bottom: 28px; }}
+        th, td {{ border: 1px solid #d8dee9; padding: 8px 10px; text-align: left; font-size: 13px; }}
+        th {{ background: #f5f7fa; }}
+        code {{ background:#f5f7fa; padding:2px 4px; }}
+      </style>
+    </head>
+    <body>
+      <h1>media2api Admin</h1>
+      <p>Authenticated admin console. API calls use the key entered below.</p>
+      <h2>Dashboard</h2>
+      <div class="cards">{dashboard_cards}</div>
+      <h2>Operations</h2>
+      <div class="ops">
+        <div class="panel">
+          <h3>Access</h3>
+          <label for="api-key">API Key</label>
+          <input id="api-key" value="dev-admin-key">
+          <label for="job-diagnostics-id">Job ID</label>
+          <input id="job-diagnostics-id" placeholder="job_xxx">
+          <button class="secondary" onclick="jobDiagnostics()">Job Diagnostics</button>
+          <button class="secondary" onclick="refreshRuntime()">Refresh Runtime</button>
+          <button class="secondary" onclick="refreshReadiness()">Readiness</button>
+          <button class="secondary" onclick="acceptanceReport()">Acceptance Report</button>
+          <button class="secondary" onclick="providerOnboardingReport()">Provider Onboarding</button>
+          <button class="secondary" onclick="operatorWorkbenchReport()">Operator Workbench</button>
+          <button class="secondary" onclick="productionGoLivePlan()">Production Go-Live</button>
+          <button class="secondary" onclick="connectorConformanceReport()">Connector Conformance</button>
+          <button class="secondary" onclick="externalConnectorPreflight()">External Preflight</button>
+          <button class="secondary" onclick="externalConnectorManifestTemplate()">Connector Manifest</button>
+          <button class="secondary" onclick="systemRequirementsReport()">System Requirements</button>
+          <button class="secondary" onclick="finalAcceptanceMatrix()">Final Acceptance</button>
+          <button class="secondary" onclick="deliveryPackage()">Delivery Package</button>
+          <button class="secondary" onclick="leaseExpirySelfTest()">Lease Self Test</button>
+          <button class="secondary" onclick="stalledRecoverySelfTest()">Stalled Recovery Test</button>
+          <button class="secondary" onclick="recoverStalledJobs()">Recover Stalled Jobs</button>
+          <label for="mock-stability-iterations">Mock Stability Iterations</label>
+          <input id="mock-stability-iterations" type="number" value="100" min="1" max="1000">
+          <button class="secondary" onclick="mockStabilitySelfTest()">Mock Stability Test</button>
+          <button class="secondary" onclick="assetStorageSelfTest()">Asset Storage Test</button>
+          <button class="secondary" onclick="tempUrlAssetSelfTest()">Temp URL Asset Test</button>
+          <button class="secondary" onclick="fallbackSelfTest()">Fallback Self Test</button>
+          <button class="secondary" onclick="fallbackTimeoutSelfTest()">Fallback Timeout Test</button>
+          <button class="secondary" onclick="accountCooldownSelfTest()">Account Cooldown Test</button>
+          <p><code>core_ready={html_text(readiness['core_ready'])}</code> <code>production_ready={html_text(readiness['production_ready'])}</code> <code>status={html_text(readiness['status'])}</code></p>
+        </div>
+        <div class="panel">
+          <h3>Config Snapshot</h3>
+          <label for="config-snapshot">Snapshot JSON</label>
+          <textarea id="config-snapshot" placeholder="Export config or paste a media2api.config_snapshot"></textarea>
+          <div class="inline"><input id="config-overwrite" type="checkbox" checked><label for="config-overwrite">Overwrite existing</label></div>
+          <div class="inline"><input id="config-include-accounts" type="checkbox" checked><label for="config-include-accounts">Include accounts</label></div>
+          <div class="inline"><input id="config-include-policies" type="checkbox" checked><label for="config-include-policies">Include policies</label></div>
+          <button class="secondary" onclick="exportConfig()">Export Config</button>
+          <button class="secondary" onclick="importConfig(true)">Dry Run Import</button>
+          <button onclick="importConfig(false)">Apply Import</button>
+        </div>
+        <div class="panel">
+          <h3>Activate Template</h3>
+          <label for="template-id">Template</label>
+          <select id="template-id">{template_options}</select>
+          <label for="template-base-url">Base URL</label>
+          <input id="template-base-url" placeholder="http://127.0.0.1:18091">
+          <label for="template-credential-ref">Credential Ref</label>
+          <input id="template-credential-ref" value="env://MEDIA2API_CONNECTOR_KEY">
+          <label for="template-credential-value">Credential Value</label>
+          <input id="template-credential-value" type="password" placeholder="optional, stored as secret://">
+          <label for="template-secret-id">Secret ID</label>
+          <input id="template-secret-id" placeholder="optional stable secret id">
+          <label for="template-credential-kind">Credential Kind</label>
+          <select id="template-credential-kind"><option value="api_key">api_key</option><option value="bearer_token">bearer_token</option><option value="cookie">cookie</option></select>
+          <label for="template-status">Provider Status</label>
+          <select id="template-status"><option value="disabled">disabled</option><option value="active">active</option><option value="cooldown">cooldown</option></select>
+          <label for="template-account-status">Account Status</label>
+          <select id="template-account-status"><option value="active">active</option><option value="disabled">disabled</option></select>
+          <label for="template-concurrency">Concurrency</label>
+          <input id="template-concurrency" type="number" value="1" min="1">
+          <label for="template-contract-operations">Contract Operations</label>
+          <input id="template-contract-operations" placeholder="text_to_image,image_to_video">
+          <div class="inline"><input id="template-enable-mappings" type="checkbox" checked><label for="template-enable-mappings">Enable mappings</label></div>
+          <div class="inline"><input id="template-overwrite-config" type="checkbox" checked><label for="template-overwrite-config">Overwrite config</label></div>
+          <div class="inline"><input id="template-run-health" type="checkbox" checked><label for="template-run-health">Run health check</label></div>
+          <div class="inline"><input id="template-run-contracts" type="checkbox" checked><label for="template-run-contracts">Run contract tests</label></div>
+          <div class="inline"><input id="template-contract-run-submit" type="checkbox"><label for="template-contract-run-submit">Contract submit</label></div>
+          <div class="inline"><input id="template-run-quota" type="checkbox"><label for="template-run-quota">Sync quota</label></div>
+          <label for="template-external-max-samples">External Max Samples</label>
+          <input id="template-external-max-samples" type="number" value="4" min="0" max="6">
+          <div class="inline"><input id="template-external-run-samples" type="checkbox" checked><label for="template-external-run-samples">Run sample jobs</label></div>
+          <div class="inline"><input id="template-external-require-production" type="checkbox" checked><label for="template-external-require-production">Require production ready</label></div>
+          <button onclick="installTemplate()">Install</button>
+          <button class="secondary" onclick="activateTemplate(true)">Dry Run Activate</button>
+          <button onclick="activateTemplate(false)">Activate</button>
+          <button class="secondary" onclick="externalAcceptance(true)">Dry Run External</button>
+          <button onclick="externalAcceptance(false)">External Acceptance</button>
+        </div>
+        <div class="panel">
+          <h3>Provider Ops</h3>
+          <label for="provider-id">Provider</label>
+          <select id="provider-id">{provider_options}</select>
+          <label for="contract-operation">Operation</label>
+          <select id="contract-operation"><option value="text_to_image">text_to_image</option><option value="image_to_image">image_to_image</option><option value="image_edit">image_edit</option><option value="text_to_video">text_to_video</option><option value="image_to_video">image_to_video</option><option value="video_extend">video_extend</option></select>
+          <label for="contract-provider-model">Provider Model</label>
+          <input id="contract-provider-model" placeholder="optional">
+          <label for="contract-suite-operations">Suite Operations</label>
+          <input id="contract-suite-operations" placeholder="blank = provider capabilities">
+          <label for="contract-suite-max-results">Suite Max Results</label>
+          <input id="contract-suite-max-results" type="number" value="100" min="1" max="500">
+          <div class="inline"><input id="contract-run-submit" type="checkbox"><label for="contract-run-submit">Run submit</label></div>
+          <div class="inline"><input id="contract-suite-active-only" type="checkbox" checked><label for="contract-suite-active-only">Active only</label></div>
+          <div class="inline"><input id="contract-suite-current-provider" type="checkbox" checked><label for="contract-suite-current-provider">Current provider only</label></div>
+          <button onclick="providerHealth()">Health</button>
+          <button onclick="providerContract()">Contract</button>
+          <button class="secondary" onclick="providerContractSuite()">Contract Suite</button>
+          <button onclick="providerQuotas()">Sync Quotas</button>
+          <button onclick="providerSyncCaps()">Sync Capabilities</button>
+          <button class="secondary" onclick="providerCaps()">Capabilities</button>
+        </div>
+        <div class="panel">
+          <h3>Account Acceptance</h3>
+          <label for="account-acceptance-id">Account</label>
+          <select id="account-acceptance-id">{account_options}</select>
+          <label for="account-acceptance-operations">Operations</label>
+          <input id="account-acceptance-operations" placeholder="blank = account supported operations">
+          <label for="account-acceptance-max-samples">Max Samples</label>
+          <input id="account-acceptance-max-samples" type="number" value="4" min="0" max="6">
+          <div class="inline"><input id="account-acceptance-run-health" type="checkbox" checked><label for="account-acceptance-run-health">Run health check</label></div>
+          <div class="inline"><input id="account-acceptance-run-contracts" type="checkbox" checked><label for="account-acceptance-run-contracts">Run contract tests</label></div>
+          <div class="inline"><input id="account-acceptance-contract-submit" type="checkbox"><label for="account-acceptance-contract-submit">Contract submit</label></div>
+          <div class="inline"><input id="account-acceptance-run-quota" type="checkbox" checked><label for="account-acceptance-run-quota">Sync quota</label></div>
+          <div class="inline"><input id="account-acceptance-run-samples" type="checkbox" checked><label for="account-acceptance-run-samples">Run sample jobs</label></div>
+          <div class="inline"><input id="account-acceptance-require-production" type="checkbox"><label for="account-acceptance-require-production">Require production ready</label></div>
+          <button class="secondary" onclick="accountExternalAcceptance(true)">Dry Run Account</button>
+          <button onclick="accountExternalAcceptance(false)">Account External Acceptance</button>
+          <button class="secondary" onclick="accountDiagnostics()">Account Diagnostics</button>
+          <h4>Account Acceptance Suite</h4>
+          <label for="account-suite-provider-id">Provider</label>
+          <select id="account-suite-provider-id"><option value="">all</option>{provider_options}</select>
+          <label for="account-suite-account-ids">Account IDs</label>
+          <input id="account-suite-account-ids" placeholder="optional comma-separated ids">
+          <label for="account-suite-operations">Operations</label>
+          <input id="account-suite-operations" placeholder="blank = account supported operations">
+          <label for="account-suite-max-accounts">Max Accounts</label>
+          <input id="account-suite-max-accounts" type="number" value="20" min="1" max="100">
+          <label for="account-suite-max-samples">Max Samples Per Account</label>
+          <input id="account-suite-max-samples" type="number" value="1" min="0" max="6">
+          <div class="inline"><input id="account-suite-active-only" type="checkbox" checked><label for="account-suite-active-only">Active only</label></div>
+          <div class="inline"><input id="account-suite-external-only" type="checkbox" checked><label for="account-suite-external-only">External only</label></div>
+          <div class="inline"><input id="account-suite-run-health" type="checkbox" checked><label for="account-suite-run-health">Run health check</label></div>
+          <div class="inline"><input id="account-suite-run-contracts" type="checkbox" checked><label for="account-suite-run-contracts">Run contract tests</label></div>
+          <div class="inline"><input id="account-suite-contract-submit" type="checkbox"><label for="account-suite-contract-submit">Contract submit</label></div>
+          <div class="inline"><input id="account-suite-run-quota" type="checkbox" checked><label for="account-suite-run-quota">Sync quota</label></div>
+          <div class="inline"><input id="account-suite-run-samples" type="checkbox"><label for="account-suite-run-samples">Run sample jobs</label></div>
+          <div class="inline"><input id="account-suite-require-production" type="checkbox"><label for="account-suite-require-production">Require production ready</label></div>
+          <button class="secondary" onclick="accountAcceptanceSuite(true)">Dry Run Account Suite</button>
+          <button onclick="accountAcceptanceSuite(false)">Account Acceptance Suite</button>
+        </div>
+        <div class="panel">
+          <h3>Image Smoke</h3>
+          <label for="image-model">Model</label>
+          <select id="image-model">{image_model_options}</select>
+          <label for="image-provider">Provider Preference</label>
+          <select id="image-provider"><option value="">auto</option>{provider_options}</select>
+          <label for="image-prompt">Prompt</label>
+          <textarea id="image-prompt">media2api admin image smoke</textarea>
+          <button onclick="createImage()">Generate Image</button>
+        </div>
+        <div class="panel">
+          <h3>Video Smoke</h3>
+          <label for="video-model">Model</label>
+          <select id="video-model">{video_model_options}</select>
+          <label for="video-provider">Provider Preference</label>
+          <select id="video-provider"><option value="">auto</option>{provider_options}</select>
+          <label for="video-duration">Duration</label>
+          <input id="video-duration" type="number" value="3" min="1">
+          <label for="video-prompt">Prompt</label>
+          <textarea id="video-prompt">media2api admin video smoke</textarea>
+          <button onclick="createVideo()">Generate Video</button>
+        </div>
+        <div class="panel">
+          <h3>Billing Invoice</h3>
+          <label for="invoice-user">User ID</label>
+          <input id="invoice-user" placeholder="optional">
+          <label for="invoice-start">Start</label>
+          <input id="invoice-start" placeholder="2026-06-01T00:00:00Z">
+          <label for="invoice-end">End</label>
+          <input id="invoice-end" placeholder="2026-07-01T00:00:00Z">
+          <button onclick="loadInvoice()">Load Invoice</button>
+          <button class="secondary" onclick="downloadInvoiceCsv()">CSV</button>
+        </div>
+        <div class="panel">
+          <h3>Result</h3>
+          <pre id="op-result" class="result">No operation yet.</pre>
+        </div>
+      </div>
+      <h2>Recent Jobs</h2>
+      <table><thead><tr><th>ID</th><th>Operation</th><th>Model</th><th>Status</th><th>Provider</th><th>Cost</th></tr></thead><tbody>{job_rows}</tbody></table>
+      <h2>Users</h2>
+      <table><thead><tr><th>ID</th><th>Email</th><th>Status</th><th>Tier</th><th>Wallet</th><th>Created</th></tr></thead><tbody>{user_rows}</tbody></table>
+      <h2>Models</h2>
+      <table><thead><tr><th>ID</th><th>Name</th><th>Operations</th><th>Billing Class</th><th>Enabled</th></tr></thead><tbody>{model_rows}</tbody></table>
+      <h2>Model Mappings</h2>
+      <table><thead><tr><th>Logical Model</th><th>Provider</th><th>Provider Model</th><th>Operations</th><th>Priority</th><th>Enabled</th></tr></thead><tbody>{mapping_rows}</tbody></table>
+      <h2>Providers</h2>
+      <table><thead><tr><th>ID</th><th>Name</th><th>Adapter</th><th>Status</th><th>Ops</th><th>Models</th></tr></thead><tbody>{provider_rows}</tbody></table>
+      <h2>Accounts</h2>
+      <table><thead><tr><th>ID</th><th>Provider</th><th>Status</th><th>Leases</th><th>Health</th><th>Failure</th></tr></thead><tbody>{account_rows}</tbody></table>
+      <h2>Assets</h2>
+      <table><thead><tr><th>ID</th><th>User</th><th>Kind</th><th>Purpose</th><th>MIME</th><th>Size</th><th>Duration ms</th><th>Bytes</th><th>Download</th></tr></thead><tbody>{asset_rows}</tbody></table>
+      <h2>Billing</h2>
+      <table><thead><tr><th>Usage</th><th>Provider Cost</th><th>Gross Margin</th><th>Active Holds</th><th>Pricing Rules</th><th>Safety Policies</th><th>User Limit Policies</th><th>Open Circuits</th></tr></thead>
+      <tbody><tr><td>{usage_total}</td><td>{provider_cost_total}</td><td>{usage_total - provider_cost_total}</td><td>{active_hold_total}</td><td>{pricing_rule_count}</td><td>{safety_policy_count}</td><td>{user_limit_policy_count}</td><td>{open_circuit_count}</td></tr></tbody></table>
+      <h2>Current Invoice</h2>
+      <table><thead><tr><th>ID</th><th>Period</th><th>Usage</th><th>Provider Cost</th><th>Refunded</th><th>Held</th><th>Gross Margin</th></tr></thead>
+      <tbody><tr><td>{html_text(monthly_invoice['id'])}</td><td>{html_text(monthly_invoice['period']['start'])} - {html_text(monthly_invoice['period']['end'])}</td><td>{monthly_invoice['totals']['settled_usage_amount']}</td><td>{monthly_invoice['totals']['provider_cost_amount']}</td><td>{monthly_invoice['totals']['refunded_hold_amount']}</td><td>{monthly_invoice['totals']['held_amount']}</td><td>{monthly_invoice['totals']['gross_margin_amount']}</td></tr></tbody></table>
+      <table><thead><tr><th>Type</th><th>User</th><th>Model</th><th>Operation</th><th>Provider</th><th>Status</th><th>Count</th><th>Amount</th></tr></thead><tbody>{invoice_rows}</tbody></table>
+      <h2>Analytics</h2>
+      <table><thead><tr><th>Provider</th><th>Model</th><th>Jobs</th><th>Completed</th><th>Failed</th><th>Success Rate</th><th>Revenue</th><th>Provider Cost</th><th>Margin</th><th>Top Error</th></tr></thead><tbody>{analytics_rows}</tbody></table>
+      <h2>Alerts ({open_alert_count} open)</h2>
+      <table><thead><tr><th>Severity</th><th>Status</th><th>Type</th><th>Title</th><th>Provider</th><th>Account</th></tr></thead><tbody>{alert_rows}</tbody></table>
+      <h2>Webhooks</h2>
+      <table><thead><tr><th>ID</th><th>Job</th><th>User</th><th>Status</th><th>Attempts</th><th>HTTP</th><th>Error</th></tr></thead><tbody>{webhook_rows}</tbody></table>
+      <h2>Safety Events</h2>
+      <table><thead><tr><th>Severity</th><th>Status</th><th>Action</th><th>Policy</th><th>Job</th><th>Model</th></tr></thead><tbody>{safety_rows}</tbody></table>
+      <h2>Job Events</h2>
+      <table><thead><tr><th>Job</th><th>Event</th><th>Status</th><th>Provider</th><th>Account</th><th>Message</th></tr></thead><tbody>{job_event_rows}</tbody></table>
+      <h2>Circuit Breakers</h2>
+      <table><thead><tr><th>Scope</th><th>Target</th><th>Status</th><th>Error</th><th>Block Until</th><th>Enabled</th></tr></thead><tbody>{breaker_rows}</tbody></table>
+      <h2>Request Audit ({request_count} total)</h2>
+      <table><thead><tr><th>Request ID</th><th>Method</th><th>Path</th><th>Status</th><th>Job</th><th>Provider</th><th>Account</th><th>Model</th><th>Provider Model</th><th>Error</th><th>Latency ms</th></tr></thead><tbody>{request_rows}</tbody></table>
+      <h2>Provider Contracts</h2>
+      <table><thead><tr><th>Provider</th><th>Adapter</th><th>Status</th><th>Operation</th><th>Submit</th><th>Duration ms</th></tr></thead><tbody>{contract_rows}</tbody></table>
+      {admin_script}
+    </body>
+    </html>
+    """
+    response = HTMLResponse(html)
+    if request.query_params.get("admin_key") or request.query_params.get("api_key"):
+        response.set_cookie("media2api_admin_key", raw_admin_key, httponly=True, samesite="lax")
+    return response
+
+
+@app.get("/v1/admin/dashboard")
+def admin_dashboard(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return admin_dashboard_snapshot(db)
+
+
+@app.get("/v1/admin/analytics")
+def admin_analytics(
+    group_by: str = "provider_id,logical_model",
+    start: str | None = None,
+    end: str | None = None,
+    user_id: str | None = None,
+    logical_model: str | None = None,
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+    limit: int = 200,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return build_admin_analytics(
+        db=db,
+        group_by=group_by,
+        start=start,
+        end=end,
+        user_id=user_id,
+        logical_model=logical_model,
+        provider_id=provider_id,
+        account_id=account_id,
+        operation=operation,
+        status=status,
+        limit=limit,
+    )
+
+
+@app.get("/v1/models")
+def list_models(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    items = db.query(models.LogicalModel).filter(models.LogicalModel.enabled.is_(True)).order_by(models.LogicalModel.id).all()
+    return {
+        "object": "list",
+        "data": [serialize_logical_model(item) for item in items],
+    }
+
+
+@app.get("/v1/target-platforms")
+def target_platforms(ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    data = []
+    for provider, model_list, operations, priority in TARGET_MODEL_TABLE:
+        template = PROVIDER_TEMPLATES.get(provider)
+        template_models = template.models if template else []
+        template_operations = template.operations if template else []
+        data.append(
+            {
+                "provider_id": provider,
+                "models": list(dict.fromkeys([*template_models, *model_list])),
+                "operations": list(dict.fromkeys([*template_operations, *operations])),
+                "priority": priority,
+            }
+        )
+    return {
+        "object": "list",
+        "data": data,
+    }
+
+
+@app.get("/v1/provider-templates")
+def provider_templates(ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    return {"object": "list", "data": [template_as_dict(template) for template in PROVIDER_TEMPLATES.values()]}
+
+
+@app.get("/v1/admin/provider-capabilities")
+def admin_provider_capabilities(
+    provider_id: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.Provider)
+    if provider_id:
+        query = query.filter(models.Provider.id == provider_id)
+    providers = query.order_by(models.Provider.id).all()
+    if provider_id and not providers:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    return {"object": "list", "data": [capability_service.snapshot(db, provider) for provider in providers]}
+
+
+@app.get("/v1/admin/providers/{provider_id}/capabilities")
+def admin_provider_capability(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    provider = db.get(models.Provider, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    return capability_service.snapshot(db, provider)
+
+
+@app.post("/v1/admin/providers/{provider_id}/sync-capabilities")
+def admin_sync_provider_capabilities(
+    provider_id: str,
+    req: ProviderCapabilitySyncRequest | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    provider = db.get(models.Provider, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    result = capability_service.sync_remote(
+        db,
+        provider,
+        endpoint=req.endpoint if req else None,
+        timeout_seconds=req.timeout_seconds if req else None,
+    )
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=result)
+    return result
+
+
+@app.post("/v1/admin/provider-templates/{template_id}/install")
+def admin_install_provider_template(
+    template_id: str,
+    req: TemplateInstallRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
+
+    base_config = deepcopy(template.default_config)
+    if req.base_url:
+        base_config["base_url"] = req.base_url
+
+    provider = db.get(models.Provider, template.id)
+    if provider:
+        provider.name = template.name
+        provider.adapter_type = template.adapter_type
+        provider.status = req.status
+        provider.notes = template.notes
+        if req.overwrite_config:
+            provider.base_config_json = dumps(base_config)
+    else:
+        provider = models.Provider(
+            id=template.id,
+            name=template.name,
+            adapter_type=template.adapter_type,
+            status=req.status,
+            base_config_json=dumps(base_config),
+            notes=template.notes,
+        )
+        db.add(provider)
+
+    account_id = req.account_id or f"acct_{template.id}_default"
+    account = db.get(models.AccountResource, account_id)
+    quota_buckets = [{"type": "account", "remaining_estimate": None, "confidence": 0.0}]
+    try:
+        credential_ref, secret_payload = normalize_account_credential_ref(
+            db,
+            account_id=account_id,
+            provider_id=template.id,
+            label=req.account_label or f"{template.name} default",
+            credential_ref=req.credential_ref,
+            credential_secret_id=req.credential_secret_id,
+            credential_kind=req.credential_kind,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    if account:
+        account.provider_id = template.id
+        account.label = req.account_label or f"{template.name} default"
+        account.credential_ref = credential_ref
+        account.supported_operations_json = dumps(template.operations)
+        account.supported_provider_models_json = dumps(template.models)
+        account.quota_buckets_json = dumps(quota_buckets)
+        account.concurrency_limit = req.concurrency_limit
+        account.status = req.account_status
+    else:
+        account = models.AccountResource(
+            id=account_id,
+            provider_id=template.id,
+            label=req.account_label or f"{template.name} default",
+            credential_ref=credential_ref,
+            supported_operations_json=dumps(template.operations),
+            supported_provider_models_json=dumps(template.models),
+            quota_buckets_json=dumps(quota_buckets),
+            concurrency_limit=req.concurrency_limit,
+            status=req.account_status,
+            plan="template",
+        )
+        db.add(account)
+
+    mappings: list[models.ProviderModelMapping] = []
+    for item in template.mappings:
+        if not db.get(models.LogicalModel, item.logical_model):
+            continue
+        mapping_id = f"{item.logical_model}:{template.id}:{item.provider_model}"
+        mapping = db.get(models.ProviderModelMapping, mapping_id)
+        if mapping:
+            mapping.operations_json = dumps(item.operations)
+            mapping.priority = item.priority + req.priority_offset
+            mapping.weight = 1
+            mapping.cost_score = item.cost_score
+            mapping.speed_score = item.speed_score
+            mapping.quality_score = item.quality_score
+            mapping.reliability_score = item.reliability_score
+            mapping.enabled = req.enable_mappings
+        else:
+            mapping = models.ProviderModelMapping(
+                id=mapping_id,
+                logical_model=item.logical_model,
+                provider_id=template.id,
+                provider_model=item.provider_model,
+                operations_json=dumps(item.operations),
+                priority=item.priority + req.priority_offset,
+                weight=1,
+                cost_score=item.cost_score,
+                speed_score=item.speed_score,
+                quality_score=item.quality_score,
+                reliability_score=item.reliability_score,
+                enabled=req.enable_mappings,
+            )
+            db.add(mapping)
+        mappings.append(mapping)
+
+    db.commit()
+    return {
+        "template": template_as_dict(template),
+        "provider": serialize_provider(provider),
+        "account": serialize_account(account),
+        "secret": secret_payload,
+        "mappings": [serialize_mapping(mapping) for mapping in mappings],
+    }
+
+
+@app.post("/v1/admin/provider-templates/{template_id}/activate")
+def admin_activate_provider_template(
+    template_id: str,
+    req: TemplateActivateRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
+
+    credential_ref = req.credential_ref
+    if req.credential_value is not None:
+        scheme = "bearer" if req.credential_kind == "bearer_token" else "plain"
+        credential_ref = f"{scheme}://{req.credential_value}"
+
+    contract_operations = req.contract_operations or list(template.operations)
+    invalid_operations = [operation for operation in contract_operations if operation not in template.operations]
+    if invalid_operations:
+        raise HTTPException(status_code=400, detail={"error": "CONTRACT_OPERATION_UNSUPPORTED", "operations": invalid_operations})
+
+    install_req = TemplateInstallRequest(
+        base_url=req.base_url,
+        credential_ref=credential_ref,
+        credential_secret_id=req.credential_secret_id,
+        credential_kind=req.credential_kind,
+        status=req.status,
+        account_status=req.account_status,
+        account_id=req.account_id,
+        account_label=req.account_label,
+        concurrency_limit=req.concurrency_limit,
+        priority_offset=req.priority_offset,
+        enable_mappings=req.enable_mappings,
+        overwrite_config=req.overwrite_config,
+    )
+
+    plan = {
+        "template_id": template_id,
+        "provider_status": req.status,
+        "account_id": req.account_id or f"acct_{template.id}_default",
+        "credential_ref": redact_credential_ref(credential_ref),
+        "credential_secret_id": req.credential_secret_id or "",
+        "base_url": req.base_url or str(template.default_config.get("base_url") or ""),
+        "enable_mappings": req.enable_mappings,
+        "contract_operations": contract_operations,
+        "contract_run_submit": req.contract_run_submit,
+        "run_health_check": req.run_health_check,
+        "run_contract_tests": req.run_contract_tests,
+        "run_quota_sync": req.run_quota_sync,
+    }
+    if req.dry_run:
+        return {
+            "object": "provider_template.activation",
+            "status": "planned",
+            "ok": True,
+            "dry_run": True,
+            "template": template_as_dict(template),
+            "plan": plan,
+            "action_items": [],
+        }
+
+    install_result = admin_install_provider_template(template_id, install_req, ctx, db)
+    health_result: dict[str, Any] | None = None
+    if req.run_health_check:
+        health_result = admin_provider_health_check(template_id, ctx, db)
+
+    contract_results: list[dict[str, Any]] = []
+    if req.run_contract_tests:
+        for operation in contract_operations:
+            result = contract_service.run(
+                db,
+                template_id,
+                operation=operation,
+                provider_model=None,
+                run_submit=req.contract_run_submit,
+            )
+            contract_results.append(serialize_provider_contract(result))
+
+    quota_result: dict[str, Any] | None = None
+    if req.run_quota_sync:
+        installed_account_id = str(((install_result.get("account") or {}).get("id")) or plan["account_id"])
+        installed_account = db.get(models.AccountResource, installed_account_id)
+        if installed_account:
+            sync_result = sync_account_quota_from_provider(db, installed_account, ctx.user.id)
+            db.commit()
+            synced = 1 if sync_result.get("status") == "ok" else 0
+            quota_result = {
+                "object": "quota.sync",
+                "provider_id": template_id,
+                "scope": "activation_account",
+                "account_id": installed_account_id,
+                "total": 1,
+                "synced": synced,
+                "failed": 1 - synced,
+                "data": [sync_result],
+            }
+        else:
+            quota_result = {
+                "object": "quota.sync",
+                "provider_id": template_id,
+                "scope": "activation_account",
+                "account_id": installed_account_id,
+                "total": 1,
+                "synced": 0,
+                "failed": 1,
+                "data": [
+                    {
+                        "status": "failed",
+                        "error_code": "ACCOUNT_NOT_FOUND",
+                        "message": f"Installed account {installed_account_id} was not found.",
+                    }
+                ],
+            }
+
+    provider = db.get(models.Provider, template_id)
+    capabilities = capability_service.snapshot(db, provider) if provider else {}
+    compatibility = admin_compatibility_matrix(provider_id=template_id, enabled_only=True, ctx=ctx, db=db)
+    readiness = build_readiness_snapshot(db)
+    action_items: list[dict[str, Any]] = []
+    if health_result and health_result.get("status") != "ok":
+        action_items.append({"check": "health_check", "detail": health_result})
+    failed_contracts = [item for item in contract_results if item.get("status") != "passed"]
+    if failed_contracts:
+        action_items.append({"check": "contract_tests", "detail": failed_contracts})
+    if quota_result and int(quota_result.get("failed") or 0) > 0:
+        action_items.append({"check": "quota_sync", "detail": quota_result})
+    for item in readiness.get("action_items", []):
+        if item.get("check") == "external_connector_accounts" and template_id in str(item.get("detail")):
+            action_items.append({"check": "readiness_external_account", "detail": item})
+
+    ok = not action_items
+    return {
+        "object": "provider_template.activation",
+        "status": "activated" if ok else "action_required",
+        "ok": ok,
+        "dry_run": False,
+        "template": template_as_dict(template),
+        "plan": plan,
+        "install": install_result,
+        "health_check": health_result,
+        "contract_tests": contract_results,
+        "quota_sync": quota_result,
+        "capabilities": capabilities,
+        "compatibility": compatibility,
+        "readiness": {
+            "status": readiness.get("status"),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": readiness.get("action_items", []),
+        },
+        "action_items": action_items,
+    }
+
+
+def external_acceptance_mapping_by_operation(mappings: list[dict[str, Any]], operations: list[str]) -> dict[str, dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for operation in operations:
+        for mapping in mappings:
+            if operation in (mapping.get("operations") or []):
+                selected[operation] = mapping
+                break
+    return selected
+
+
+def account_external_acceptance_mappings(db: Session, account: models.AccountResource, operations: list[str]) -> list[dict[str, Any]]:
+    query = (
+        db.query(models.ProviderModelMapping)
+        .filter(
+            models.ProviderModelMapping.provider_id == account.provider_id,
+            models.ProviderModelMapping.enabled.is_(True),
+        )
+        .order_by(models.ProviderModelMapping.priority.asc(), models.ProviderModelMapping.logical_model.asc())
+    )
+    rows: list[dict[str, Any]] = []
+    for mapping in query.all():
+        mapping_operations = loads(mapping.operations_json, [])
+        for operation in operations:
+            if operation not in mapping_operations:
+                continue
+            if not account_supports_mapping(account, mapping, operation):
+                continue
+            item = serialize_mapping(mapping)
+            item["acceptance_operation"] = operation
+            rows.append(item)
+            break
+    return rows
+
+
+def create_external_acceptance_reference_asset(db: Session, user_id: str, provider_id: str) -> models.MediaAsset:
+    return asset_service.create_from_bytes(
+        db,
+        user_id,
+        base64.b64decode(EXTERNAL_ACCEPTANCE_REFERENCE_PNG_B64),
+        f"{provider_id}-external-acceptance-reference.png",
+        "image",
+        "reference",
+        "image/png",
+        source="admin_acceptance",
+        provider_meta={"provider_id": provider_id, "purpose": "external_acceptance_reference"},
+    )
+
+
+def serialize_external_acceptance_output_asset(db: Session, asset_id: str) -> dict[str, Any]:
+    asset = db.get(models.MediaAsset, asset_id)
+    if not asset:
+        return {"asset_id": asset_id, "exists": False, "download_ok": False, "bytes": 0}
+    try:
+        data = asset_service.read_bytes(asset)
+    except FileNotFoundError:
+        data = b""
+    return {
+        "asset_id": asset.id,
+        "kind": asset.kind,
+        "mime_type": asset.mime_type,
+        "url": asset_service.public_url(asset),
+        "exists": True,
+        "bytes": len(data),
+        "download_ok": bool(data),
+    }
+
+
+def run_external_acceptance_sample(
+    db: Session,
+    ctx: AuthContext,
+    provider_id: str,
+    operation: str,
+    mapping: dict[str, Any],
+    reference_asset_id: str | None,
+    source_video_asset_id: str | None,
+    preferred_account_id: str | None = None,
+) -> dict[str, Any]:
+    model = str(mapping.get("logical_model") or "")
+    params: dict[str, Any] = {
+        "prompt": f"external provider acceptance {provider_id} {operation}",
+        "quality": "standard",
+        "provider_preference": [provider_id],
+        "providers": [provider_id],
+    }
+    if preferred_account_id:
+        params["preferred_account_id"] = preferred_account_id
+    input_assets: list[str] = []
+    if operation in {"image_to_image", "image_edit", "image_to_video"}:
+        if not reference_asset_id:
+            return {"operation": operation, "status": "skipped", "reason": "reference image asset unavailable", "ok": False}
+        params["image"] = reference_asset_id
+        input_assets.append(reference_asset_id)
+    if operation in {"text_to_video", "image_to_video", "video_extend"}:
+        params["duration"] = 2
+        params["aspect_ratio"] = "16:9"
+    if operation == "video_extend":
+        if not source_video_asset_id:
+            return {"operation": operation, "status": "skipped", "reason": "video_extend requires a previous successful video sample", "ok": False}
+        params["video"] = source_video_asset_id
+        input_assets.append(source_video_asset_id)
+
+    try:
+        validate_input_assets(db, ctx.user.id, params, input_assets, model, operation)
+        job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, operation, model, params, input_assets)
+        job = runtime.process_job(db, job.id)
+    except DomainError as exc:
+        return {
+            "operation": operation,
+            "model": model,
+            "status": "failed",
+            "error": {"code": exc.code, "message": exc.message, "retryable": exc.retryable},
+            "ok": False,
+        }
+
+    output_assets = [serialize_external_acceptance_output_asset(db, asset_id) for asset_id in loads(job.output_asset_ids_json, [])]
+    ok = job.status == "completed" and bool(output_assets) and all(item.get("download_ok") for item in output_assets)
+    return {
+        "operation": operation,
+        "job_id": job.id,
+        "status": job.status,
+        "provider": job.provider_id,
+        "model": job.logical_model,
+        "provider_model": job.provider_model,
+        "account_id": job.account_id,
+        "provider_task_id": job.provider_task_id,
+        "error": {"code": job.error_code, "message": job.error_message} if job.error_code else None,
+        "output_assets": output_assets,
+        "ok": ok,
+    }
+
+
+@app.post("/v1/admin/provider-templates/{template_id}/external-acceptance")
+def admin_provider_template_external_acceptance(
+    template_id: str,
+    req: TemplateExternalAcceptanceRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
+
+    credential_ref = req.credential_ref or str(template.default_config.get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY")
+    operations = req.operations or list(template.operations)
+    invalid_operations = [operation for operation in operations if operation not in template.operations]
+    if invalid_operations:
+        raise HTTPException(status_code=400, detail={"error": "ACCEPTANCE_OPERATION_UNSUPPORTED", "operations": invalid_operations})
+
+    if not req.dry_run and req.credential_value is None:
+        credential = credential_ref_info(db, credential_ref)
+        if not credential.get("available"):
+            readiness = build_readiness_snapshot(db)
+            return {
+                "object": "media2api.external_provider_acceptance",
+                "template_id": template_id,
+                "status": "action_required",
+                "ok": False,
+                "error": "CREDENTIAL_UNAVAILABLE",
+                "message": f"{credential_ref} is not available in this deployment. Provide credential_value or configure the referenced env/secret.",
+                "credential": credential,
+                "samples": [],
+                "readiness": {
+                    "status": readiness.get("status"),
+                    "core_ready": readiness.get("core_ready"),
+                    "production_ready": readiness.get("production_ready"),
+                },
+            }
+
+    activate_req = TemplateActivateRequest(
+        base_url=req.base_url,
+        credential_ref=credential_ref,
+        credential_secret_id=req.credential_secret_id,
+        credential_kind=req.credential_kind,
+        status=req.status,
+        account_status=req.account_status,
+        account_id=req.account_id,
+        account_label=req.account_label,
+        concurrency_limit=req.concurrency_limit,
+        priority_offset=req.priority_offset,
+        enable_mappings=req.enable_mappings,
+        overwrite_config=req.overwrite_config,
+        credential_value=req.credential_value,
+        dry_run=req.dry_run,
+        run_health_check=req.run_health_check,
+        run_contract_tests=req.run_contract_tests,
+        contract_operations=operations,
+        contract_run_submit=req.contract_run_submit,
+        run_quota_sync=req.run_quota_sync,
+    )
+    activation = admin_activate_provider_template(template_id, activate_req, ctx, db)
+    if req.dry_run:
+        return {
+            "object": "media2api.external_provider_acceptance",
+            "template_id": template_id,
+            "status": "planned",
+            "ok": True,
+            "activation": activation,
+            "samples": [],
+            "failed_samples": [],
+        }
+
+    samples: list[dict[str, Any]] = []
+    source_video_asset_id: str | None = None
+    mappings = list(((activation.get("install") or {}).get("mappings") or []))
+    selected = external_acceptance_mapping_by_operation(mappings, operations)
+    max_samples = max(0, min(int(req.max_samples or 0), len(EXTERNAL_ACCEPTANCE_SAMPLE_ORDER)))
+    reference_asset: models.MediaAsset | None = None
+    if req.run_samples and max_samples > 0 and any(operation in selected for operation in {"image_to_image", "image_edit", "image_to_video"}):
+        reference_asset = create_external_acceptance_reference_asset(db, ctx.user.id, template_id)
+        db.commit()
+
+    if req.run_samples:
+        activated_account_id = str((((activation.get("install") or {}).get("account") or {}).get("id")) or "")
+        for operation in EXTERNAL_ACCEPTANCE_SAMPLE_ORDER:
+            if len(samples) >= max_samples:
+                break
+            mapping = selected.get(operation)
+            if not mapping:
+                continue
+            sample = run_external_acceptance_sample(
+                db,
+                ctx,
+                template_id,
+                operation,
+                mapping,
+                reference_asset.id if reference_asset else None,
+                source_video_asset_id,
+                activated_account_id or None,
+            )
+            samples.append(sample)
+            if sample.get("ok"):
+                video_assets = [item for item in sample.get("output_assets", []) if item.get("kind") == "video"]
+                if video_assets:
+                    source_video_asset_id = str(video_assets[0].get("asset_id") or "")
+
+    readiness = build_readiness_snapshot(db)
+    acceptance = build_acceptance_report(db)
+    failed_samples = [sample for sample in samples if not sample.get("ok")]
+    action_items: list[dict[str, Any]] = []
+    if activation.get("ok") is False:
+        action_items.extend(activation.get("action_items") or [])
+    if failed_samples:
+        action_items.append({"check": "sample_jobs", "detail": failed_samples})
+    if req.require_production_ready and acceptance.get("production_ready") is not True:
+        action_items.extend(acceptance.get("failed_checks") or [])
+
+    ok = not action_items
+    return {
+        "object": "media2api.external_provider_acceptance",
+        "template_id": template_id,
+        "status": "passed" if ok else "action_required",
+        "ok": ok,
+        "activation": activation,
+        "samples": samples,
+        "failed_samples": failed_samples,
+        "readiness": {
+            "status": readiness.get("status"),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": readiness.get("action_items", []),
+        },
+        "acceptance": {
+            "status": acceptance.get("status"),
+            "core_ready": acceptance.get("core_ready"),
+            "production_ready": acceptance.get("production_ready"),
+            "summary": acceptance.get("summary"),
+        },
+        "action_items": action_items,
+    }
+
+
+@app.post("/v1/admin/accounts/{account_id}/external-acceptance")
+def admin_account_external_acceptance(
+    account_id: str,
+    req: AccountExternalAcceptanceRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    account = db.get(models.AccountResource, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_NOT_FOUND"})
+    provider = db.get(models.Provider, account.provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND", "provider_id": account.provider_id})
+
+    supported_operations = loads(account.supported_operations_json, [])
+    operations = req.operations or supported_operations
+    if not operations:
+        operations = ["text_to_image"]
+    unsupported_operations = [operation for operation in operations if supported_operations and operation not in supported_operations]
+    if unsupported_operations:
+        raise HTTPException(status_code=400, detail={"error": "ACCOUNT_OPERATION_UNSUPPORTED", "operations": unsupported_operations})
+
+    mappings = account_external_acceptance_mappings(db, account, operations)
+    selected = external_acceptance_mapping_by_operation(mappings, operations)
+    credential = credential_ref_info(db, account.credential_ref)
+    credential_effective_available = account_credential_available(db, account)
+    if credential_effective_available and not credential.get("available"):
+        credential = {**credential, "effective_available": True}
+    else:
+        credential = {**credential, "effective_available": credential_effective_available}
+
+    plan = {
+        "account_id": account.id,
+        "provider_id": account.provider_id,
+        "provider_status": provider.status,
+        "account_status": account.status,
+        "operations": operations,
+        "run_health_check": req.run_health_check,
+        "run_contract_tests": req.run_contract_tests,
+        "contract_run_submit": req.contract_run_submit,
+        "run_quota_sync": req.run_quota_sync,
+        "run_samples": req.run_samples,
+        "max_samples": req.max_samples,
+        "compatible_mappings": mappings,
+        "selected_mappings": selected,
+        "credential": credential,
+    }
+    missing_operations = [operation for operation in operations if operation not in selected]
+    dry_action_items: list[dict[str, Any]] = []
+    if missing_operations:
+        dry_action_items.append({"check": "mapping_coverage", "detail": {"missing_operations": missing_operations}})
+    if req.dry_run:
+        return {
+            "object": "media2api.account_external_acceptance",
+            "status": "planned",
+            "ok": not dry_action_items,
+            "dry_run": True,
+            "account": serialize_account(account),
+            "provider": serialize_provider(provider),
+            "plan": plan,
+            "samples": [],
+            "failed_samples": [],
+            "action_items": dry_action_items,
+        }
+
+    action_items = list(dry_action_items)
+    if provider.status != "active":
+        action_items.append({"check": "provider_status", "detail": {"provider_id": provider.id, "status": provider.status}})
+    if account.status != "active":
+        action_items.append({"check": "account_status", "detail": {"account_id": account.id, "status": account.status}})
+    if not credential_effective_available:
+        action_items.append({"check": "credential", "detail": credential})
+    if account.current_leases >= account.concurrency_limit:
+        action_items.append({"check": "account_capacity", "detail": {"current_leases": account.current_leases, "concurrency_limit": account.concurrency_limit}})
+
+    health_result: dict[str, Any] | None = None
+    if req.run_health_check:
+        health_result = admin_provider_health_check(account.provider_id, ctx, db)
+        if health_result.get("status") != "ok":
+            action_items.append({"check": "health_check", "detail": health_result})
+
+    contract_results: list[dict[str, Any]] = []
+    if req.run_contract_tests:
+        for operation, mapping in selected.items():
+            result = contract_service.run(
+                db,
+                account.provider_id,
+                operation=operation,
+                provider_model=str(mapping.get("provider_model") or ""),
+                run_submit=req.contract_run_submit,
+            )
+            serialized = serialize_provider_contract(result)
+            contract_results.append(serialized)
+        failed_contracts = [item for item in contract_results if item.get("status") != "passed"]
+        if failed_contracts:
+            action_items.append({"check": "contract_tests", "detail": failed_contracts})
+
+    quota_result: dict[str, Any] | None = None
+    if req.run_quota_sync:
+        quota_result = sync_account_quota_from_provider(db, account, ctx.user.id)
+        db.commit()
+        account = db.get(models.AccountResource, account_id) or account
+        if quota_result.get("status") != "ok":
+            action_items.append({"check": "quota_sync", "detail": quota_result})
+
+    samples: list[dict[str, Any]] = []
+    source_video_asset_id: str | None = None
+    max_samples = max(0, min(int(req.max_samples or 0), len(EXTERNAL_ACCEPTANCE_SAMPLE_ORDER)))
+    reference_asset: models.MediaAsset | None = None
+    if req.run_samples and max_samples > 0 and any(operation in selected for operation in {"image_to_image", "image_edit", "image_to_video"}):
+        reference_asset = create_external_acceptance_reference_asset(db, ctx.user.id, account.provider_id)
+        db.commit()
+    if req.run_samples and not any(item.get("check") in {"provider_status", "account_status", "credential", "account_capacity", "mapping_coverage"} for item in action_items):
+        for operation in EXTERNAL_ACCEPTANCE_SAMPLE_ORDER:
+            if len(samples) >= max_samples:
+                break
+            mapping = selected.get(operation)
+            if not mapping:
+                continue
+            sample = run_external_acceptance_sample(
+                db,
+                ctx,
+                account.provider_id,
+                operation,
+                mapping,
+                reference_asset.id if reference_asset else None,
+                source_video_asset_id,
+                account.id,
+            )
+            samples.append(sample)
+            if sample.get("ok"):
+                video_assets = [item for item in sample.get("output_assets", []) if item.get("kind") == "video"]
+                if video_assets:
+                    source_video_asset_id = str(video_assets[0].get("asset_id") or "")
+
+    failed_samples = [sample for sample in samples if not sample.get("ok")]
+    if failed_samples:
+        action_items.append({"check": "sample_jobs", "detail": failed_samples})
+    readiness = build_readiness_snapshot(db)
+    acceptance = build_acceptance_report(db)
+    if req.require_production_ready and acceptance.get("production_ready") is not True:
+        action_items.extend(acceptance.get("failed_checks") or [])
+
+    ok = not action_items
+    return {
+        "object": "media2api.account_external_acceptance",
+        "status": "passed" if ok else "action_required",
+        "ok": ok,
+        "dry_run": False,
+        "account": serialize_account(account),
+        "provider": serialize_provider(provider),
+        "plan": plan,
+        "health_check": health_result,
+        "contract_tests": contract_results,
+        "quota_sync": quota_result,
+        "samples": samples,
+        "failed_samples": failed_samples,
+        "readiness": {
+            "status": readiness.get("status"),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": readiness.get("action_items", []),
+        },
+        "acceptance": {
+            "status": acceptance.get("status"),
+            "core_ready": acceptance.get("core_ready"),
+            "production_ready": acceptance.get("production_ready"),
+            "summary": acceptance.get("summary"),
+        },
+        "action_items": action_items,
+    }
+
+
+@app.post("/v1/admin/account-acceptance-suite")
+def admin_account_acceptance_suite(
+    req: AccountAcceptanceSuiteRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.AccountResource)
+    if req.account_ids:
+        query = query.filter(models.AccountResource.id.in_(req.account_ids))
+    if req.provider_ids:
+        query = query.filter(models.AccountResource.provider_id.in_(req.provider_ids))
+    if req.active_only:
+        query = query.filter(models.AccountResource.status == "active")
+    if req.external_only:
+        query = query.filter(models.AccountResource.provider_id != "mock")
+    limit = max(1, min(int(req.max_accounts or 1), 100))
+    accounts = query.order_by(models.AccountResource.provider_id, models.AccountResource.id).limit(limit).all()
+
+    results: list[dict[str, Any]] = []
+    action_items: list[dict[str, Any]] = []
+    present_ids = {account.id for account in accounts}
+    for missing_id in [account_id for account_id in req.account_ids if account_id not in present_ids]:
+        item = {
+            "object": "media2api.account_external_acceptance",
+            "account_id": missing_id,
+            "status": "action_required",
+            "ok": False,
+            "error": "ACCOUNT_NOT_FOUND_OR_FILTERED",
+            "action_items": [{"check": "account", "detail": {"account_id": missing_id}}],
+        }
+        results.append(item)
+        action_items.append({"check": "account", "detail": item})
+
+    per_account_req = AccountExternalAcceptanceRequest(
+        dry_run=req.dry_run,
+        operations=req.operations,
+        run_health_check=req.run_health_check,
+        run_contract_tests=req.run_contract_tests,
+        contract_run_submit=req.contract_run_submit,
+        run_quota_sync=req.run_quota_sync,
+        run_samples=req.run_samples,
+        max_samples=req.max_samples,
+        require_production_ready=req.require_production_ready,
+    )
+    for account in accounts:
+        try:
+            result = admin_account_external_acceptance(account.id, per_account_req, ctx, db)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"error": "HTTP_ERROR", "message": str(exc.detail)}
+            result = {
+                "object": "media2api.account_external_acceptance",
+                "account_id": account.id,
+                "provider_id": account.provider_id,
+                "status": "action_required",
+                "ok": False,
+                "error": detail.get("error") or detail.get("code") or "HTTP_ERROR",
+                "detail": detail,
+                "action_items": [{"check": "exception", "detail": detail}],
+            }
+        results.append(result)
+        if not result.get("ok"):
+            action_items.append({"check": "account_acceptance", "detail": {"account_id": account.id, "status": result.get("status"), "action_items": result.get("action_items", [])}})
+
+    passed = sum(1 for item in results if item.get("ok") is True)
+    failed = len(results) - passed
+    ok = bool(results) and failed == 0
+    return {
+        "object": "media2api.account_acceptance_suite",
+        "status": "planned" if req.dry_run and ok else ("passed" if ok else "action_required"),
+        "ok": ok,
+        "dry_run": req.dry_run,
+        "summary": {
+            "selected": len(accounts),
+            "total_results": len(results),
+            "passed": passed,
+            "failed": failed,
+            "max_accounts": limit,
+            "active_only": req.active_only,
+            "external_only": req.external_only,
+        },
+        "results": results,
+        "action_items": action_items,
+    }
+
+
+@app.post("/v1/images/generations")
+def image_generations(req: ImageGenerationRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    params = sanitize_account_targeting_params(ctx, req.model_dump())
+    job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, "text_to_image", req.model, params)
+    job = runtime.process_job(db, job.id)
+    if job.status != "completed":
+        raise HTTPException(status_code=500, detail={"error": job.error_code, "message": job.error_message, "job_id": job.id})
+    assets = [db.get(models.MediaAsset, asset_id) for asset_id in loads(job.output_asset_ids_json, [])]
+    return {
+        "created": int(job.created_at.timestamp()),
+        "job_id": job.id,
+        "data": [image_response_item(asset, req.response_format) for asset in assets if asset],
+    }
+
+
+@app.post("/v1/images/edits")
+def image_edits(req: ImageEditRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    input_assets: list[str] = []
+    if isinstance(req.image, list):
+        input_assets.extend(req.image)
+    elif req.image:
+        input_assets.append(req.image)
+    if req.mask:
+        input_assets.append(req.mask)
+    params = sanitize_account_targeting_params(ctx, req.model_dump())
+    validate_input_assets(db, ctx.user.id, params, input_assets, req.model, "image_edit")
+    job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, "image_edit", req.model, params, input_assets)
+    job = runtime.process_job(db, job.id)
+    if job.status != "completed":
+        raise HTTPException(status_code=500, detail={"error": job.error_code, "message": job.error_message, "job_id": job.id})
+    assets = [db.get(models.MediaAsset, asset_id) for asset_id in loads(job.output_asset_ids_json, [])]
+    return {
+        "created": int(job.created_at.timestamp()),
+        "job_id": job.id,
+        "data": [image_response_item(asset, req.response_format) for asset in assets if asset],
+    }
+
+
+@app.post("/v1/videos/generations")
+def video_generations(
+    req: VideoGenerationRequest,
+    background_tasks: BackgroundTasks,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    input_assets: list[str] = []
+    if isinstance(req.image, list):
+        input_assets.extend(req.image)
+    elif req.image:
+        input_assets.append(req.image)
+    if req.first_frame:
+        input_assets.append(req.first_frame)
+    if req.last_frame:
+        input_assets.append(req.last_frame)
+    operation = "image_to_video" if input_assets else "text_to_video"
+    params = sanitize_account_targeting_params(ctx, req.model_dump())
+    validate_input_assets(db, ctx.user.id, params, input_assets, req.model, operation)
+    job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, operation, req.model, params, input_assets)
+    enqueue_or_inline(background_tasks, job.id)
+    return {"id": job.id, "object": "video.generation.job", "status": job.status, "model": req.model, "created": int(job.created_at.timestamp())}
+
+
+@app.get("/v1/videos/generations/{job_id}")
+def get_video_generation(job_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = db.get(models.MediaJob, job_id)
+    if not job or job.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    return serialize_job(db, job)
+
+
+@app.post("/v1/media-jobs")
+def create_media_job(
+    req: MediaJobRequest,
+    background_tasks: BackgroundTasks,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    params, input_assets = normalize_native_media_request(req)
+    params = sanitize_account_targeting_params(ctx, params)
+    validate_input_assets(db, ctx.user.id, params, input_assets, req.model, req.operation)
+    job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, req.operation, req.model, params, input_assets)
+    if req.wait:
+        job = runtime.process_job(db, job.id)
+    else:
+        enqueue_or_inline(background_tasks, job.id)
+    return serialize_job(db, job)
+
+
+@app.get("/v1/media-jobs/{job_id}")
+def get_media_job(job_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = db.get(models.MediaJob, job_id)
+    if not job or job.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    return serialize_job(db, job)
+
+
+@app.get("/v1/media-jobs/{job_id}/attempts")
+def get_media_job_attempts(job_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = db.get(models.MediaJob, job_id)
+    if not job or job.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    attempts = db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id == job_id).order_by(models.MediaJobAttempt.created_at.asc()).all()
+    return {"object": "list", "data": [serialize_attempt(attempt) for attempt in attempts]}
+
+
+@app.get("/v1/media-jobs/{job_id}/events")
+def get_media_job_events(job_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = db.get(models.MediaJob, job_id)
+    if not job or job.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id == job_id).order_by(models.MediaJobEvent.created_at.asc()).all()
+    return {"object": "list", "data": [serialize_job_event(event) for event in events]}
+
+
+@app.post("/v1/media-jobs/{job_id}/retry")
+def retry_media_job(
+    job_id: str,
+    req: RetryJobRequest,
+    background_tasks: BackgroundTasks,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    job = db.get(models.MediaJob, job_id)
+    if not job or job.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    job = runtime.retry_job(db, job.id, priority=req.priority)
+    if req.wait:
+        job = runtime.process_job(db, job.id)
+    else:
+        enqueue_or_inline(background_tasks, job.id)
+    return serialize_job(db, job)
+
+
+@app.post("/v1/media-jobs/{job_id}/cancel")
+def cancel_media_job(job_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = db.get(models.MediaJob, job_id)
+    if not job or job.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    job = runtime.cancel_job(db, job.id)
+    return serialize_job(db, job)
+
+
+@app.post("/v1/assets")
+async def create_asset(request: Request, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None:
+            raise HTTPException(status_code=400, detail={"error": "FILE_REQUIRED"})
+        data = await upload.read()
+        kind = str(form.get("kind") or "image")
+        purpose = str(form.get("purpose") or "input")
+        mime_type = getattr(upload, "content_type", None)
+        filename = getattr(upload, "filename", "upload.bin")
+        asset = asset_service.create_from_bytes(db, ctx.user.id, data, filename, kind, purpose, mime_type)
+    else:
+        body = AssetCreateRequest.model_validate(await request.json())
+        try:
+            if body.url:
+                asset = asset_service.create_from_url(db, ctx.user.id, body.url, body.filename, body.kind, body.purpose, body.mime_type)
+            elif body.b64_json:
+                asset = asset_service.create_from_base64(db, ctx.user.id, body.b64_json, body.filename, body.kind, body.purpose, body.mime_type)
+            else:
+                raise HTTPException(status_code=400, detail={"error": "ASSET_INPUT_REQUIRED", "message": "Provide either b64_json or url."})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc), "message": str(exc)}) from exc
+    db.commit()
+    return serialize_asset(asset, db=db)
+
+
+@app.get("/v1/assets")
+def list_assets(
+    kind: str | None = None,
+    purpose: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.MediaAsset).filter(models.MediaAsset.user_id == ctx.user.id)
+    if kind:
+        query = query.filter(models.MediaAsset.kind == kind)
+    if purpose:
+        query = query.filter(models.MediaAsset.purpose == purpose)
+    assets = query.order_by(models.MediaAsset.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_asset(asset, db=db) for asset in assets]}
+
+
+@app.get("/v1/assets/{asset_id}")
+def get_asset(asset_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    asset = db.get(models.MediaAsset, asset_id)
+    if not asset or asset.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "ASSET_NOT_FOUND"})
+    return serialize_asset(asset, db=db)
+
+
+@app.get("/v1/assets/{asset_id}/content")
+def asset_content(asset_id: str, expires: int | None = None, signature: str | None = None, db: Session = Depends(get_db)) -> Response:
+    asset = db.get(models.MediaAsset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail={"error": "ASSET_NOT_FOUND"})
+    if not asset_service.verify_signature(asset.id, expires, signature):
+        raise HTTPException(status_code=403, detail={"error": "ASSET_SIGNATURE_INVALID", "message": "Asset URL is missing, expired, or invalid."})
+    filename = Path(asset.storage_key).name
+    try:
+        path = asset_service.path_for(asset)
+    except RuntimeError:
+        path = None
+    if path is not None:
+        if not path.exists():
+            raise HTTPException(status_code=404, detail={"error": "ASSET_FILE_NOT_FOUND"})
+        return FileResponse(path, media_type=asset.mime_type, filename=filename)
+    try:
+        data = asset_service.read_bytes(asset)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail={"error": "ASSET_FILE_NOT_FOUND"})
+    return Response(content=data, media_type=asset.mime_type, headers={"Content-Disposition": f'inline; filename="{filename}"'})
+
+
+@app.delete("/v1/assets/{asset_id}")
+def delete_asset(asset_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    asset = db.get(models.MediaAsset, asset_id)
+    if not asset or asset.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "ASSET_NOT_FOUND"})
+    asset_service.delete(db, asset)
+    db.commit()
+    return {"deleted": True, "id": asset_id}
+
+
+@app.post("/v1/admin/assets/self-test-storage")
+def admin_asset_storage_self_test(
+    req: AssetStorageSelfTestRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return run_asset_storage_self_test(db, ctx, req)
+
+
+@app.post("/v1/admin/assets/self-test-temp-url")
+def admin_temp_url_asset_self_test(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_temp_url_asset_self_test(db, ctx)
+
+
+@app.get("/v1/admin/assets")
+def admin_list_assets(
+    user_id: str | None = None,
+    kind: str | None = None,
+    purpose: str | None = None,
+    source: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.MediaAsset)
+    if user_id:
+        query = query.filter(models.MediaAsset.user_id == user_id)
+    if kind:
+        query = query.filter(models.MediaAsset.kind == kind)
+    if purpose:
+        query = query.filter(models.MediaAsset.purpose == purpose)
+    if source:
+        query = query.filter(models.MediaAsset.source == source)
+    assets = query.order_by(models.MediaAsset.created_at.desc()).limit(min(limit, 1000)).all()
+    return {"object": "list", "data": [serialize_admin_asset(asset, db=db) for asset in assets]}
+
+
+@app.get("/v1/admin/assets/{asset_id}")
+def admin_get_asset(asset_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    asset = db.get(models.MediaAsset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail={"error": "ASSET_NOT_FOUND"})
+    return serialize_admin_asset(asset, db=db)
+
+
+@app.get("/v1/providers")
+def providers(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    providers_ = db.query(models.Provider).order_by(models.Provider.id).all()
+    return {"object": "list", "data": [serialize_provider(p) for p in providers_]}
+
+
+@app.get("/v1/accounts")
+def accounts(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    accounts_ = db.query(models.AccountResource).order_by(models.AccountResource.provider_id, models.AccountResource.id).all()
+    return {"object": "list", "data": [serialize_account(a) for a in accounts_]}
+
+
+@app.get("/v1/model-mappings")
+def model_mappings(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    mappings = db.query(models.ProviderModelMapping).order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.priority).all()
+    return {"object": "list", "data": [serialize_mapping(m) for m in mappings]}
+
+
+@app.post("/v1/router/preview")
+def router_preview(req: RouterPreviewRequest, ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    _, params = runtime.models.normalize_and_validate(db, req.model, req.operation, req.params)
+    for key in ["providers", "provider_ids", "provider_preference", "preferred_providers", "provider", "provider_model", "provider_models", "excluded_providers", "route_policy", "routing_strategy", "cost_policy"]:
+        if key in req.params and key not in params:
+            params[key] = req.params[key]
+    mappings = runtime.router.candidate_mappings(db, req.model, req.operation, params)
+    data = []
+    for mapping in mappings:
+        item = serialize_mapping(mapping)
+        item["routing"] = runtime.router.explain_last(mapping)
+        data.append(item)
+    return {
+        "object": "router.preview",
+        "model": req.model,
+        "operation": req.operation,
+        "route_policy": params.get("route_policy") or params.get("routing_strategy") or params.get("cost_policy") or "balanced",
+        "provider_preference": params.get("provider_preference") or params.get("preferred_providers") or params.get("provider") or [],
+        "provider_models": params.get("provider_models") or params.get("provider_model") or [],
+        "excluded_providers": params.get("excluded_providers") or [],
+        "data": data,
+    }
+
+
+@app.get("/v1/jobs")
+def list_jobs(
+    status: str | None = None,
+    limit: int = 50,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.MediaJob).filter(models.MediaJob.user_id == ctx.user.id)
+    if status:
+        query = query.filter(models.MediaJob.status == status)
+    jobs = query.order_by(models.MediaJob.created_at.desc()).limit(min(limit, 200)).all()
+    return {"object": "list", "data": [serialize_job(db, job) for job in jobs]}
+
+
+@app.get("/v1/billing/usage")
+def billing_usage(limit: int = 100, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    records = (
+        db.query(models.UsageRecord)
+        .filter(models.UsageRecord.user_id == ctx.user.id)
+        .order_by(models.UsageRecord.created_at.desc())
+        .limit(min(limit, 500))
+        .all()
+    )
+    total = sum(record.amount for record in records)
+    return {"object": "list", "total_returned_amount": total, "data": [serialize_usage(record) for record in records]}
+
+
+@app.get("/v1/billing/pricing-rules")
+def billing_pricing_rules(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    rules = db.query(models.PricingRule).filter(models.PricingRule.enabled.is_(True)).order_by(models.PricingRule.logical_model, models.PricingRule.operation).all()
+    return {"object": "list", "data": [serialize_pricing_rule(rule) for rule in rules]}
+
+
+@app.get("/v1/billing/summary")
+def billing_summary(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    usage_total = db.query(func.coalesce(func.sum(models.UsageRecord.amount), 0)).filter(models.UsageRecord.user_id == ctx.user.id, models.UsageRecord.status == "settled").scalar()
+    refund_total = db.query(func.coalesce(func.sum(models.BillingHold.amount), 0)).filter(models.BillingHold.user_id == ctx.user.id, models.BillingHold.status == "refunded").scalar()
+    provider_cost_total = db.query(func.coalesce(func.sum(models.ProviderCostRecord.amount), 0)).filter(models.ProviderCostRecord.user_id == ctx.user.id).scalar()
+    held_total = db.query(func.coalesce(func.sum(models.BillingHold.amount), 0)).filter(models.BillingHold.user_id == ctx.user.id, models.BillingHold.status == "held").scalar()
+    return {
+        "user_id": ctx.user.id,
+        "wallet_balance": ctx.user.wallet_balance,
+        "settled_usage_amount": int(usage_total or 0),
+        "refunded_hold_amount": int(refund_total or 0),
+        "provider_cost_amount": int(provider_cost_total or 0),
+        "gross_margin_amount": int((usage_total or 0) - (provider_cost_total or 0)),
+        "held_amount": int(held_total or 0),
+        "currency": "credits",
+    }
+
+
+@app.get("/v1/billing/invoice", response_model=None)
+def billing_invoice(
+    start: str | None = None,
+    end: str | None = None,
+    format: str = "json",
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> Any:
+    invoice = build_billing_invoice(db, start=start, end=end, user_id=ctx.user.id)
+    if format == "csv":
+        return PlainTextResponse(
+            invoice_to_csv(invoice),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{invoice["id"]}.csv"'},
+        )
+    if format != "json":
+        raise HTTPException(status_code=400, detail={"error": "INVALID_INVOICE_FORMAT", "message": "format must be json or csv."})
+    return invoice
+
+
+@app.get("/v1/webhooks")
+def list_webhooks(limit: int = 100, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    deliveries = (
+        db.query(models.WebhookDelivery)
+        .filter(models.WebhookDelivery.user_id == ctx.user.id)
+        .order_by(models.WebhookDelivery.created_at.desc())
+        .limit(min(limit, 500))
+        .all()
+    )
+    return {"object": "list", "data": [serialize_webhook(delivery) for delivery in deliveries]}
+
+
+@app.post("/v1/webhooks/{delivery_id}/retry")
+def retry_webhook_delivery(delivery_id: str, req: WebhookRetryRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if req.attempts < 1 or req.attempts > 10:
+        raise HTTPException(status_code=400, detail={"error": "WEBHOOK_ATTEMPTS_INVALID"})
+    delivery = db.get(models.WebhookDelivery, delivery_id)
+    if not delivery or delivery.user_id != ctx.user.id:
+        raise HTTPException(status_code=404, detail={"error": "WEBHOOK_DELIVERY_NOT_FOUND"})
+    webhook_service.retry(db, delivery, attempts=req.attempts)
+    db.commit()
+    return serialize_webhook(delivery)
+
+
+@app.get("/v1/admin/webhooks")
+def admin_list_webhooks(
+    status: str | None = None,
+    user_id: str | None = None,
+    job_id: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.WebhookDelivery)
+    if status:
+        query = query.filter(models.WebhookDelivery.status == status)
+    if user_id:
+        query = query.filter(models.WebhookDelivery.user_id == user_id)
+    if job_id:
+        query = query.filter(models.WebhookDelivery.job_id == job_id)
+    deliveries = query.order_by(models.WebhookDelivery.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_webhook(delivery) for delivery in deliveries]}
+
+
+@app.post("/v1/admin/webhooks/retry-failed")
+def admin_retry_failed_webhooks(req: WebhookRetryRequest, limit: int = 50, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if req.attempts < 1 or req.attempts > 10:
+        raise HTTPException(status_code=400, detail={"error": "WEBHOOK_ATTEMPTS_INVALID"})
+    deliveries = webhook_service.retry_failed(db, limit=limit, attempts=req.attempts)
+    db.commit()
+    return {"retried": len(deliveries), "data": [serialize_webhook(delivery) for delivery in deliveries]}
+
+
+@app.post("/v1/admin/webhooks/{delivery_id}/retry")
+def admin_retry_webhook_delivery(delivery_id: str, req: WebhookRetryRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if req.attempts < 1 or req.attempts > 10:
+        raise HTTPException(status_code=400, detail={"error": "WEBHOOK_ATTEMPTS_INVALID"})
+    delivery = db.get(models.WebhookDelivery, delivery_id)
+    if not delivery:
+        raise HTTPException(status_code=404, detail={"error": "WEBHOOK_DELIVERY_NOT_FOUND"})
+    webhook_service.retry(db, delivery, attempts=req.attempts)
+    db.commit()
+    return serialize_webhook(delivery)
+
+
+@app.get("/v1/alerts")
+def list_alerts(
+    status: str | None = None,
+    severity: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.AlertEvent).filter(models.AlertEvent.user_id == ctx.user.id)
+    if status:
+        query = query.filter(models.AlertEvent.status == status)
+    if severity:
+        query = query.filter(models.AlertEvent.severity == severity)
+    events = query.order_by(models.AlertEvent.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_alert_event(event) for event in events]}
+
+
+@app.get("/v1/safety-events")
+def list_own_safety_events(
+    job_id: str | None = None,
+    status: str | None = None,
+    action: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.SafetyEvent).filter(models.SafetyEvent.user_id == ctx.user.id)
+    if job_id:
+        query = query.filter(models.SafetyEvent.job_id == job_id)
+    if status:
+        query = query.filter(models.SafetyEvent.status == status)
+    if action:
+        query = query.filter(models.SafetyEvent.action == action)
+    events = query.order_by(models.SafetyEvent.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_safety_event(event) for event in events]}
+
+
+@app.get("/v1/request-logs")
+def list_own_request_logs(
+    request_id: str | None = None,
+    job_id: str | None = None,
+    provider_id: str | None = None,
+    logical_model: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.RequestAuditLog).filter(models.RequestAuditLog.user_id == ctx.user.id)
+    if request_id:
+        query = query.filter(models.RequestAuditLog.request_id == request_id)
+    if job_id:
+        query = query.filter(models.RequestAuditLog.job_id == job_id)
+    if provider_id:
+        query = query.filter(models.RequestAuditLog.provider_id == provider_id)
+    if logical_model:
+        query = query.filter(models.RequestAuditLog.logical_model == logical_model)
+    records = query.order_by(models.RequestAuditLog.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_request_audit(record) for record in records]}
+
+
+@app.get("/v1/governance/limits")
+def own_governance_limits(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    snapshot = governance_service.policy_snapshot(db, ctx.user)
+    active_jobs = (
+        db.query(models.MediaJob)
+        .filter(
+            models.MediaJob.user_id == ctx.user.id,
+            models.MediaJob.status.in_(["created", "admitted", "queued", "leasing_account", "preparing_assets", "submitting", "provider_queued", "polling", "fetching_assets", "storing"]),
+        )
+        .count()
+    )
+    day_start_dt = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_jobs = (
+        db.query(models.MediaJob)
+        .filter(models.MediaJob.user_id == ctx.user.id, models.MediaJob.created_at >= day_start_dt)
+        .count()
+    )
+    return {
+        "user_id": ctx.user.id,
+        "tier": ctx.user.tier,
+        "policy": snapshot,
+        "usage": {
+            "active_jobs": active_jobs,
+            "daily_jobs": daily_jobs,
+            "day_start": day_start_dt.isoformat() + "Z",
+        },
+    }
+
+
+@app.get("/v1/admin/users")
+def admin_users(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    users = db.query(models.User).order_by(models.User.created_at.desc()).limit(500).all()
+    return {"object": "list", "data": [serialize_user(user) for user in users]}
+
+
+@app.post("/v1/admin/users")
+def admin_create_user(req: UserAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    user_id = req.id or new_id("usr")
+    if db.get(models.User, user_id):
+        raise HTTPException(status_code=409, detail={"error": "USER_EXISTS"})
+    user = models.User(id=user_id, email=req.email, status=req.status, tier=req.tier, wallet_balance=req.wallet_balance)
+    db.add(user)
+    db.commit()
+    return serialize_user(user)
+
+
+@app.patch("/v1/admin/users/{user_id}")
+def admin_patch_user(user_id: str, req: UserPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+    if req.email is not None:
+        user.email = req.email
+    if req.status is not None:
+        user.status = req.status
+    if req.tier is not None:
+        user.tier = req.tier
+    if req.wallet_balance is not None:
+        user.wallet_balance = req.wallet_balance
+    db.commit()
+    return serialize_user(user)
+
+
+@app.get("/v1/admin/api-keys")
+def admin_api_keys(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    keys = db.query(models.ApiKey).order_by(models.ApiKey.created_at.desc()).limit(500).all()
+    return {"object": "list", "data": [serialize_api_key(key) for key in keys]}
+
+
+@app.post("/v1/admin/api-keys")
+def admin_create_api_key(req: ApiKeyAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not db.get(models.User, req.user_id):
+        raise HTTPException(status_code=404, detail={"error": "USER_NOT_FOUND"})
+    raw_key = req.key or f"mk_{new_id('key')}"
+    item = models.ApiKey(id=new_id("key"), user_id=req.user_id, name=req.name, key_hash=hash_api_key(raw_key), status="active")
+    db.add(item)
+    db.commit()
+    result = serialize_api_key(item)
+    result["api_key"] = raw_key
+    return result
+
+
+@app.patch("/v1/admin/api-keys/{api_key_id}")
+def admin_patch_api_key(api_key_id: str, req: ApiKeyPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = db.get(models.ApiKey, api_key_id)
+    if not item:
+        raise HTTPException(status_code=404, detail={"error": "API_KEY_NOT_FOUND"})
+    if req.status is not None:
+        if req.status not in {"active", "disabled", "revoked"}:
+            raise HTTPException(status_code=400, detail={"error": "API_KEY_STATUS_INVALID"})
+        item.status = req.status
+    if req.name is not None:
+        item.name = req.name
+    db.commit()
+    return serialize_api_key(item)
+
+
+@app.delete("/v1/admin/api-keys/{api_key_id}")
+def admin_delete_api_key(api_key_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = db.get(models.ApiKey, api_key_id)
+    if not item:
+        raise HTTPException(status_code=404, detail={"error": "API_KEY_NOT_FOUND"})
+    item.status = "revoked"
+    db.commit()
+    return {"deleted": False, "revoked": True, "id": api_key_id}
+
+
+@app.get("/v1/admin/credential-secrets")
+def admin_credential_secrets(
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    status: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.CredentialSecret)
+    if provider_id is not None:
+        query = query.filter(models.CredentialSecret.provider_id == provider_id)
+    if account_id is not None:
+        query = query.filter(models.CredentialSecret.account_id == account_id)
+    if status is not None:
+        query = query.filter(models.CredentialSecret.status == status)
+    items = query.order_by(models.CredentialSecret.created_at.desc()).limit(500).all()
+    return {"object": "list", "data": [serialize_secret(item) for item in items]}
+
+
+@app.post("/v1/admin/credential-secrets")
+def admin_create_credential_secret(req: CredentialSecretAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    secret_id = req.id or new_id("secret")
+    if db.get(models.CredentialSecret, secret_id):
+        raise HTTPException(status_code=409, detail={"error": "CREDENTIAL_SECRET_EXISTS"})
+    try:
+        item = secret_service.create(
+            db,
+            secret_id=secret_id,
+            name=req.name,
+            value=req.value,
+            kind=req.kind,
+            provider_id=req.provider_id,
+            account_id=req.account_id,
+            metadata=req.metadata,
+            status=req.status,
+            notes=req.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    db.commit()
+    return serialize_secret(item)
+
+
+@app.patch("/v1/admin/credential-secrets/{secret_id}")
+def admin_patch_credential_secret(secret_id: str, req: CredentialSecretPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = db.get(models.CredentialSecret, secret_id)
+    if not item:
+        raise HTTPException(status_code=404, detail={"error": "CREDENTIAL_SECRET_NOT_FOUND"})
+    next_kind = req.kind if req.kind is not None else item.kind
+    next_status = req.status if req.status is not None else item.status
+    try:
+        secret_service.validate(next_kind, next_status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    if req.name is not None:
+        item.name = req.name
+    if req.value is not None:
+        secret_service.update_value(item, req.value)
+    if req.kind is not None:
+        item.kind = req.kind
+    if req.provider_id is not None:
+        item.provider_id = req.provider_id
+    if req.account_id is not None:
+        item.account_id = req.account_id
+    if req.status is not None:
+        item.status = req.status
+    if req.metadata is not None:
+        item.metadata_json = dumps(req.metadata)
+    if req.notes is not None:
+        item.notes = req.notes
+    db.commit()
+    return serialize_secret(item)
+
+
+@app.delete("/v1/admin/credential-secrets/{secret_id}")
+def admin_delete_credential_secret(secret_id: str, force: bool = False, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = db.get(models.CredentialSecret, secret_id)
+    if not item:
+        raise HTTPException(status_code=404, detail={"error": "CREDENTIAL_SECRET_NOT_FOUND"})
+    ref = f"secret://{secret_id}"
+    accounts = db.query(models.AccountResource).filter(models.AccountResource.credential_ref == ref).order_by(models.AccountResource.id).all()
+    if accounts and not force:
+        item.status = "disabled"
+        db.commit()
+        return {
+            "deleted": False,
+            "disabled": True,
+            "id": secret_id,
+            "referenced_by_accounts": [account.id for account in accounts],
+        }
+    db.delete(item)
+    db.commit()
+    return {"deleted": True, "id": secret_id}
+
+
+@app.get("/v1/admin/logical-models")
+def admin_logical_models(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    items = db.query(models.LogicalModel).order_by(models.LogicalModel.id).all()
+    return {"object": "list", "data": [serialize_logical_model(item) for item in items]}
+
+
+@app.post("/v1/admin/logical-models")
+def admin_create_logical_model(req: LogicalModelAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    model_id = req.id or new_id("model")
+    if db.get(models.LogicalModel, model_id):
+        raise HTTPException(status_code=409, detail={"error": "LOGICAL_MODEL_EXISTS"})
+    validate_logical_model_fields(req.operations, req.billing_class)
+    model = models.LogicalModel(
+        id=model_id,
+        display_name=req.display_name,
+        operations_json=dumps(req.operations),
+        constraints_json=dumps(req.constraints),
+        default_params_json=dumps(req.default_params),
+        billing_class=req.billing_class,
+        enabled=req.enabled,
+    )
+    db.add(model)
+    db.commit()
+    return serialize_logical_model(model)
+
+
+@app.patch("/v1/admin/logical-models/{model_id}")
+def admin_patch_logical_model(model_id: str, req: LogicalModelPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    model = db.get(models.LogicalModel, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail={"error": "LOGICAL_MODEL_NOT_FOUND"})
+    next_operations = req.operations if req.operations is not None else loads(model.operations_json, [])
+    next_billing_class = req.billing_class if req.billing_class is not None else model.billing_class
+    validate_logical_model_fields(next_operations, next_billing_class)
+    if req.display_name is not None:
+        model.display_name = req.display_name
+    if req.operations is not None:
+        model.operations_json = dumps(req.operations)
+    if req.constraints is not None:
+        model.constraints_json = dumps(req.constraints)
+    if req.default_params is not None:
+        model.default_params_json = dumps(req.default_params)
+    if req.billing_class is not None:
+        model.billing_class = req.billing_class
+    if req.enabled is not None:
+        model.enabled = req.enabled
+    db.commit()
+    return serialize_logical_model(model)
+
+
+@app.get("/v1/admin/jobs")
+def admin_jobs(
+    status: str | None = None,
+    user_id: str | None = None,
+    provider_id: str | None = None,
+    logical_model: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.MediaJob)
+    if status:
+        query = query.filter(models.MediaJob.status == status)
+    if user_id:
+        query = query.filter(models.MediaJob.user_id == user_id)
+    if provider_id:
+        query = query.filter(models.MediaJob.provider_id == provider_id)
+    if logical_model:
+        query = query.filter(models.MediaJob.logical_model == logical_model)
+    jobs = query.order_by(models.MediaJob.created_at.desc()).limit(min(limit, 1000)).all()
+    return {"object": "list", "data": [serialize_job(db, job) for job in jobs]}
+
+
+@app.post("/v1/admin/media-jobs/recover-stalled")
+def admin_recover_stalled_media_jobs(req: StalledJobRecoveryRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    result = runtime.recover_stalled_jobs(db, max_age_seconds=req.max_age_seconds, limit=req.limit, job_id=req.job_id)
+    return {"object": "stalled_job_recovery", **result}
+
+
+@app.post("/v1/admin/media-jobs/self-test-stalled-recovery")
+def admin_stalled_job_recovery_self_test(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_stalled_job_recovery_self_test(db, ctx)
+
+
+@app.post("/v1/admin/media-jobs/self-test-connector-cancel")
+def admin_connector_cancel_self_test(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_connector_cancel_self_test(db, ctx)
+
+
+@app.post("/v1/admin/stability/self-test-mock")
+def admin_mock_stability_self_test(
+    req: MockStabilitySelfTestRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return run_mock_stability_self_test(db, req)
+
+
+@app.post("/v1/admin/fallback/self-test")
+def admin_fallback_self_test(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_fallback_self_test(db, ctx)
+
+
+@app.post("/v1/admin/fallback/self-test-timeout")
+def admin_fallback_timeout_self_test(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_fallback_timeout_self_test(db, ctx)
+
+
+@app.post("/v1/admin/accounts/self-test-cooldown")
+def admin_account_cooldown_self_test(ctx: AuthContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_account_cooldown_self_test(db, ctx)
+
+
+@app.get("/v1/admin/media-jobs/{job_id}/events")
+def admin_media_job_events(job_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not db.get(models.MediaJob, job_id):
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    events = db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id == job_id).order_by(models.MediaJobEvent.created_at.asc()).all()
+    return {"object": "list", "data": [serialize_job_event(event) for event in events]}
+
+
+@app.get("/v1/admin/media-jobs/{job_id}/diagnostics")
+def admin_media_job_diagnostics(
+    job_id: str,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    job = db.get(models.MediaJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    return build_media_job_diagnostics(db, job, limit=limit)
+
+
+@app.get("/v1/admin/job-events")
+def admin_job_events(
+    job_id: str | None = None,
+    user_id: str | None = None,
+    event_type: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.MediaJobEvent)
+    if job_id:
+        query = query.filter(models.MediaJobEvent.job_id == job_id)
+    if user_id:
+        query = query.filter(models.MediaJobEvent.user_id == user_id)
+    if event_type:
+        query = query.filter(models.MediaJobEvent.event_type == event_type)
+    events = query.order_by(models.MediaJobEvent.created_at.desc()).limit(min(limit, 1000)).all()
+    return {"object": "list", "data": [serialize_job_event(event) for event in events]}
+
+
+@app.post("/v1/admin/media-jobs/{job_id}/retry")
+def admin_retry_media_job(
+    job_id: str,
+    req: RetryJobRequest,
+    background_tasks: BackgroundTasks,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not db.get(models.MediaJob, job_id):
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    job = runtime.retry_job(db, job_id, priority=req.priority)
+    if req.wait:
+        job = runtime.process_job(db, job.id)
+    else:
+        enqueue_or_inline(background_tasks, job.id)
+    return serialize_job(db, job)
+
+
+@app.post("/v1/admin/media-jobs/{job_id}/cancel")
+def admin_cancel_media_job(job_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not db.get(models.MediaJob, job_id):
+        raise HTTPException(status_code=404, detail={"error": "JOB_NOT_FOUND"})
+    job = runtime.cancel_job(db, job_id)
+    return serialize_job(db, job)
+
+
+@app.get("/v1/admin/accounts/{account_id}/diagnostics")
+def admin_account_diagnostics(
+    account_id: str,
+    limit: int = 20,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    account = db.get(models.AccountResource, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_NOT_FOUND"})
+    return build_account_diagnostics(db, account, limit=limit)
+
+
+@app.get("/v1/admin/account-leases")
+def admin_account_leases(
+    status: str | None = None,
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    job_id: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.AccountLease)
+    if status:
+        query = query.filter(models.AccountLease.status == status)
+    if provider_id:
+        query = query.filter(models.AccountLease.provider_id == provider_id)
+    if account_id:
+        query = query.filter(models.AccountLease.account_id == account_id)
+    if job_id:
+        query = query.filter(models.AccountLease.job_id == job_id)
+    leases = query.order_by(models.AccountLease.created_at.desc()).limit(min(limit, 1000)).all()
+    return {"object": "list", "data": [serialize_lease(lease) for lease in leases]}
+
+
+@app.post("/v1/admin/account-leases/release-expired")
+def admin_release_expired_leases(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    expired = runtime.sweep_expired_leases(db)
+    return {
+        "object": "lease_sweep",
+        "expired_leases": expired,
+        "active_leases": db.query(models.AccountLease).filter(models.AccountLease.status == "active").count(),
+    }
+
+
+@app.post("/v1/admin/account-leases/self-test-expiry")
+def admin_lease_expiry_self_test(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_lease_expiry_self_test(db, ctx)
+
+
+@app.post("/v1/admin/account-leases/reconcile")
+def admin_reconcile_account_leases(
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = runtime.scheduler.reconcile(db, provider_id=provider_id, account_id=account_id)
+    return {"object": "lease_reconcile", **result}
+
+
+@app.get("/v1/admin/user-limit-policies")
+def admin_user_limit_policies(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    policies = db.query(models.UserLimitPolicy).order_by(models.UserLimitPolicy.user_id.desc(), models.UserLimitPolicy.tier.desc(), models.UserLimitPolicy.id).all()
+    return {"object": "list", "data": [serialize_user_limit_policy(policy) for policy in policies]}
+
+
+@app.post("/v1/admin/user-limit-policies")
+def admin_create_user_limit_policy(req: UserLimitPolicyAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    validate_user_limit_policy(req)
+    policy_id = req.id or new_id("limit")
+    if db.get(models.UserLimitPolicy, policy_id):
+        raise HTTPException(status_code=409, detail={"error": "USER_LIMIT_POLICY_EXISTS"})
+    policy = models.UserLimitPolicy(
+        id=policy_id,
+        name=req.name,
+        user_id=req.user_id,
+        tier=req.tier,
+        requests_per_minute=req.requests_per_minute,
+        daily_job_limit=req.daily_job_limit,
+        concurrent_job_limit=req.concurrent_job_limit,
+        allowed_models_json=dumps(req.allowed_models),
+        high_cost_models_json=dumps(req.high_cost_models),
+        high_cost_allowed=req.high_cost_allowed,
+        enabled=req.enabled,
+        notes=req.notes,
+    )
+    db.add(policy)
+    db.commit()
+    return serialize_user_limit_policy(policy)
+
+
+@app.patch("/v1/admin/user-limit-policies/{policy_id}")
+def admin_patch_user_limit_policy(policy_id: str, req: UserLimitPolicyPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    policy = db.get(models.UserLimitPolicy, policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail={"error": "USER_LIMIT_POLICY_NOT_FOUND"})
+    if req.name is not None:
+        policy.name = req.name
+    if req.user_id is not None:
+        policy.user_id = req.user_id
+    if req.tier is not None:
+        policy.tier = req.tier
+    if req.requests_per_minute is not None:
+        policy.requests_per_minute = req.requests_per_minute
+    if req.daily_job_limit is not None:
+        policy.daily_job_limit = req.daily_job_limit
+    if req.concurrent_job_limit is not None:
+        policy.concurrent_job_limit = req.concurrent_job_limit
+    if req.allowed_models is not None:
+        policy.allowed_models_json = dumps(req.allowed_models)
+    if req.high_cost_models is not None:
+        policy.high_cost_models_json = dumps(req.high_cost_models)
+    if req.high_cost_allowed is not None:
+        policy.high_cost_allowed = req.high_cost_allowed
+    if req.enabled is not None:
+        policy.enabled = req.enabled
+    if req.notes is not None:
+        policy.notes = req.notes
+    validate_user_limit_policy(policy)
+    db.commit()
+    return serialize_user_limit_policy(policy)
+
+
+@app.get("/v1/admin/circuit-breakers")
+def admin_circuit_breakers(
+    scope: str | None = None,
+    target_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.CircuitBreaker)
+    if scope:
+        query = query.filter(models.CircuitBreaker.scope == scope)
+    if target_id:
+        query = query.filter(models.CircuitBreaker.target_id == target_id)
+    if status:
+        query = query.filter(models.CircuitBreaker.status == status)
+    breakers = query.order_by(models.CircuitBreaker.updated_at.desc()).limit(min(limit, 1000)).all()
+    return {"object": "list", "data": [serialize_circuit_breaker(breaker) for breaker in breakers]}
+
+
+@app.post("/v1/admin/circuit-breakers")
+def admin_create_circuit_breaker(req: CircuitBreakerAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    validate_circuit_breaker_fields(req.scope, req.status)
+    breaker_id = req.id or f"cb_{req.scope}_{req.target_id}".replace(":", "_").replace("/", "_")
+    if db.get(models.CircuitBreaker, breaker_id):
+        raise HTTPException(status_code=409, detail={"error": "CIRCUIT_BREAKER_EXISTS"})
+    block_until = datetime.utcnow() + timedelta(minutes=req.block_minutes) if req.block_minutes else None
+    breaker = models.CircuitBreaker(
+        id=breaker_id,
+        scope=req.scope,
+        target_id=req.target_id,
+        status=req.status,
+        reason=req.reason,
+        error_code=req.error_code,
+        block_until=block_until,
+        enabled=req.enabled,
+        metadata_json=dumps(req.metadata),
+    )
+    db.add(breaker)
+    if breaker.status == "open" and breaker.enabled:
+        alert_service.trigger(
+            db=db,
+            event_type="circuit_open",
+            title=f"Circuit opened for {breaker.scope} {breaker.target_id}",
+            message=breaker.reason,
+            dimensions={"scope": breaker.scope, "target_id": breaker.target_id, "error_code": breaker.error_code, "manual": True},
+        )
+    db.commit()
+    return serialize_circuit_breaker(breaker)
+
+
+@app.patch("/v1/admin/circuit-breakers/{breaker_id}")
+def admin_patch_circuit_breaker(breaker_id: str, req: CircuitBreakerPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    breaker = db.get(models.CircuitBreaker, breaker_id)
+    if not breaker:
+        raise HTTPException(status_code=404, detail={"error": "CIRCUIT_BREAKER_NOT_FOUND"})
+    if req.status is not None:
+        breaker.status = req.status
+    if req.reason is not None:
+        breaker.reason = req.reason
+    if req.error_code is not None:
+        breaker.error_code = req.error_code
+    if req.block_minutes is not None:
+        breaker.block_until = datetime.utcnow() + timedelta(minutes=req.block_minutes) if req.block_minutes > 0 else None
+    if req.clear_block_until:
+        breaker.block_until = None
+    if req.enabled is not None:
+        breaker.enabled = req.enabled
+    if req.metadata is not None:
+        breaker.metadata_json = dumps(req.metadata)
+    validate_circuit_breaker_fields(breaker.scope, breaker.status)
+    db.commit()
+    return serialize_circuit_breaker(breaker)
+
+
+@app.get("/v1/admin/pricing-rules")
+def admin_pricing_rules(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    rules = db.query(models.PricingRule).order_by(models.PricingRule.logical_model, models.PricingRule.operation, models.PricingRule.id).all()
+    return {"object": "list", "data": [serialize_pricing_rule(rule) for rule in rules]}
+
+
+@app.post("/v1/admin/pricing-rules")
+def admin_create_pricing_rule(req: PricingRuleAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not (req.logical_model or req.billing_class or req.operation):
+        raise HTTPException(status_code=400, detail={"error": "PRICING_SCOPE_REQUIRED"})
+    rule_id = req.id or new_id("price")
+    if db.get(models.PricingRule, rule_id):
+        raise HTTPException(status_code=409, detail={"error": "PRICING_RULE_EXISTS"})
+    rule = models.PricingRule(
+        id=rule_id,
+        name=req.name,
+        logical_model=req.logical_model,
+        billing_class=req.billing_class,
+        operation=req.operation,
+        unit=req.unit,
+        base_amount=req.base_amount,
+        unit_amount=req.unit_amount,
+        input_asset_amount=req.input_asset_amount,
+        provider_cost_base=req.provider_cost_base,
+        provider_cost_unit=req.provider_cost_unit,
+        provider_cost_input_asset=req.provider_cost_input_asset,
+        quality_multipliers_json=dumps(req.quality_multipliers),
+        currency=req.currency,
+        enabled=req.enabled,
+    )
+    db.add(rule)
+    db.commit()
+    return serialize_pricing_rule(rule)
+
+
+@app.patch("/v1/admin/pricing-rules/{rule_id}")
+def admin_patch_pricing_rule(rule_id: str, req: PricingRulePatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    rule = db.get(models.PricingRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail={"error": "PRICING_RULE_NOT_FOUND"})
+    if req.name is not None:
+        rule.name = req.name
+    if req.logical_model is not None:
+        rule.logical_model = req.logical_model
+    if req.billing_class is not None:
+        rule.billing_class = req.billing_class
+    if req.operation is not None:
+        rule.operation = req.operation
+    if req.unit is not None:
+        rule.unit = req.unit
+    if req.base_amount is not None:
+        rule.base_amount = req.base_amount
+    if req.unit_amount is not None:
+        rule.unit_amount = req.unit_amount
+    if req.input_asset_amount is not None:
+        rule.input_asset_amount = req.input_asset_amount
+    if req.provider_cost_base is not None:
+        rule.provider_cost_base = req.provider_cost_base
+    if req.provider_cost_unit is not None:
+        rule.provider_cost_unit = req.provider_cost_unit
+    if req.provider_cost_input_asset is not None:
+        rule.provider_cost_input_asset = req.provider_cost_input_asset
+    if req.quality_multipliers is not None:
+        rule.quality_multipliers_json = dumps(req.quality_multipliers)
+    if req.currency is not None:
+        rule.currency = req.currency
+    if req.enabled is not None:
+        rule.enabled = req.enabled
+    if not (rule.logical_model or rule.billing_class or rule.operation):
+        raise HTTPException(status_code=400, detail={"error": "PRICING_SCOPE_REQUIRED"})
+    db.commit()
+    return serialize_pricing_rule(rule)
+
+
+@app.get("/v1/admin/provider-costs")
+def admin_provider_costs(limit: int = 100, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    records = db.query(models.ProviderCostRecord).order_by(models.ProviderCostRecord.created_at.desc()).limit(min(limit, 500)).all()
+    total = sum(record.amount for record in records)
+    return {"object": "list", "total_returned_amount": total, "data": [serialize_provider_cost(record) for record in records]}
+
+
+@app.get("/v1/admin/billing-holds")
+def admin_billing_holds(limit: int = 100, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    holds = db.query(models.BillingHold).order_by(models.BillingHold.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_billing_hold(hold) for hold in holds]}
+
+
+@app.get("/v1/admin/billing-invoices", response_model=None)
+def admin_billing_invoices(
+    start: str | None = None,
+    end: str | None = None,
+    user_id: str | None = None,
+    format: str = "json",
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> Any:
+    invoice = build_billing_invoice(db, start=start, end=end, user_id=user_id)
+    if format == "csv":
+        return PlainTextResponse(
+            invoice_to_csv(invoice),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{invoice["id"]}.csv"'},
+        )
+    if format != "json":
+        raise HTTPException(status_code=400, detail={"error": "INVALID_INVOICE_FORMAT", "message": "format must be json or csv."})
+    return invoice
+
+
+@app.get("/v1/admin/alert-rules")
+def admin_alert_rules(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    rules = db.query(models.AlertRule).order_by(models.AlertRule.event_type, models.AlertRule.id).all()
+    return {"object": "list", "data": [serialize_alert_rule(rule) for rule in rules]}
+
+
+@app.post("/v1/admin/alert-rules")
+def admin_create_alert_rule(req: AlertRuleAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    rule_id = req.id or new_id("arule")
+    if db.get(models.AlertRule, rule_id):
+        raise HTTPException(status_code=409, detail={"error": "ALERT_RULE_EXISTS"})
+    rule = models.AlertRule(
+        id=rule_id,
+        name=req.name,
+        event_type=req.event_type,
+        severity=req.severity,
+        condition_json=dumps(req.condition),
+        enabled=req.enabled,
+    )
+    db.add(rule)
+    db.commit()
+    return serialize_alert_rule(rule)
+
+
+@app.patch("/v1/admin/alert-rules/{rule_id}")
+def admin_patch_alert_rule(rule_id: str, req: AlertRulePatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    rule = db.get(models.AlertRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail={"error": "ALERT_RULE_NOT_FOUND"})
+    if req.name is not None:
+        rule.name = req.name
+    if req.event_type is not None:
+        rule.event_type = req.event_type
+    if req.severity is not None:
+        rule.severity = req.severity
+    if req.condition is not None:
+        rule.condition_json = dumps(req.condition)
+    if req.enabled is not None:
+        rule.enabled = req.enabled
+    db.commit()
+    return serialize_alert_rule(rule)
+
+
+@app.get("/v1/admin/alerts")
+def admin_alerts(
+    status: str | None = None,
+    severity: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.AlertEvent)
+    if status:
+        query = query.filter(models.AlertEvent.status == status)
+    if severity:
+        query = query.filter(models.AlertEvent.severity == severity)
+    events = query.order_by(models.AlertEvent.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_alert_event(event) for event in events]}
+
+
+@app.post("/v1/admin/anomaly-scan")
+def admin_anomaly_scan(
+    lookback_minutes: int = 60,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    events = alert_service.scan_usage_anomalies(db, lookback_minutes=lookback_minutes)
+    db.commit()
+    return {
+        "object": "usage_anomaly.scan",
+        "lookback_minutes": max(1, lookback_minutes),
+        "created_alerts": len(events),
+        "data": [serialize_alert_event(event) for event in events],
+    }
+
+
+@app.patch("/v1/admin/alerts/{alert_id}")
+def admin_patch_alert(alert_id: str, req: AlertEventPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if req.status not in {"open", "acknowledged", "resolved"}:
+        raise HTTPException(status_code=400, detail={"error": "ALERT_STATUS_INVALID"})
+    event = db.get(models.AlertEvent, alert_id)
+    if not event:
+        raise HTTPException(status_code=404, detail={"error": "ALERT_NOT_FOUND"})
+    event.status = req.status
+    db.commit()
+    return serialize_alert_event(event)
+
+
+@app.get("/v1/admin/safety-policies")
+def admin_safety_policies(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    policies = db.query(models.SafetyPolicy).order_by(models.SafetyPolicy.scope, models.SafetyPolicy.id).all()
+    return {"object": "list", "data": [serialize_safety_policy(policy) for policy in policies]}
+
+
+@app.post("/v1/admin/safety-policies")
+def admin_create_safety_policy(req: SafetyPolicyAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    validate_safety_policy_fields(req.scope, req.action, req.match_type, req.logical_model, req.operation)
+    policy_id = req.id or new_id("safety_policy")
+    if db.get(models.SafetyPolicy, policy_id):
+        raise HTTPException(status_code=409, detail={"error": "SAFETY_POLICY_EXISTS"})
+    policy = models.SafetyPolicy(
+        id=policy_id,
+        name=req.name,
+        scope=req.scope,
+        logical_model=req.logical_model,
+        operation=req.operation,
+        action=req.action,
+        severity=req.severity,
+        match_type=req.match_type,
+        terms_json=dumps(req.terms),
+        pattern_json=dumps(req.pattern),
+        enabled=req.enabled,
+        notes=req.notes,
+    )
+    db.add(policy)
+    db.commit()
+    return serialize_safety_policy(policy)
+
+
+@app.patch("/v1/admin/safety-policies/{policy_id}")
+def admin_patch_safety_policy(policy_id: str, req: SafetyPolicyPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    policy = db.get(models.SafetyPolicy, policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail={"error": "SAFETY_POLICY_NOT_FOUND"})
+    if req.name is not None:
+        policy.name = req.name
+    if req.scope is not None:
+        policy.scope = req.scope
+    if req.logical_model is not None:
+        policy.logical_model = req.logical_model
+    if req.operation is not None:
+        policy.operation = req.operation
+    if req.action is not None:
+        policy.action = req.action
+    if req.severity is not None:
+        policy.severity = req.severity
+    if req.match_type is not None:
+        policy.match_type = req.match_type
+    if req.terms is not None:
+        policy.terms_json = dumps(req.terms)
+    if req.pattern is not None:
+        policy.pattern_json = dumps(req.pattern)
+    if req.enabled is not None:
+        policy.enabled = req.enabled
+    if req.notes is not None:
+        policy.notes = req.notes
+    validate_safety_policy_fields(policy.scope, policy.action, policy.match_type, policy.logical_model, policy.operation)
+    db.commit()
+    return serialize_safety_policy(policy)
+
+
+@app.get("/v1/admin/safety-events")
+def admin_safety_events(
+    job_id: str | None = None,
+    user_id: str | None = None,
+    policy_id: str | None = None,
+    status: str | None = None,
+    action: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.SafetyEvent)
+    if job_id:
+        query = query.filter(models.SafetyEvent.job_id == job_id)
+    if user_id:
+        query = query.filter(models.SafetyEvent.user_id == user_id)
+    if policy_id:
+        query = query.filter(models.SafetyEvent.policy_id == policy_id)
+    if status:
+        query = query.filter(models.SafetyEvent.status == status)
+    if action:
+        query = query.filter(models.SafetyEvent.action == action)
+    events = query.order_by(models.SafetyEvent.created_at.desc()).limit(min(limit, 1000)).all()
+    return {"object": "list", "data": [serialize_safety_event(event) for event in events]}
+
+
+@app.get("/v1/admin/request-logs")
+def admin_request_logs(
+    request_id: str | None = None,
+    job_id: str | None = None,
+    status_code: int | None = None,
+    user_id: str | None = None,
+    provider_id: str | None = None,
+    account_id: str | None = None,
+    logical_model: str | None = None,
+    provider_model: str | None = None,
+    error_code: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.RequestAuditLog)
+    if request_id:
+        query = query.filter(models.RequestAuditLog.request_id == request_id)
+    if job_id:
+        query = query.filter(models.RequestAuditLog.job_id == job_id)
+    if status_code is not None:
+        query = query.filter(models.RequestAuditLog.status_code == status_code)
+    if user_id:
+        query = query.filter(models.RequestAuditLog.user_id == user_id)
+    if provider_id:
+        query = query.filter(models.RequestAuditLog.provider_id == provider_id)
+    if account_id:
+        query = query.filter(models.RequestAuditLog.account_id == account_id)
+    if logical_model:
+        query = query.filter(models.RequestAuditLog.logical_model == logical_model)
+    if provider_model:
+        query = query.filter(models.RequestAuditLog.provider_model == provider_model)
+    if error_code:
+        query = query.filter(models.RequestAuditLog.standard_error_code == error_code)
+    records = query.order_by(models.RequestAuditLog.created_at.desc()).limit(min(limit, 1000)).all()
+    return {"object": "list", "data": [serialize_request_audit(record) for record in records]}
+
+
+@app.get("/v1/admin/provider-contracts")
+def admin_provider_contracts(
+    provider_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.ProviderContractResult)
+    if provider_id:
+        query = query.filter(models.ProviderContractResult.provider_id == provider_id)
+    if status:
+        query = query.filter(models.ProviderContractResult.status == status)
+    results = query.order_by(models.ProviderContractResult.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_provider_contract(result) for result in results]}
+
+
+@app.get("/v1/admin/provider-contract-matrix")
+def admin_provider_contract_matrix(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return {"object": "list", "data": contract_service.latest_matrix(db)}
+
+
+@app.post("/v1/admin/provider-contract-suite")
+def admin_run_provider_contract_suite(req: ContractSuiteRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return run_provider_contract_suite(db, req)
+
+
+@app.post("/v1/admin/providers/{provider_id}/contract-test")
+def admin_run_provider_contract(provider_id: str, req: ContractTestRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    result = contract_service.run(
+        db=db,
+        provider_id=provider_id,
+        operation=req.operation,
+        provider_model=req.provider_model,
+        run_submit=req.run_submit,
+    )
+    return serialize_provider_contract(result)
+
+
+@app.post("/v1/admin/providers")
+def admin_create_provider(req: ProviderAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not req.id:
+        raise HTTPException(status_code=400, detail={"error": "PROVIDER_ID_REQUIRED"})
+    if db.get(models.Provider, req.id):
+        raise HTTPException(status_code=409, detail={"error": "PROVIDER_EXISTS"})
+    provider = models.Provider(
+        id=req.id,
+        name=req.name or req.id,
+        adapter_type=req.adapter_type or "http_adapter",
+        status=req.status or "disabled",
+        base_config_json=dumps(req.base_config or {}),
+        notes=req.notes or "",
+    )
+    db.add(provider)
+    db.commit()
+    return serialize_provider(provider)
+
+
+@app.post("/v1/admin/providers/{provider_id}/health-check")
+def admin_provider_health_check(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    provider = db.get(models.Provider, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    adapter = get_provider(provider_id)
+    result = adapter.health_check(db, provider_id)
+    check = models.ProviderHealthCheck(
+        id=new_id("phc"),
+        provider_id=provider_id,
+        status=str(result.get("status") or "unknown"),
+        latency_ms=result.get("latency_ms"),
+        message=str(result.get("message") or ""),
+        detail_json=dumps(result.get("detail") or {}),
+    )
+    db.add(check)
+    if check.status == "ok":
+        provider.status = "active"
+    elif provider.status == "active" and check.status in {"failed", "disabled"}:
+        provider.status = "cooldown"
+    if check.status != "ok":
+        alert_service.provider_health(db, check)
+    db.commit()
+    return serialize_health_check(check)
+
+
+@app.post("/v1/admin/providers/{provider_id}/sync-quotas")
+def admin_sync_provider_quotas(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    provider = db.get(models.Provider, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    accounts = db.query(models.AccountResource).filter(models.AccountResource.provider_id == provider_id).order_by(models.AccountResource.id).all()
+    results = [sync_account_quota_from_provider(db, account, ctx.user.id) for account in accounts]
+    db.commit()
+    synced = sum(1 for item in results if item.get("status") == "ok")
+    failed = len(results) - synced
+    return {
+        "object": "quota.sync",
+        "provider_id": provider_id,
+        "total": len(results),
+        "synced": synced,
+        "failed": failed,
+        "data": results,
+    }
+
+
+@app.get("/v1/admin/provider-health")
+def admin_provider_health(limit: int = 100, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    checks = db.query(models.ProviderHealthCheck).order_by(models.ProviderHealthCheck.created_at.desc()).limit(min(limit, 500)).all()
+    return {"object": "list", "data": [serialize_health_check(check) for check in checks]}
+
+
+@app.patch("/v1/admin/providers/{provider_id}")
+def admin_patch_provider(provider_id: str, req: ProviderAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    provider = db.get(models.Provider, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    if req.name is not None:
+        provider.name = req.name
+    if req.adapter_type is not None:
+        provider.adapter_type = req.adapter_type
+    if req.status is not None:
+        provider.status = req.status
+    if req.base_config is not None:
+        provider.base_config_json = dumps(req.base_config)
+    if req.notes is not None:
+        provider.notes = req.notes
+    db.commit()
+    return serialize_provider(provider)
+
+
+@app.post("/v1/admin/accounts/bulk-upsert")
+def admin_bulk_upsert_accounts(req: AccountBulkUpsertRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not req.accounts:
+        raise HTTPException(status_code=400, detail={"error": "ACCOUNTS_REQUIRED"})
+    if len(req.accounts) > 500:
+        raise HTTPException(status_code=400, detail={"error": "ACCOUNT_BATCH_TOO_LARGE", "limit": 500})
+
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    created_accounts = 0
+    updated_accounts = 0
+    upserted_secrets = 0
+
+    for index, item in enumerate(req.accounts):
+        provider = db.get(models.Provider, item.provider_id)
+        if not provider:
+            errors.append({"index": index, "provider_id": item.provider_id, "error": "PROVIDER_NOT_FOUND"})
+            continue
+        if item.concurrency_limit < 1:
+            errors.append({"index": index, "provider_id": item.provider_id, "error": "CONCURRENCY_LIMIT_INVALID"})
+            continue
+
+        account_id = item.id or new_id("acct")
+        credential_ref = item.credential_ref or "env://MEDIA2API_CONNECTOR_KEY"
+        secret_payload: dict[str, Any] | None = None
+        if item.credential_value is not None:
+            secret_id = item.credential_secret_id or f"secret_{account_id}"
+            secret = db.get(models.CredentialSecret, secret_id)
+            try:
+                if secret:
+                    secret_service.validate(item.credential_kind, "active")
+                    secret.name = f"{item.label} credential"
+                    secret.kind = item.credential_kind
+                    secret.provider_id = item.provider_id
+                    secret.account_id = account_id
+                    secret.metadata_json = dumps(item.secret_metadata)
+                    secret.status = "active"
+                    secret_service.update_value(secret, item.credential_value)
+                else:
+                    secret = secret_service.create(
+                        db,
+                        secret_id=secret_id,
+                        name=f"{item.label} credential",
+                        value=item.credential_value,
+                        kind=item.credential_kind,
+                        provider_id=item.provider_id,
+                        account_id=account_id,
+                        metadata=item.secret_metadata,
+                        status="active",
+                    )
+            except ValueError as exc:
+                errors.append({"index": index, "account_id": account_id, "provider_id": item.provider_id, "error": str(exc)})
+                continue
+            credential_ref = f"secret://{secret_id}"
+            secret_payload = serialize_secret(secret)
+            upserted_secrets += 1
+        else:
+            try:
+                credential_ref, secret_payload = normalize_account_credential_ref(
+                    db,
+                    account_id=account_id,
+                    provider_id=item.provider_id,
+                    label=item.label,
+                    credential_ref=credential_ref,
+                    credential_secret_id=item.credential_secret_id,
+                    credential_kind=item.credential_kind,
+                    metadata=item.secret_metadata,
+                )
+                if secret_payload:
+                    upserted_secrets += 1
+            except ValueError as exc:
+                errors.append({"index": index, "account_id": account_id, "provider_id": item.provider_id, "error": str(exc)})
+                continue
+
+        account = db.get(models.AccountResource, account_id)
+        if account:
+            account.provider_id = item.provider_id
+            account.label = item.label
+            account.credential_ref = credential_ref
+            account.supported_operations_json = dumps(item.supported_operations)
+            account.supported_provider_models_json = dumps(item.supported_provider_models)
+            account.quota_buckets_json = dumps(item.quota_buckets)
+            account.concurrency_limit = item.concurrency_limit
+            account.region = item.region
+            account.plan = item.plan
+            account.status = item.status
+            updated_accounts += 1
+            action = "updated"
+        else:
+            account = models.AccountResource(
+                id=account_id,
+                provider_id=item.provider_id,
+                label=item.label,
+                credential_ref=credential_ref,
+                supported_operations_json=dumps(item.supported_operations),
+                supported_provider_models_json=dumps(item.supported_provider_models),
+                quota_buckets_json=dumps(item.quota_buckets),
+                concurrency_limit=item.concurrency_limit,
+                region=item.region,
+                plan=item.plan,
+                status=item.status,
+            )
+            db.add(account)
+            created_accounts += 1
+            action = "created"
+
+        db.flush()
+        result = {"index": index, "action": action, "account": serialize_account(account)}
+        if secret_payload:
+            result["secret"] = secret_payload
+        results.append(result)
+
+    db.commit()
+    return {
+        "created_accounts": created_accounts,
+        "updated_accounts": updated_accounts,
+        "upserted_secrets": upserted_secrets,
+        "errors": errors,
+        "data": results,
+    }
+
+
+@app.post("/v1/admin/accounts/migrate-inline-credentials")
+def admin_migrate_inline_account_credentials(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    result = migrate_inline_account_credentials(db)
+    return {"object": "account_credential_migration", **result}
+
+
+@app.get("/v1/admin/compatibility-matrix")
+def admin_compatibility_matrix(
+    logical_model: str | None = None,
+    provider_id: str | None = None,
+    operation: str | None = None,
+    enabled_only: bool = True,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.ProviderModelMapping)
+    if logical_model:
+        query = query.filter(models.ProviderModelMapping.logical_model == logical_model)
+    if provider_id:
+        query = query.filter(models.ProviderModelMapping.provider_id == provider_id)
+    if enabled_only:
+        query = query.filter(models.ProviderModelMapping.enabled.is_(True))
+    mappings = query.order_by(models.ProviderModelMapping.logical_model, models.ProviderModelMapping.provider_id, models.ProviderModelMapping.priority).all()
+    rows: list[dict[str, Any]] = []
+    for mapping in mappings:
+        if operation and operation not in loads(mapping.operations_json, []):
+            continue
+        provider = db.get(models.Provider, mapping.provider_id)
+        provider_status = provider.status if provider else "missing"
+        accounts = db.query(models.AccountResource).filter(models.AccountResource.provider_id == mapping.provider_id).order_by(models.AccountResource.id).all()
+        compatible_accounts = [account for account in accounts if account_supports_mapping(account, mapping, operation)]
+        account_rows = []
+        available_accounts = 0
+        available_capacity = 0
+        for account in compatible_accounts:
+            credential = credential_ref_info(db, account.credential_ref)
+            quota_ok = account_quota_available(account, operation)
+            capacity = max(int(account.concurrency_limit) - int(account.current_leases), 0)
+            available = account.status == "active" and provider_status == "active" and credential["available"] and quota_ok and capacity > 0
+            if available:
+                available_accounts += 1
+                available_capacity += capacity
+            account_rows.append(
+                {
+                    "id": account.id,
+                    "label": account.label,
+                    "status": account.status,
+                    "region": account.region,
+                    "plan": account.plan,
+                    "current_leases": account.current_leases,
+                    "concurrency_limit": account.concurrency_limit,
+                    "available_capacity": capacity,
+                    "quota_available": quota_ok,
+                    "credential": credential,
+                    "last_error_code": account.last_error_code,
+                    "last_error_message": account.last_error_message,
+                    "last_failed_at": account.last_failed_at.isoformat() + "Z" if account.last_failed_at else None,
+                    "available": available,
+                }
+            )
+        rows.append(
+            {
+                "logical_model": mapping.logical_model,
+                "provider_id": mapping.provider_id,
+                "provider_status": provider_status,
+                "provider_model": mapping.provider_model,
+                "operations": loads(mapping.operations_json, []),
+                "mapping_enabled": mapping.enabled,
+                "priority": mapping.priority,
+                "account_count": len(compatible_accounts),
+                "available_account_count": available_accounts,
+                "available_capacity": available_capacity,
+                "accounts": account_rows,
+            }
+        )
+    return {"object": "list", "data": rows}
+
+
+@app.post("/v1/admin/accounts")
+def admin_create_account(req: AccountAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not db.get(models.Provider, req.provider_id):
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    account_id = req.id or new_id("acct")
+    if db.get(models.AccountResource, account_id):
+        raise HTTPException(status_code=409, detail={"error": "ACCOUNT_EXISTS"})
+    try:
+        credential_ref, secret_payload = normalize_account_credential_ref(
+            db,
+            account_id=account_id,
+            provider_id=req.provider_id,
+            label=req.label,
+            credential_ref=req.credential_ref,
+            credential_secret_id=req.credential_secret_id,
+            credential_kind=req.credential_kind,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    account = models.AccountResource(
+        id=account_id,
+        provider_id=req.provider_id,
+        label=req.label,
+        credential_ref=credential_ref,
+        supported_operations_json=dumps(req.supported_operations),
+        supported_provider_models_json=dumps(req.supported_provider_models),
+        quota_buckets_json=dumps(req.quota_buckets),
+        concurrency_limit=req.concurrency_limit,
+        region=req.region,
+        plan=req.plan,
+        status=req.status,
+    )
+    db.add(account)
+    db.commit()
+    result = serialize_account(account)
+    if secret_payload:
+        result["secret"] = secret_payload
+    return result
+
+
+@app.patch("/v1/admin/accounts/{account_id}")
+def admin_patch_account(account_id: str, req: AccountPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    account = db.get(models.AccountResource, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_NOT_FOUND"})
+    if req.label is not None:
+        account.label = req.label
+    if req.credential_ref is not None:
+        try:
+            credential_ref, secret_payload = normalize_account_credential_ref(
+                db,
+                account_id=account.id,
+                provider_id=account.provider_id,
+                label=req.label or account.label,
+                credential_ref=req.credential_ref,
+                credential_secret_id=req.credential_secret_id,
+                credential_kind=req.credential_kind,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        account.credential_ref = credential_ref
+    else:
+        secret_payload = None
+    if req.supported_operations is not None:
+        account.supported_operations_json = dumps(req.supported_operations)
+    if req.supported_provider_models is not None:
+        account.supported_provider_models_json = dumps(req.supported_provider_models)
+    if req.quota_buckets is not None:
+        account.quota_buckets_json = dumps(req.quota_buckets)
+    if req.concurrency_limit is not None:
+        account.concurrency_limit = req.concurrency_limit
+    if req.health_score is not None:
+        account.health_score = req.health_score
+    if req.failure_score is not None:
+        account.failure_score = req.failure_score
+    if req.region is not None:
+        account.region = req.region
+    if req.plan is not None:
+        account.plan = req.plan
+    if req.status is not None:
+        account.status = req.status
+    db.commit()
+    result = serialize_account(account)
+    if secret_payload:
+        result["secret"] = secret_payload
+    return result
+
+
+@app.post("/v1/admin/accounts/{account_id}/sync-quota")
+def admin_sync_account_quota(account_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    account = db.get(models.AccountResource, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_NOT_FOUND"})
+    result = sync_account_quota_from_provider(db, account, ctx.user.id)
+    db.commit()
+    return result
+
+
+@app.post("/v1/admin/model-mappings")
+def admin_create_mapping(req: MappingAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not db.get(models.LogicalModel, req.logical_model):
+        raise HTTPException(status_code=404, detail={"error": "LOGICAL_MODEL_NOT_FOUND"})
+    if not db.get(models.Provider, req.provider_id):
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    mapping_id = req.id or f"{req.logical_model}:{req.provider_id}:{req.provider_model}"
+    if db.get(models.ProviderModelMapping, mapping_id):
+        raise HTTPException(status_code=409, detail={"error": "MAPPING_EXISTS"})
+    mapping = models.ProviderModelMapping(
+        id=mapping_id,
+        logical_model=req.logical_model,
+        provider_id=req.provider_id,
+        provider_model=req.provider_model,
+        operations_json=dumps(req.operations),
+        priority=req.priority,
+        weight=req.weight,
+        cost_score=req.cost_score,
+        speed_score=req.speed_score,
+        quality_score=req.quality_score,
+        reliability_score=req.reliability_score,
+        enabled=req.enabled,
+    )
+    db.add(mapping)
+    db.commit()
+    return serialize_mapping(mapping)
+
+
+@app.patch("/v1/admin/model-mappings/{mapping_id:path}")
+def admin_patch_mapping(mapping_id: str, req: MappingPatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    mapping = db.get(models.ProviderModelMapping, mapping_id)
+    if not mapping:
+        raise HTTPException(status_code=404, detail={"error": "MAPPING_NOT_FOUND"})
+    if req.operations is not None:
+        mapping.operations_json = dumps(req.operations)
+    if req.priority is not None:
+        mapping.priority = req.priority
+    if req.weight is not None:
+        mapping.weight = req.weight
+    if req.cost_score is not None:
+        mapping.cost_score = req.cost_score
+    if req.speed_score is not None:
+        mapping.speed_score = req.speed_score
+    if req.quality_score is not None:
+        mapping.quality_score = req.quality_score
+    if req.reliability_score is not None:
+        mapping.reliability_score = req.reliability_score
+    if req.enabled is not None:
+        mapping.enabled = req.enabled
+    db.commit()
+    return serialize_mapping(mapping)

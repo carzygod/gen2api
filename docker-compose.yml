@@ -1,0 +1,48 @@
+services:
+  media2api:
+    build: .
+    container_name: media2api
+    restart: unless-stopped
+    ports:
+      - "${MEDIA2API_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://media2api:media2api@postgres:5432/media2api}"
+      ASSET_DIR: "${ASSET_DIR:-/app/var/assets}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://localhost:8080}"
+      MEDIA2API_BOOTSTRAP_KEY: "${MEDIA2API_BOOTSTRAP_KEY:-dev-admin-key}"
+      MEDIA2API_ADMIN_TOKEN: "${MEDIA2API_ADMIN_TOKEN:-dev-admin-token}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+    volumes:
+      - media2api_var:/app/var
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: media2api-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: media2api
+      POSTGRES_USER: media2api
+      POSTGRES_PASSWORD: media2api
+    volumes:
+      - media2api_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media2api -d media2api"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: media2api-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - media2api_redis:/data
+
+volumes:
+  media2api_var:
+  media2api_redis:
+  media2api_postgres:
