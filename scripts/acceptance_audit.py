@@ -327,7 +327,7 @@ def main() -> int:
     admin_login_status, admin_login_html = client.text("/admin")
     audit.check(
         "admin_requires_password_login",
-        admin_login_status == 401 and "Username" in admin_login_html and "Password" in admin_login_html,
+        admin_login_status == 401 and "账号" in admin_login_html and "密码" in admin_login_html,
         {"status": admin_login_status},
     )
     admin_cookie_status, admin_cookie, _ = client.form_status("/admin/login", {"username": "admin", "password": args.api_key})
@@ -340,35 +340,37 @@ def main() -> int:
     audit.check(
         "admin_console",
         admin_status == 200
-        and "Operations" in admin_html
-        and "Provider Ops" in admin_html
-        and "Activate Template" in admin_html
-        and "Dry Run Activate" in admin_html
-        and "External Acceptance" in admin_html
-        and "Readiness" in admin_html
-        and "Acceptance Report" in admin_html
-        and "Provider Onboarding" in admin_html
-        and "Operator Workbench" in admin_html
-        and "Production Go-Live" in admin_html
-        and "Connector Conformance" in admin_html
-        and "External Preflight" in admin_html
-        and "Connector Manifest" in admin_html
-        and "System Requirements" in admin_html
-        and "Final Acceptance" in admin_html
-        and "Delivery Package" in admin_html
-        and "Lease Self Test" in admin_html
-        and "Mock Stability Test" in admin_html
-        and "Asset Storage Test" in admin_html
-        and "Fallback Self Test" in admin_html
-        and "Credential Value" in admin_html
-        and "Contract Operations" in admin_html
-        and "Contract Suite" in admin_html
-        and "Sync Capabilities" in admin_html
-        and "Config Snapshot" in admin_html
-        and "Export Config" in admin_html
-        and "Dry Run Import" in admin_html
+        and "操作" in admin_html
+        and "真实平台运维" in admin_html
+        and "启用 Gemini 模板" in admin_html
+        and "试运行启用模板" in admin_html
+        and "真实平台外部验收" in admin_html
+        and "就绪检查" in admin_html
+        and "验收报告" in admin_html
+        and "平台接入报告" in admin_html
+        and "运维工作台报告" in admin_html
+        and "生产上线计划" in admin_html
+        and "连接器一致性" in admin_html
+        and "外部连接器预检" in admin_html
+        and "连接器清单模板" in admin_html
+        and "系统要求报告" in admin_html
+        and "最终验收矩阵" in admin_html
+        and "交付包" in admin_html
+        and "租约自检" in admin_html
+        and "资产存储测试" in admin_html
+        and "故障转移自检" in admin_html
+        and "保存鉴权" in admin_html
+        and "真实平台合同套件" in admin_html
+        and "同步 Gemini 能力" in admin_html
+        and "配置快照" in admin_html
+        and "导出配置" in admin_html
+        and "试运行导入" in admin_html
+        and "OAuth 会话" in admin_html
+        and "查看获取教程" in admin_html
+        and "Mock Stability Test" not in admin_html
+        and "acct_mock_default" not in admin_html
         and "/v1/media-jobs" in admin_html
-        and all(section in admin_html for section in ["Users", "Models", "Model Mappings", "Assets", "Webhooks"]),
+        and all(section in admin_html for section in ["用户", "模型", "模型映射", "资产", "回调"]),
         {"status": admin_status},
     )
     operator_workbench = client.json("GET", "/v1/admin/operator-workbench-report")
@@ -609,7 +611,7 @@ def main() -> int:
     redact_query = ""
     if redact_logs.get("data"):
         redact_query = str((redact_logs["data"][0].get("metadata") or {}).get("query") or "")
-    audit.check("admin_query_redaction_page", redact_status == 200 and "Dashboard" in redact_html, {"status": redact_status})
+    audit.check("admin_query_redaction_page", redact_status == 200 and "总览" in redact_html, {"status": redact_status})
     audit.check(
         "request_audit_query_redacted",
         args.api_key not in redact_query and "admin_key" in redact_query and "redacted" in redact_query,

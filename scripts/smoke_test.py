@@ -80,13 +80,14 @@ def main() -> None:
         assert dashboard["object"] == "admin.dashboard" and "success_rate" in dashboard["jobs"] and "usage_today" in dashboard["billing"], dashboard
         assert "worker_concurrency" in dashboard["runtime"] and "active_leases" in dashboard["accounts"], dashboard
         admin_login = client.get("/admin")
-        assert admin_login.status_code == 401 and "media2api Admin" in admin_login.text and "Username" in admin_login.text and "Password" in admin_login.text
+        assert admin_login.status_code == 401 and "media2api 管理后台" in admin_login.text and "账号" in admin_login.text and "密码" in admin_login.text
         login_response = client.post("/admin/login", data={"username": "admin", "password": "dev-admin-key"}, follow_redirects=False)
         assert login_response.status_code in {302, 303} and "media2api_admin_key" in login_response.headers.get("set-cookie", "")
         admin_page = client.get("/admin")
-        assert admin_page.status_code == 200 and "Dashboard" in admin_page.text and "Today Jobs" in admin_page.text and "Operations" in admin_page.text
-        for admin_control in ["Activate Template", "Dry Run Activate", "External Acceptance", "Account External Acceptance", "Account Acceptance Suite", "Account Diagnostics", "Job Diagnostics", "Acceptance Report", "Provider Onboarding", "Operator Workbench", "Production Go-Live", "Connector Conformance", "External Preflight", "Connector Manifest", "System Requirements", "Final Acceptance", "Delivery Package", "Lease Self Test", "Stalled Recovery Test", "Recover Stalled Jobs", "Mock Stability Test", "Asset Storage Test", "Fallback Self Test", "Readiness", "Credential Value", "Contract Operations", "Contract Suite", "Sync Capabilities", "Config Snapshot", "Export Config", "Dry Run Import"]:
+        assert admin_page.status_code == 200 and "总览" in admin_page.text and "今日任务" in admin_page.text and "操作" in admin_page.text
+        for admin_control in ["启用 Gemini 模板", "试运行启用模板", "真实平台外部验收", "账号验收套件", "任务诊断", "验收报告", "平台接入报告", "运维工作台报告", "生产上线计划", "连接器一致性", "外部连接器预检", "连接器清单模板", "系统要求报告", "最终验收矩阵", "交付包", "租约自检", "停滞任务恢复测试", "恢复停滞任务", "资产存储测试", "故障转移自检", "就绪检查", "保存鉴权", "真实平台合同套件", "同步 Gemini 能力", "配置快照", "导出配置", "试运行导入", "OAuth 会话", "查看获取教程"]:
             assert admin_control in admin_page.text, admin_control
+        assert "Mock Stability Test" not in admin_page.text and "acct_mock_default" not in admin_page.text
         operator_workbench = assert_ok(client.get("/v1/admin/operator-workbench-report", headers=headers))
         assert operator_workbench["object"] == "media2api.operator_workbench_report", operator_workbench
         assert operator_workbench["summary"]["required_missing_routes"] == 0, operator_workbench
@@ -269,7 +270,7 @@ def main() -> None:
         assert {"openai_image", "gemini", "grok", "qwen", "jimeng"}.issubset(provider_rows), provider_rows.keys()
         assert provider_rows["gemini"]["operator_endpoints"]["external_acceptance"].endswith("/gemini/external-acceptance"), provider_rows["gemini"]
         assert "dev-admin-key" not in str(onboarding), onboarding
-        for admin_section in ["Users", "Models", "Model Mappings", "Assets", "Webhooks"]:
+        for admin_section in ["用户", "模型", "模型映射", "资产", "回调"]:
             assert admin_section in admin_page.text, admin_section
         metrics = client.get("/metrics")
         assert metrics.status_code == 200 and "media2api_jobs_total" in metrics.text
@@ -444,7 +445,7 @@ def main() -> None:
         assert all(item["user_id"] == key_user_id for item in public_alerts["data"]), public_alerts
         assert all(item["dimensions"].get("target_id") != isolation_breaker["target_id"] for item in public_alerts["data"]), public_alerts
         non_admin_page = client.get(f"/admin?admin_key={created_key['api_key']}")
-        assert non_admin_page.status_code == 403 and "Admin access required" in non_admin_page.text, non_admin_page.text
+        assert non_admin_page.status_code == 403 and "需要管理员权限" in non_admin_page.text, non_admin_page.text
         disabled_key = assert_ok(client.patch(f"/v1/admin/api-keys/{created_key['id']}", headers=headers, json={"status": "disabled", "name": "key-smoke-disabled"}))
         assert disabled_key["status"] == "disabled" and disabled_key["name"] == "key-smoke-disabled", disabled_key
         disabled_key_call = client.get("/v1/models", headers=smoke_key_headers)

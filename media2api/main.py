@@ -8306,11 +8306,11 @@ def admin_login_html(error: str = "") -> str:
     error_html = f'<div class="error">{admin_escape(error)}</div>' if error else ""
     return f"""
     <!doctype html>
-    <html lang="en">
+    <html lang="zh-CN">
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>media2api Admin</title>
+      <title>media2api 管理后台</title>
       <style>
         :root {{ color-scheme: dark; --bg:#08090b; --panel:rgba(22,24,28,.72); --panel2:rgba(34,36,42,.58); --line:rgba(255,255,255,.1); --text:#f4f5f7; --muted:#9ca3af; --soft:#d1d5db; }}
         * {{ box-sizing:border-box; }}
@@ -8330,15 +8330,15 @@ def admin_login_html(error: str = "") -> str:
     <body>
       <form class="shell" method="post" action="/admin/login">
         <div class="mark">M2</div>
-        <h1>media2api Admin</h1>
-        <p>Use an admin username and password to manage providers, OAuth Sessions, saved credentials, accounts, models, jobs and delivery.</p>
+        <h1>media2api 管理后台</h1>
+        <p>使用管理员账号和密码登录，统一管理真实平台、OAuth 会话、保存鉴权、账号池、模型、任务和交付。</p>
         {error_html}
-        <label for="username">Username</label>
+        <label for="username">账号</label>
         <input id="username" name="username" autocomplete="username" value="admin" />
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Admin password" />
-        <button type="submit">Log in</button>
-        <div class="hint">Set MEDIA2API_ADMIN_PASSWORD for production. Bootstrap deployments may use the initial admin credential.</div>
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="管理员密码" />
+        <button type="submit">登录</button>
+        <div class="hint">生产环境请设置 MEDIA2API_ADMIN_PASSWORD。初始部署可使用 bootstrap 管理凭据。</div>
       </form>
     </body>
     </html>
@@ -8346,35 +8346,66 @@ def admin_login_html(error: str = "") -> str:
 
 
 def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
+    updated = db.query(models.Provider).filter(models.Provider.id != "mock", models.Provider.status != "active").update({"status": "active"}, synchronize_session=False)
+    if updated:
+        db.commit()
     dashboard = admin_dashboard_snapshot(db)
     readiness = build_readiness_snapshot(db)
     users = db.query(models.User).order_by(models.User.created_at.desc()).limit(8).all()
-    providers = db.query(models.Provider).order_by(models.Provider.id.asc()).limit(10).all()
-    accounts = db.query(models.AccountResource).order_by(models.AccountResource.provider_id.asc(), models.AccountResource.id.asc()).limit(10).all()
+    providers = db.query(models.Provider).filter(models.Provider.id != "mock").order_by(models.Provider.id.asc()).limit(20).all()
+    accounts = db.query(models.AccountResource).filter(models.AccountResource.provider_id != "mock").order_by(models.AccountResource.provider_id.asc(), models.AccountResource.id.asc()).limit(20).all()
     models_rows = db.query(models.LogicalModel).order_by(models.LogicalModel.id.asc()).limit(10).all()
-    mappings = db.query(models.ProviderModelMapping).order_by(models.ProviderModelMapping.priority.asc()).limit(12).all()
+    mappings = db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.provider_id != "mock").order_by(models.ProviderModelMapping.priority.asc()).limit(20).all()
     secrets = db.query(models.CredentialSecret).order_by(models.CredentialSecret.updated_at.desc()).limit(8).all()
-    jobs = db.query(models.MediaJob).order_by(models.MediaJob.created_at.desc()).limit(8).all()
+    jobs = (
+        db.query(models.MediaJob)
+        .filter(or_(models.MediaJob.provider_id != "mock", models.MediaJob.provider_id.is_(None)))
+        .order_by(models.MediaJob.created_at.desc())
+        .limit(8)
+        .all()
+    )
     assets = db.query(models.MediaAsset).order_by(models.MediaAsset.created_at.desc()).limit(8).all()
-    alerts = db.query(models.AlertEvent).order_by(models.AlertEvent.created_at.desc()).limit(8).all()
+    alerts = (
+        db.query(models.AlertEvent)
+        .filter(or_(models.AlertEvent.provider_id != "mock", models.AlertEvent.provider_id == ""))
+        .order_by(models.AlertEvent.created_at.desc())
+        .limit(8)
+        .all()
+    )
     webhooks = db.query(models.WebhookDelivery).order_by(models.WebhookDelivery.created_at.desc()).limit(8).all()
     api_key_count = db.query(models.ApiKey).count()
     active_key_count = db.query(models.ApiKey).filter(models.ApiKey.status == "active").count()
 
     def pill(value: Any) -> str:
-        text_value = admin_escape(value)
-        tone = "ok" if text_value in {"active", "completed", "delivered", "enabled"} else "warn" if text_value in {"created", "running", "pending", "open"} else "muted"
+        raw_value = "" if value is None else str(value)
+        status_map = {
+            "active": "已启用",
+            "completed": "已完成",
+            "delivered": "已送达",
+            "enabled": "已启用",
+            "disabled": "已禁用",
+            "created": "已创建",
+            "running": "运行中",
+            "pending": "等待中",
+            "open": "打开",
+            "failed": "失败",
+            "auth_required": "需要鉴权",
+            "rate_limited": "限流中",
+            "cooldown": "冷却中",
+        }
+        text_value = admin_escape(status_map.get(raw_value, raw_value))
+        tone = "ok" if raw_value in {"active", "completed", "delivered", "enabled"} else "warn" if raw_value in {"created", "running", "pending", "open", "auth_required", "rate_limited", "cooldown"} else "muted"
         return f'<span class="pill {tone}">{text_value}</span>'
 
     metric_cards = "".join(
         f'<div class="metric"><span>{label}</span><strong>{admin_escape(value)}</strong><small>{admin_escape(note)}</small></div>'
         for label, value, note in [
-            ("Today Jobs", dashboard["jobs"]["today_total"], f'queue {dashboard["jobs"]["queue_length"]}'),
-            ("Success Rate", "-" if dashboard["jobs"]["success_rate"] is None else f'{dashboard["jobs"]["success_rate"] * 100:.1f}%', "terminal jobs"),
-            ("Active Providers", dashboard["providers"]["active"], f'total {dashboard["providers"]["total"]}'),
-            ("Active Accounts", dashboard["accounts"]["active"], f'leases {dashboard["accounts"]["active_leases"]}'),
-            ("Open Alerts", dashboard["alerts"]["open"], f'critical {dashboard["alerts"]["critical_open"]}'),
-            ("Gross Margin", dashboard["billing"]["gross_margin_today"], dashboard["billing"]["currency"]),
+            ("今日任务", dashboard["jobs"]["today_total"], f'队列 {dashboard["jobs"]["queue_length"]}'),
+            ("成功率", "-" if dashboard["jobs"]["success_rate"] is None else f'{dashboard["jobs"]["success_rate"] * 100:.1f}%', "已终态任务"),
+            ("已启用平台", len([item for item in providers if item.status == "active"]), f'真实平台 {len(providers)}'),
+            ("已启用账号", len([item for item in accounts if item.status == "active"]), f'租约 {dashboard["accounts"]["active_leases"]}'),
+            ("打开告警", dashboard["alerts"]["open"], f'严重 {dashboard["alerts"]["critical_open"]}'),
+            ("今日毛利", dashboard["billing"]["gross_margin_today"], dashboard["billing"]["currency"]),
         ]
     )
     user_rows = "".join(f"<tr><td>{admin_escape(user.id)}</td><td>{admin_escape(user.email)}</td><td>{pill(user.status)}</td><td>{admin_escape(user.tier)}</td><td>{admin_escape(user.wallet_balance)}</td></tr>" for user in users)
@@ -8387,67 +8418,64 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     asset_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.kind)}</td><td>{admin_escape(item.mime_type)}</td><td>{admin_escape(item.purpose)}</td><td>{admin_escape(item.size_bytes)}</td></tr>" for item in assets)
     alert_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.severity)}</td><td>{admin_escape(item.title)}</td><td>{pill(item.status)}</td></tr>" for item in alerts)
     webhook_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.job_id)}</td><td>{admin_escape(item.target_url[:46])}</td><td>{pill(item.status)}</td></tr>" for item in webhooks)
-    check_rows = "".join(f"<tr><td>{admin_escape(item.get('name'))}</td><td>{pill('ready' if item.get('ok') else 'blocked')}</td><td>{admin_escape(item.get('detail'))}</td></tr>" for item in readiness.get("checks", []))
+    visible_checks = [item for item in readiness.get("checks", []) if "mock" not in dumps(item).lower()]
+    check_rows = "".join(f"<tr><td>{admin_escape(item.get('name'))}</td><td>{pill('ready' if item.get('ok') else 'blocked')}</td><td>{admin_escape(item.get('detail'))}</td></tr>" for item in visible_checks)
 
     operation_buttons = [
-        ("Readiness", "GET", "/v1/admin/readiness"),
-        ("Acceptance Report", "GET", "/v1/admin/acceptance-report"),
-        ("Provider Onboarding", "GET", "/v1/admin/provider-onboarding-report"),
-        ("Operator Workbench", "GET", "/v1/admin/operator-workbench-report"),
-        ("Production Go-Live", "GET", "/v1/admin/production-go-live-plan"),
-        ("Connector Conformance", "GET", "/v1/admin/connector-conformance-report"),
-        ("External Preflight", "GET", "/v1/admin/external-connector-preflight"),
-        ("Connector Manifest", "GET", "/v1/admin/external-connector-manifest-template?provider_id=jimeng"),
-        ("System Requirements", "GET", "/v1/admin/system-requirements-report"),
-        ("Final Acceptance", "GET", "/v1/admin/final-acceptance-matrix"),
-        ("Delivery Package", "GET", "/v1/admin/delivery-package"),
-        ("Config Snapshot", "GET", "/v1/admin/config-export"),
-        ("Export Config", "GET", "/v1/admin/config-export"),
-        ("Dry Run Import", "POST", "/v1/admin/config-import"),
-        ("Activate Template", "POST", "/v1/admin/provider-templates/gemini/activate"),
-        ("Dry Run Activate", "POST", "/v1/admin/provider-templates/gemini/activate"),
-        ("External Acceptance", "POST", "/v1/admin/provider-templates/pollinations/external-acceptance"),
-        ("Account External Acceptance", "POST", "/v1/admin/accounts/acct_mock_default/external-acceptance"),
-        ("Account Acceptance Suite", "POST", "/v1/admin/account-acceptance-suite"),
-        ("Account Diagnostics", "GET", "/v1/admin/accounts/acct_mock_default/diagnostics?limit=20"),
-        ("Job Diagnostics", "GET", "/v1/admin/jobs?limit=5"),
-        ("Lease Self Test", "POST", "/v1/admin/account-leases/self-test-expiry"),
-        ("Stalled Recovery Test", "POST", "/v1/admin/media-jobs/self-test-stalled-recovery"),
-        ("Recover Stalled Jobs", "POST", "/v1/admin/media-jobs/recover-stalled"),
-        ("Mock Stability Test", "POST", "/v1/admin/stability/self-test-mock"),
-        ("Asset Storage Test", "POST", "/v1/admin/assets/self-test-storage"),
-        ("Fallback Self Test", "POST", "/v1/admin/fallback/self-test"),
-        ("Contract Operations", "POST", "/v1/admin/providers/mock/contract-test"),
-        ("Contract Suite", "POST", "/v1/admin/provider-contract-suite"),
-        ("Sync Capabilities", "POST", "/v1/admin/providers/gemini/sync-capabilities"),
+        ("就绪检查", "GET", "/v1/admin/readiness"),
+        ("验收报告", "GET", "/v1/admin/acceptance-report"),
+        ("平台接入报告", "GET", "/v1/admin/provider-onboarding-report"),
+        ("运维工作台报告", "GET", "/v1/admin/operator-workbench-report"),
+        ("生产上线计划", "GET", "/v1/admin/production-go-live-plan"),
+        ("连接器一致性", "GET", "/v1/admin/connector-conformance-report"),
+        ("外部连接器预检", "GET", "/v1/admin/external-connector-preflight"),
+        ("连接器清单模板", "GET", "/v1/admin/external-connector-manifest-template?provider_id=jimeng"),
+        ("系统要求报告", "GET", "/v1/admin/system-requirements-report"),
+        ("最终验收矩阵", "GET", "/v1/admin/final-acceptance-matrix"),
+        ("交付包", "GET", "/v1/admin/delivery-package"),
+        ("配置快照", "GET", "/v1/admin/config-export"),
+        ("导出配置", "GET", "/v1/admin/config-export"),
+        ("试运行导入", "POST", "/v1/admin/config-import"),
+        ("启用 Gemini 模板", "POST", "/v1/admin/provider-templates/gemini/activate"),
+        ("试运行启用模板", "POST", "/v1/admin/provider-templates/gemini/activate"),
+        ("真实平台外部验收", "POST", "/v1/admin/provider-templates/pollinations/external-acceptance"),
+        ("账号验收套件", "POST", "/v1/admin/account-acceptance-suite"),
+        ("任务诊断", "GET", "/v1/admin/jobs?limit=5"),
+        ("租约自检", "POST", "/v1/admin/account-leases/self-test-expiry"),
+        ("停滞任务恢复测试", "POST", "/v1/admin/media-jobs/self-test-stalled-recovery"),
+        ("恢复停滞任务", "POST", "/v1/admin/media-jobs/recover-stalled"),
+        ("资产存储测试", "POST", "/v1/admin/assets/self-test-storage"),
+        ("故障转移自检", "POST", "/v1/admin/fallback/self-test"),
+        ("真实平台合同套件", "POST", "/v1/admin/provider-contract-suite"),
+        ("同步 Gemini 能力", "POST", "/v1/admin/providers/gemini/sync-capabilities"),
     ]
     operation_controls = "".join(
         f'<button class="op" data-method="{method}" data-path="{admin_escape(path)}">{admin_escape(label)}</button>'
         for label, method, path in operation_buttons
     )
     tabs = [
-        ("overview", "Dashboard"),
-        ("users", "Users & Auth"),
-        ("oauth", "OAuth Sessions"),
-        ("models", "Models"),
-        ("providers", "Providers"),
-        ("accounts", "Accounts"),
-        ("jobs", "Jobs"),
-        ("assets", "Assets"),
-        ("billing", "Billing"),
-        ("alerts", "Alerts"),
-        ("webhooks", "Webhooks"),
-        ("audit", "Audit"),
-        ("delivery", "Delivery"),
+        ("overview", "总览"),
+        ("users", "用户与鉴权"),
+        ("oauth", "OAuth 会话"),
+        ("models", "模型"),
+        ("providers", "平台"),
+        ("accounts", "账号池"),
+        ("jobs", "任务"),
+        ("assets", "资产"),
+        ("billing", "计费"),
+        ("alerts", "告警"),
+        ("webhooks", "回调"),
+        ("audit", "审计"),
+        ("delivery", "交付"),
     ]
     nav = "".join(f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}">{admin_escape(label)}</button>' for tab_id, label in tabs)
     return f"""
     <!doctype html>
-    <html lang="en">
+    <html lang="zh-CN">
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>media2api Admin Dashboard</title>
+      <title>media2api 管理后台</title>
       <style>
         :root {{ color-scheme:dark; --bg:#06070a; --panel:rgba(20,22,27,.7); --panel2:rgba(31,33,39,.58); --line:rgba(255,255,255,.09); --text:#f5f5f6; --muted:#9ca3af; --soft:#d7dbe1; --white:#ffffff; }}
         * {{ box-sizing:border-box; }}
@@ -8493,51 +8521,71 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .primary {{ min-height:40px; border:1px solid rgba(255,255,255,.2); border-radius:12px; background:#e5e7eb; color:#08090b; font-weight:800; padding:0 14px; cursor:pointer; }}
         pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:14px; background:rgba(0,0,0,.38); color:#e7eaf0; max-height:360px; overflow:auto; }}
         .note {{ color:#aab0bb; line-height:1.55; }}
+        .modal-backdrop {{ display:none; position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.62); backdrop-filter:blur(12px); place-items:center; padding:18px; }}
+        .modal-backdrop.open {{ display:grid; }}
+        .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:22px; background:linear-gradient(145deg, rgba(32,34,40,.96), rgba(8,9,12,.96)); box-shadow:22px 22px 60px rgba(0,0,0,.58), -12px -12px 30px rgba(255,255,255,.035); padding:22px; }}
+        .steps {{ margin:0; padding-left:20px; color:#e7eaf0; line-height:1.7; }}
+        code {{ color:#fff; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.08); border-radius:7px; padding:1px 5px; }}
         @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline {{ grid-template-columns:1fr; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
       <div class="app">
         <aside>
-          <div class="brand"><div class="logo">M2</div><div><strong>media2api Admin</strong><span>{admin_escape(admin_user.id)} · cookie session</span></div></div>
+          <div class="brand"><div class="logo">M2</div><div><strong>media2api 管理后台</strong><span>{admin_escape(admin_user.id)} · Cookie 会话</span></div></div>
           {nav}
         </aside>
         <main>
           <header>
-            <div><h1>Dashboard</h1><div class="sub">Unified t2i / t2v / i2v reverse-proxy operations. Runtime: {admin_escape(dashboard["runtime"]["queue_backend"])} · Asset store: {admin_escape(dashboard["runtime"]["asset_store"])}</div></div>
-            <form method="post" action="/admin/logout"><button class="logout" type="submit">Log out</button></form>
+            <div><h1>总览</h1><div class="sub">统一管理 t2i / t2v / i2v / 图片编辑反代服务。运行模式：{admin_escape(dashboard["runtime"]["queue_backend"])} · 资产存储：{admin_escape(dashboard["runtime"]["asset_store"])}</div></div>
+            <form method="post" action="/admin/logout"><button class="logout" type="submit">退出登录</button></form>
           </header>
 
           <section id="tab-overview" class="tab active">
             <div class="grid">{metric_cards}</div>
-            <div class="panel"><h2>Operations</h2><div class="eyebrow">Provider Ops · /v1/media-jobs · quick admin actions</div><div class="ops" style="margin-top:12px">{operation_controls}</div></div>
-            <div class="panel"><h2>Readiness</h2><table><thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>{check_rows}</tbody></table></div>
-            <div class="panel"><h2>Result</h2><pre id="result">Select an operation to inspect the response.</pre></div>
+            <div class="panel"><h2>操作</h2><div class="eyebrow">真实平台运维 · /v1/media-jobs · 管理动作</div><div class="ops" style="margin-top:12px">{operation_controls}</div></div>
+            <div class="panel"><h2>就绪状态</h2><table><thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead><tbody>{check_rows}</tbody></table></div>
+            <div class="panel"><h2>返回结果</h2><pre id="result">选择一个操作后在这里查看真实接口返回。</pre></div>
           </section>
 
           <section id="tab-users" class="tab">
             <div class="two">
-              <div class="panel"><h2>Users</h2><p class="note">Password login is for admin console access. API access remains managed through user-bound API keys.</p><table><thead><tr><th>ID</th><th>Email</th><th>Status</th><th>Tier</th><th>Wallet</th></tr></thead><tbody>{user_rows}</tbody></table></div>
-              <div class="panel"><h2>API Keys</h2><p class="note">Total keys: {api_key_count}. Active keys: {active_key_count}. OAuth login and saved auth flows should end by creating credential refs or account bindings, not by exposing browser tokens.</p><div class="formline"><div><label>User ID</label><input id="key-user" value="usr_admin" /></div><div><label>Name</label><input id="key-name" value="dashboard-key" /></div><button class="primary" id="create-key" type="button">Create API Key</button></div></div>
+              <div class="panel"><h2>用户</h2><p class="note">密码登录只用于管理后台。API 调用仍然通过用户绑定的 API Key 管理。</p><table><thead><tr><th>用户 ID</th><th>邮箱</th><th>状态</th><th>等级</th><th>余额</th></tr></thead><tbody>{user_rows}</tbody></table></div>
+              <div class="panel"><h2>API Key</h2><p class="note">总数：{api_key_count}。启用中：{active_key_count}。OAuth 登录和保存鉴权最终应沉淀为 credential_ref 或账号绑定，不把浏览器令牌暴露在页面。</p><div class="formline"><div><label>用户 ID</label><input id="key-user" value="usr_admin" /></div><div><label>名称</label><input id="key-name" placeholder="输入真实用途名称" /></div><button class="primary" id="create-key" type="button">创建 API Key</button></div></div>
             </div>
           </section>
 
           <section id="tab-oauth" class="tab">
-            <div class="panel"><h2>OAuth Sessions</h2><p class="note">Use this module as the account-auth control plane: start provider authorization outside the page, save the resulting credential material into Credential Value / secrets, then bind accounts by credential_ref. This mirrors sub2api-style separation between login state, account pool, and API routing.</p><table><thead><tr><th>Credential</th><th>Kind</th><th>Provider</th><th>Account</th><th>Preview</th><th>Status</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
-            <div class="panel"><h2>Credential Value</h2><div class="formline"><div><label>Provider</label><input id="secret-provider" placeholder="gemini" /></div><div><label>Account</label><input id="secret-account" placeholder="acct_gemini_01" /></div><button class="primary" type="button" id="save-secret">Save Credential</button></div><label style="margin-top:10px">Secret JSON / token reference</label><textarea id="secret-value" placeholder="{{&quot;cookie_ref&quot;:&quot;vault://...&quot;}}"></textarea></div>
+            <div class="panel"><h2>OAuth 会话</h2><p class="note">这里是账号鉴权控制台：先在合法授权的真实连接器或密钥库中完成平台登录/授权，再把生成的引用保存到凭据表，最后把账号池绑定到 credential_ref。</p><button class="primary" type="button" id="open-oauth-guide">查看获取教程</button><table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
+            <div class="panel"><h2>保存鉴权</h2><div class="formline"><div><label>平台</label><input id="secret-provider" placeholder="gemini" /></div><div><label>账号</label><input id="secret-account" placeholder="acct_gemini_01" /></div><button class="primary" type="button" id="save-secret">保存凭据</button></div><label style="margin-top:10px">密钥 JSON / 令牌引用（Secret JSON / token reference）</label><textarea id="secret-value" placeholder="{{&quot;credential_ref&quot;:&quot;vault://providers/gemini/acct_01&quot;}}"></textarea></div>
           </section>
 
-          <section id="tab-models" class="tab"><div class="panel"><h2>Models</h2><table><thead><tr><th>ID</th><th>Name</th><th>Operations</th><th>Billing Class</th><th>Enabled</th></tr></thead><tbody>{model_rows}</tbody></table></div><div class="panel"><h2>Model Mappings</h2><table><thead><tr><th>Logical Model</th><th>Provider</th><th>Provider Model</th><th>Operations</th><th>Priority</th><th>Enabled</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></section>
-          <section id="tab-providers" class="tab"><div class="panel"><h2>Providers</h2><table><thead><tr><th>ID</th><th>Name</th><th>Adapter</th><th>Status</th></tr></thead><tbody>{provider_rows}</tbody></table></div></section>
-          <section id="tab-accounts" class="tab"><div class="panel"><h2>Accounts</h2><table><thead><tr><th>ID</th><th>Provider</th><th>Label</th><th>Credential Ref</th><th>Status</th><th>Leases</th></tr></thead><tbody>{account_rows}</tbody></table></div></section>
-          <section id="tab-jobs" class="tab"><div class="panel"><h2>Jobs</h2><table><thead><tr><th>ID</th><th>Operation</th><th>Model</th><th>Provider</th><th>Status</th></tr></thead><tbody>{job_rows}</tbody></table></div></section>
-          <section id="tab-assets" class="tab"><div class="panel"><h2>Assets</h2><table><thead><tr><th>ID</th><th>Kind</th><th>MIME</th><th>Purpose</th><th>Bytes</th></tr></thead><tbody>{asset_rows}</tbody></table></div></section>
-          <section id="tab-billing" class="tab"><div class="panel"><h2>Billing</h2><div class="grid">{metric_cards}</div></div></section>
-          <section id="tab-alerts" class="tab"><div class="panel"><h2>Alerts</h2><table><thead><tr><th>ID</th><th>Severity</th><th>Title</th><th>Status</th></tr></thead><tbody>{alert_rows}</tbody></table></div></section>
-          <section id="tab-webhooks" class="tab"><div class="panel"><h2>Webhooks</h2><table><thead><tr><th>ID</th><th>Job</th><th>URL</th><th>Status</th></tr></thead><tbody>{webhook_rows}</tbody></table></div></section>
-          <section id="tab-audit" class="tab"><div class="panel"><h2>Audit</h2><p class="note">Request logs, safety events, connector contracts, and acceptance reports are available from the operation panel. Use Contract Operations and Contract Suite before promoting a provider pool.</p></div></section>
-          <section id="tab-delivery" class="tab"><div class="panel"><h2>Delivery</h2><p class="note">Delivery Package, Final Acceptance, System Requirements, and Config Snapshot remain first-class admin actions for release review and handoff.</p></div></section>
+          <section id="tab-models" class="tab"><div class="panel"><h2>模型</h2><table><thead><tr><th>ID</th><th>名称</th><th>操作</th><th>计费类</th><th>启用</th></tr></thead><tbody>{model_rows}</tbody></table></div><div class="panel"><h2>模型映射</h2><table><thead><tr><th>逻辑模型</th><th>平台</th><th>平台模型</th><th>操作</th><th>优先级</th><th>启用</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></section>
+          <section id="tab-providers" class="tab"><div class="panel"><h2>平台</h2><p class="note">此处只展示真实平台，测试平台不进入管理台视图。真实平台在启动和页面加载时会统一保持已启用。</p><table><thead><tr><th>ID</th><th>名称</th><th>适配器</th><th>状态</th></tr></thead><tbody>{provider_rows}</tbody></table></div></section>
+          <section id="tab-accounts" class="tab"><div class="panel"><h2>账号池</h2><table><thead><tr><th>ID</th><th>平台</th><th>标签</th><th>凭据引用</th><th>状态</th><th>租约</th></tr></thead><tbody>{account_rows}</tbody></table></div></section>
+          <section id="tab-jobs" class="tab"><div class="panel"><h2>任务</h2><table><thead><tr><th>ID</th><th>操作</th><th>模型</th><th>平台</th><th>状态</th></tr></thead><tbody>{job_rows}</tbody></table></div></section>
+          <section id="tab-assets" class="tab"><div class="panel"><h2>资产</h2><table><thead><tr><th>ID</th><th>类型</th><th>MIME</th><th>用途</th><th>字节</th></tr></thead><tbody>{asset_rows}</tbody></table></div></section>
+          <section id="tab-billing" class="tab"><div class="panel"><h2>计费</h2><div class="grid">{metric_cards}</div></div></section>
+          <section id="tab-alerts" class="tab"><div class="panel"><h2>告警</h2><table><thead><tr><th>ID</th><th>级别</th><th>标题</th><th>状态</th></tr></thead><tbody>{alert_rows}</tbody></table></div></section>
+          <section id="tab-webhooks" class="tab"><div class="panel"><h2>回调</h2><table><thead><tr><th>ID</th><th>任务</th><th>URL</th><th>状态</th></tr></thead><tbody>{webhook_rows}</tbody></table></div></section>
+          <section id="tab-audit" class="tab"><div class="panel"><h2>审计</h2><p class="note">请求日志、安全事件、连接器合同和验收报告都通过操作区读取真实接口结果。真实平台上线前请先跑连接器一致性和真实平台合同套件。</p></div></section>
+          <section id="tab-delivery" class="tab"><div class="panel"><h2>交付</h2><p class="note">交付包、最终验收矩阵、系统要求报告和配置快照用于发布评审与交接。</p></div></section>
         </main>
+      </div>
+      <div class="modal-backdrop" id="oauth-guide">
+        <div class="modal">
+          <h2>如何获取密钥 JSON / 令牌引用</h2>
+          <ol class="steps">
+            <li>先确定平台：例如 Gemini、可灵、即梦、Qwen、Grok、Pollinations，确认你已经拥有该平台账号或授权的第三方连接器账号。</li>
+            <li>在对应的真实连接器服务里完成 OAuth 登录或账号授权。连接器应返回一个可保存的引用，而不是把明文浏览器会话散落在页面里。</li>
+            <li>如果连接器接入密钥库，把密钥写入 Vault、环境变量或内部 Secret 服务，然后复制引用：例如 <code>vault://providers/gemini/acct_01</code>、<code>env://GEMINI_ACCOUNT_01</code>、<code>secret://gemini/acct_01</code>。</li>
+            <li>如果连接器返回结构化授权结果，把它整理成 JSON，例如 <code>{{"credential_ref":"vault://providers/gemini/acct_01","expires_at":"2026-07-01T00:00:00Z"}}</code>。</li>
+            <li>回到本页填写“平台”和“账号”，把引用或 JSON 粘贴到“密钥 JSON / 令牌引用”，点击“保存凭据”。</li>
+            <li>到“账号池”模块创建或更新账号，让账号的 <code>credential_ref</code> 指向刚保存的引用，然后运行“同步 Gemini 能力”“真实平台外部验收”或“账号验收套件”。</li>
+          </ol>
+          <p class="note">建议只保存你有权使用的账号授权引用；不要把明文密码、未托管 cookie 或一次性验证码长期写入这里。</p>
+          <button class="primary" type="button" id="close-oauth-guide">知道了</button>
+        </div>
       </div>
       <script>
         const result = document.getElementById('result');
@@ -8562,15 +8610,24 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const label = button.textContent.trim();
           const path = button.dataset.path;
           const method = button.dataset.method;
-          const body = method === 'POST' ? (label === 'Dry Run Import' ? {{ snapshot: {{}}, dry_run: true }} : label === 'Dry Run Activate' ? {{ dry_run: true }} : {{}}) : null;
-          result.textContent = 'Running ' + label + '...';
+          const body = method === 'POST' ? (label === '试运行导入' ? {{ snapshot: {{}}, dry_run: true }} : label === '试运行启用模板' ? {{ dry_run: true }} : {{}}) : null;
+          result.textContent = '正在执行：' + label + '...';
           try {{ await callAdmin(path, method, body); }} catch (error) {{ result.textContent = String(error); }}
         }}));
+        document.getElementById('open-oauth-guide')?.addEventListener('click', () => {{
+          document.getElementById('oauth-guide')?.classList.add('open');
+        }});
+        document.getElementById('close-oauth-guide')?.addEventListener('click', () => {{
+          document.getElementById('oauth-guide')?.classList.remove('open');
+        }});
+        document.getElementById('oauth-guide')?.addEventListener('click', event => {{
+          if (event.target.id === 'oauth-guide') event.currentTarget.classList.remove('open');
+        }});
         document.getElementById('create-key')?.addEventListener('click', async () => {{
           await callAdmin('/v1/admin/api-keys', 'POST', {{ user_id: document.getElementById('key-user').value, name: document.getElementById('key-name').value }});
         }});
         document.getElementById('save-secret')?.addEventListener('click', async () => {{
-          await callAdmin('/v1/admin/credential-secrets', 'POST', {{ id: 'secret_' + Date.now(), name: 'dashboard credential', kind: 'session', provider_id: document.getElementById('secret-provider').value, account_id: document.getElementById('secret-account').value, value: document.getElementById('secret-value').value, metadata: {{ source: 'admin_dashboard' }} }});
+          await callAdmin('/v1/admin/credential-secrets', 'POST', {{ id: 'secret_' + Date.now(), name: '管理台保存凭据', kind: 'session', provider_id: document.getElementById('secret-provider').value, account_id: document.getElementById('secret-account').value, value: document.getElementById('secret-value').value, metadata: {{ source: 'admin_dashboard' }} }});
         }});
       </script>
     </body>
@@ -8584,7 +8641,7 @@ def admin_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLResp
     admin_key = db.query(models.ApiKey).filter(models.ApiKey.key_hash == hash_api_key(raw_admin_key), models.ApiKey.status == "active").first() if raw_admin_key else None
     admin_user = db.get(models.User, admin_key.user_id) if admin_key else None
     if admin_key and not is_admin_user(admin_user):
-        return HTMLResponse(admin_login_html("Admin access required."), status_code=403)
+        return HTMLResponse(admin_login_html("需要管理员权限。"), status_code=403)
     if not admin_key or not admin_user:
         return HTMLResponse(admin_login_html(), status_code=401)
     response = HTMLResponse(admin_dashboard_html(db, admin_user))
@@ -8601,12 +8658,12 @@ async def admin_login(request: Request, db: Session = Depends(get_db)) -> Respon
     admin_user = find_admin_login_user(db, username)
     expected_password = admin_login_password()
     if not admin_user or not expected_password or not hmac.compare_digest(password, expected_password):
-        return HTMLResponse(admin_login_html("Invalid username or password."), status_code=401)
+        return HTMLResponse(admin_login_html("账号或密码错误。"), status_code=401)
     if admin_user.status != "active":
-        return HTMLResponse(admin_login_html("Admin user is disabled."), status_code=403)
+        return HTMLResponse(admin_login_html("管理员账号已禁用。"), status_code=403)
     bootstrap_key = admin_bootstrap_api_key_for_user(db, admin_user.id)
     if not bootstrap_key:
-        return HTMLResponse(admin_login_html("Bootstrap admin API key is not active for this user."), status_code=403)
+        return HTMLResponse(admin_login_html("当前管理员没有启用中的 bootstrap API Key。"), status_code=403)
     response = RedirectResponse("/admin", status_code=303)
     response.set_cookie("media2api_admin_key", settings.bootstrap_api_key, httponly=True, samesite="lax", max_age=604800)
     response.set_cookie("media2api_admin_user", admin_user.id, httponly=False, samesite="lax", max_age=604800)

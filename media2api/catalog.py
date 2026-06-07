@@ -178,11 +178,13 @@ def seed_defaults(db: Session) -> None:
                     id=provider_id,
                     name=name,
                     adapter_type=adapter_type,
-                    status=status,
+                    status=status if provider_id == "mock" else "active",
                     base_config_json=dumps({}),
                     notes=notes,
                 )
             )
+        elif provider_id != "mock":
+            item.status = "active"
 
     db.flush()
 
