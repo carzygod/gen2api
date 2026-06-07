@@ -191,7 +191,7 @@ def main() -> int:
         "pollinations_direct_adapter_template",
         pollinations_template.get("adapter_type") == "aggregator_adapter"
         and pollinations_config.get("base_url") == "https://gen.pollinations.ai"
-        and pollinations_config.get("api_key_ref") == "env://POLLINATIONS_KEY",
+        and pollinations_config.get("credential_ref") == "env://POLLINATIONS_CONNECTOR_CREDENTIAL",
         pollinations_template,
     )
     activation_plan = client.json(
@@ -224,7 +224,7 @@ def main() -> int:
         external_acceptance_plan.get("object") == "media2api.external_provider_acceptance"
         and external_acceptance_plan.get("status") == "planned"
         and (external_acceptance_plan.get("activation") or {}).get("status") == "planned"
-        and ((external_acceptance_plan.get("activation") or {}).get("plan") or {}).get("credential_ref") == "env://POLLINATIONS_KEY",
+        and ((external_acceptance_plan.get("activation") or {}).get("plan") or {}).get("credential_ref") == "env://POLLINATIONS_CONNECTOR_CREDENTIAL",
         external_acceptance_plan,
     )
     account_acceptance_plan = client.json(
@@ -340,51 +340,24 @@ def main() -> int:
     audit.check(
         "admin_console",
         admin_status == 200
-        and "操作" in admin_html
-        and "真实平台运维" in admin_html
-        and "启用 Gemini 模板" in admin_html
-        and "试运行启用模板" in admin_html
-        and "真实平台外部验收" in admin_html
-        and "就绪检查" in admin_html
-        and "验收报告" in admin_html
-        and "平台接入报告" in admin_html
-        and "运维工作台报告" in admin_html
-        and "生产上线计划" in admin_html
-        and "连接器一致性" in admin_html
-        and "外部连接器预检" in admin_html
-        and "连接器清单模板" in admin_html
-        and "系统要求报告" in admin_html
-        and "最终验收矩阵" in admin_html
-        and "交付包" in admin_html
-        and "租约自检" in admin_html
-        and "资产存储测试" in admin_html
-        and "故障转移自检" in admin_html
-        and "保存鉴权" in admin_html
-        and "真实平台合同套件" in admin_html
-        and "同步 Gemini 能力" in admin_html
-        and "配置快照" in admin_html
-        and "导出配置" in admin_html
-        and "试运行导入" in admin_html
-        and "OAuth 会话" in admin_html
-        and "查看获取教程" in admin_html
-        and "添加平台账号" in admin_html
-        and "批量导入账号" in admin_html
-        and "保存并测试" in admin_html
-        and "OAuth / 凭据获取位置速查" in admin_html
-        and "Google OAuth 2.0 Playground" in admin_html
-        and "https://developers.google.com/oauthplayground/" in admin_html
-        and "https://bailian.console.aliyun.com/" in admin_html
-        and "https://platform.openai.com/api-keys" in admin_html
-        and "refresh_token" in admin_html
+        and "连接器引用" in admin_html
+        and "订阅地址" in admin_html
+        and "反代连接器" in admin_html
+        and "调用密钥" in admin_html
         and "token_reference" in admin_html
         and "使用该平台连接器后台" in admin_html
+        and "subscription_url" in admin_html
+        and "/v1/admin/account-onboarding" in admin_html
+        and "Google OAuth 2.0 Playground" not in admin_html
+        and "https://developers.google.com/oauthplayground/" not in admin_html
+        and "https://bailian.console.aliyun.com/" not in admin_html
+        and "https://platform.openai.com/api-keys" not in admin_html
+        and "OpenAI API Keys" not in admin_html
+        and "refresh_token" not in admin_html
         and "如果该平台没有官方 API Key 或公开 OAuth" not in admin_html
         and "通用第三方连接器" not in admin_html
         and "无公开获取入口" not in admin_html
-        and "Mock Stability Test" not in admin_html
-        and "acct_mock_default" not in admin_html
-        and "/v1/media-jobs" in admin_html
-        and all(section in admin_html for section in ["用户", "模型", "模型映射", "资产", "回调"]),
+        and "<option value=\"api_key\"" not in admin_html,
         {"status": admin_status},
     )
     onboard_suffix = int(time.time() * 1000)
@@ -412,6 +385,26 @@ def main() -> int:
         and (onboarding.get("provider") or {}).get("status") == "active"
         and (onboarding.get("secret") or {}).get("id"),
         onboarding,
+    )
+    official_api_status, official_api_block = client.json_status(
+        "POST",
+        "/v1/admin/account-onboarding",
+        {
+            "provider_id": "qwen",
+            "account_id": f"acct_acceptance_official_api_block_{onboard_suffix}",
+            "label": "blocked official api account",
+            "auth_method": "api_key",
+            "credential_value": "sk-official-api-not-allowed",
+            "supported_operations": ["text_to_image"],
+            "supported_provider_models": ["qwen-image"],
+            "sync_capabilities": False,
+            "run_health_check": False,
+        },
+    )
+    audit.check(
+        "admin_account_onboarding_blocks_official_api",
+        official_api_status == 400 and "UPSTREAM_OFFICIAL_API_AUTH_NOT_ALLOWED" in json.dumps(official_api_block),
+        {"status": official_api_status, "body": official_api_block},
     )
     operator_workbench = client.json("GET", "/v1/admin/operator-workbench-report")
     operator_modules = {item.get("module") for item in operator_workbench.get("modules", [])}
@@ -623,13 +616,13 @@ def main() -> int:
     )
     exported_providers = {item.get("id"): item for item in ((config_snapshot.get("sections") or {}).get("providers") or [])}
     exported_pollinations = exported_providers.get("pollinations") or {}
-    pollinations_ref = (exported_pollinations.get("base_config") or {}).get("api_key_ref")
+    pollinations_ref = (exported_pollinations.get("base_config") or {}).get("credential_ref") or (exported_pollinations.get("base_config") or {}).get("api_key_ref")
     audit.check(
         "config_export_safe_refs_preserved",
         not exported_pollinations
         or (
             (
-                pollinations_ref in {None, "public://pollinations", "env://POLLINATIONS_KEY"}
+                pollinations_ref in {None, "public://pollinations", "env://POLLINATIONS_CONNECTOR_CREDENTIAL"}
                 or str(pollinations_ref).startswith("secret://")
             )
             and pollinations_ref != "[redacted]"

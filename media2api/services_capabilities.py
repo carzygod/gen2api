@@ -225,7 +225,7 @@ class ProviderCapabilityService:
 
     def _headers(self, db: Session, config: dict[str, Any], credential_ref: str | None) -> dict[str, str]:
         headers = {"Accept": "application/json"}
-        api_key = resolve_credential(str(config.get("api_key_ref") or ""), db) or resolve_credential(credential_ref, db)
+        api_key = resolve_credential(str(config.get("credential_ref") or ""), db) or resolve_credential(credential_ref, db) or resolve_credential(str(config.get("api_key_ref") or ""), db)
         if api_key:
             header_name = str(config.get("api_key_header") or "Authorization")
             headers[header_name] = f"Bearer {api_key}" if header_name.lower() == "authorization" else api_key

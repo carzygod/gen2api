@@ -104,7 +104,7 @@ def configure_pollinations(client: TestClient, base_url: str) -> None:
         "name": "Pollinations Smoke",
         "adapter_type": "aggregator_adapter",
         "status": "active",
-        "base_config": {"base_url": base_url, "api_key_ref": "secret://secret_pollinations_smoke", "timeout_seconds": 20},
+        "base_config": {"base_url": base_url, "credential_ref": "secret://secret_pollinations_smoke", "timeout_seconds": 20},
     }
     resp = client.post("/v1/admin/providers", headers=HEADERS, json=provider_payload)
     if resp.status_code == 409:

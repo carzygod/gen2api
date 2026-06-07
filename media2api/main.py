@@ -536,7 +536,7 @@ class AccountAdminRequest(BaseModel):
     label: str
     credential_ref: str = "env://MEDIA2API_CONNECTOR_KEY"
     credential_secret_id: str | None = None
-    credential_kind: str = "api_key"
+    credential_kind: str = "custom"
     supported_operations: list[str]
     supported_provider_models: list[str]
     quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
@@ -550,7 +550,7 @@ class AccountPatchRequest(BaseModel):
     label: str | None = None
     credential_ref: str | None = None
     credential_secret_id: str | None = None
-    credential_kind: str = "api_key"
+    credential_kind: str = "custom"
     supported_operations: list[str] | None = None
     supported_provider_models: list[str] | None = None
     quota_buckets: list[dict[str, Any]] | None = None
@@ -568,7 +568,7 @@ class AccountOnboardingRequest(BaseModel):
     label: str
     provider_base_url: str | None = None
     provider_config: dict[str, Any] = Field(default_factory=dict)
-    auth_method: str = "secret_json"
+    auth_method: str = "token_reference"
     credential_value: str
     credential_ref: str | None = None
     credential_secret_id: str | None = None
@@ -587,7 +587,7 @@ class AccountOnboardingRequest(BaseModel):
 
 class AccountOnboardingBulkRequest(BaseModel):
     provider_id: str
-    auth_method: str = "secret_json"
+    auth_method: str = "token_reference"
     items: list[dict[str, Any]]
     sync_capabilities: bool = False
     run_health_check: bool = False
@@ -600,7 +600,7 @@ class AccountBulkUpsertItem(BaseModel):
     credential_ref: str | None = None
     credential_value: str | None = None
     credential_secret_id: str | None = None
-    credential_kind: str = "api_key"
+    credential_kind: str = "custom"
     supported_operations: list[str]
     supported_provider_models: list[str]
     quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
@@ -882,7 +882,7 @@ class TemplateInstallRequest(BaseModel):
     base_url: str | None = None
     credential_ref: str = "env://MEDIA2API_CONNECTOR_KEY"
     credential_secret_id: str | None = None
-    credential_kind: str = "api_key"
+    credential_kind: str = "custom"
     status: str = "disabled"
     account_status: str = "active"
     account_id: str | None = None
@@ -1399,7 +1399,7 @@ def normalize_account_credential_ref(
     label: str,
     credential_ref: str,
     credential_secret_id: str | None = None,
-    credential_kind: str = "api_key",
+    credential_kind: str = "custom",
     metadata: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     credential_ref = (credential_ref or "").strip()
@@ -5036,7 +5036,7 @@ def build_provider_onboarding_report(db: Session) -> dict[str, Any]:
                 {
                     "check": "create_account",
                     "detail": {
-                        "credential_ref_suggestion": str((template.default_config if template else {}).get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY"),
+                        "credential_ref_suggestion": str((template.default_config if template else {}).get("credential_ref") or (template.default_config if template else {}).get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY"),
                         "activate_endpoint": f"/v1/admin/provider-templates/{provider_id}/activate",
                     },
                 }
@@ -5551,7 +5551,7 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
         return {"check": check, "scope": item.get("scope", "production"), "detail": detail}
 
     def default_credential_ref(template: Any) -> str:
-        ref = str((template.default_config or {}).get("api_key_ref") or "")
+        ref = str((template.default_config or {}).get("credential_ref") or (template.default_config or {}).get("api_key_ref") or "")
         return ref or "env://MEDIA2API_CONNECTOR_KEY"
 
     def default_credential_env(template: Any) -> str:
@@ -8444,177 +8444,176 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     active_key_count = db.query(models.ApiKey).filter(models.ApiKey.status == "active").count()
     provider_options = "".join(f'<option value="{admin_escape(item.id)}">{admin_escape(item.name)} ({admin_escape(item.id)})</option>' for item in providers)
     provider_hint_text = {
-        "gemini": "Gemini / Veo / Nano Banana：填写你的 Gemini 连接器 Base URL，授权材料建议保存 OAuth 返回 JSON、密钥库引用或服务端 token 引用。",
-        "kling": "可灵：填写可灵连接器 Base URL，授权材料通常来自账号池连接器导出的会话引用或密钥库引用。",
-        "jimeng": "即梦 / Seedream / Seedance：填写即梦连接器 Base URL，授权材料建议使用连接器生成的账号引用，不直接保存明文浏览器会话。",
-        "qwen": "千问 / Qwen：填写 Qwen 连接器 Base URL，授权材料可为 API Key、OAuth 返回 JSON 或密钥库引用。",
-        "grok": "Grok Imagine：填写 Grok 连接器 Base URL，授权材料可为连接器保存后的 token reference。",
-        "pollinations": "Pollinations：填写聚合器 Key 或 secret 引用，系统会绑定到 Pollinations 账号资源。",
-        "openai_image": "OpenAI 图像连接器：填写图像连接器 Base URL，授权材料使用服务端密钥库引用。",
+        "gemini": "Gemini / Veo / Nano Banana：填写 Gemini/Veo 反代连接器 Base URL，授权材料只接受连接器返回的 token_reference、subscription_url、vault:// 或 secret:// 引用。",
+        "kling": "可灵：填写可灵账号池连接器 Base URL，授权材料来自连接器后台的账号引用或订阅地址。",
+        "jimeng": "即梦 / Seedream / Seedance：填写即梦反代连接器 Base URL，授权材料使用连接器生成的账号引用。",
+        "qwen": "千问 / Qwen：填写 Qwen 反代或第三方聚合连接器 Base URL，授权材料使用连接器 token_reference 或订阅地址。",
+        "grok": "Grok Imagine：填写 Grok 反代连接器 Base URL，授权材料使用连接器保存后的 token_reference。",
+        "pollinations": "Pollinations：填写第三方聚合连接器 Base URL，授权材料使用聚合连接器的 token_reference 或订阅地址。",
+        "openai_image": "OpenAI 图像模型：只通过第三方图像聚合/ChatGPT-Codex 账号池连接器接入，授权材料使用连接器账号引用。",
     }
     provider_hint_payload = {
         item.id: {
             "models": provider_default_operations_and_models(item.id)[1],
             "operations": provider_default_operations_and_models(item.id)[0],
-            "auth_methods": ["secret_json", "token_reference", "api_key", "oauth_result"],
-            "help": provider_hint_text.get(item.id, "填写该平台真实连接器 Base URL，并粘贴连接器或密钥库返回的授权材料。"),
+            "auth_methods": ["token_reference", "subscription_url", "secret_json"],
+            "help": provider_hint_text.get(item.id, f"{item.name}：填写该平台的反代连接器 Base URL，并粘贴连接器后台生成的 token_reference、subscription_url、vault:// 或 secret:// 账号引用。"),
         }
         for item in providers
     }
     provider_oauth_guides = {
         "gemini": {
-            "title": "Gemini / Veo / Nano Banana",
-            "credential_type": "OAuth refresh_token 或服务端 token_reference",
-            "primary_url": "https://developers.google.com/oauthplayground/",
-            "console_url": "https://console.cloud.google.com/apis/credentials",
-            "where": "打开 Google OAuth 2.0 Playground。右上角设置里勾选 Use your own OAuth credentials，填入 Google Cloud 里的 OAuth Client ID / Client Secret；授权后在 Step 2 点击 Exchange authorization code for tokens，复制返回 JSON 里的 refresh_token。",
-            "paste": '{"refresh_token":"...","client_id":"...","client_secret":"...","token_uri":"https://oauth2.googleapis.com/token"}',
-            "connector": "如果你已经有 Gemini 连接器，推荐只粘贴连接器保存后的 vault:// 或 secret:// 引用，避免在页面长期保存明文 refresh_token。",
+            "title": "Gemini / Veo / Nano Banana 反代连接器",
+            "credential_type": "反代连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入你部署的 Gemini/Veo 反代连接器后台，打开账号订阅或账号池页面，新增或选择一个 Gemini/Veo 账号，复制该连接器输出的 token_reference、subscription_url、vault://providers/gemini/acct_01 或 secret://gemini/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/gemini/acct_01","subscription_url":"https://your-connector.example/sub/gemini/acct_01"}',
+            "connector": "连接器 Base URL 填 Gemini/Veo 反代服务地址；系统只接收连接器账号引用或订阅地址。",
         },
         "qwen": {
-            "title": "千问 / Qwen / 通义百炼",
-            "credential_type": "API Key，不是 refresh_token",
-            "primary_url": "https://bailian.console.aliyun.com/",
-            "console_url": "https://www.alibabacloud.com/help/en/model-studio/get-api-key",
-            "where": "进入阿里云百炼 Model Studio 控制台，在 API Key 管理页创建或复制 API Key。Qwen 常规接入没有公开 OAuth refresh_token 获取页。",
-            "paste": '{"api_key":"sk-...","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1"}',
-            "connector": "如果通过账号池连接器托管，把 API Key 写入 Vault，然后在这里粘贴 vault://providers/qwen/acct_01。",
+            "title": "Qwen / 千问反代连接器",
+            "credential_type": "反代连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入 Qwen 反代或第三方聚合连接器后台，在账号池里添加千问账号或上游资源，复制连接器生成的 token_reference、subscription_url 或 vault://providers/qwen/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/qwen/acct_01","subscription_url":"https://your-connector.example/sub/qwen/acct_01"}',
+            "connector": "连接器 Base URL 填 Qwen 反代服务地址；系统只接收连接器账号引用或订阅地址。",
         },
         "openai_image": {
-            "title": "OpenAI 图像",
-            "credential_type": "API Key，不是 refresh_token",
-            "primary_url": "https://platform.openai.com/api-keys",
-            "console_url": "https://platform.openai.com/docs/api-reference/authentication/keys",
-            "where": "进入 OpenAI API Keys 页面创建 Project API Key。OpenAI 官方 API 调用使用 API Key，不需要 OAuth refresh_token。",
-            "paste": '{"api_key":"sk-proj-...","base_url":"https://api.openai.com/v1"}',
-            "connector": "生产环境建议填 env://OPENAI_API_KEY 或 secret://openai/image，而不是把明文 key 留在页面。",
+            "title": "OpenAI 图像第三方反代 / Agent 连接器",
+            "credential_type": "ChatGPT/Codex/第三方聚合连接器 token_reference",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入你的 ChatGPT/Codex 图像账号池连接器或第三方图像聚合连接器后台，选择已授权账号，复制连接器输出的 token_reference、subscription_url 或 vault://providers/openai_image/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/openai_image/acct_01","quota_source":"codex_agent"}',
+            "connector": "连接器 Base URL 填图像反代服务地址；系统只接收连接器账号引用或订阅地址。",
         },
         "kling": {
-            "title": "可灵 / Kling",
-            "credential_type": "连接器 token_reference",
-            "primary_url": "https://app.klingai.com/",
+            "title": "可灵账号池反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
             "console_url": "",
-            "where": "可灵网页端没有面向本系统的公开 refresh_token 领取页。先在你自己的可灵账号池连接器里完成授权，连接器应输出 token_reference、vault:// 或 secret://。",
+            "where": "进入可灵反代连接器后台，打开账号池或订阅页，选择可灵账号并复制 token_reference、subscription_url 或 vault://providers/kling/acct_01。",
             "paste": '{"credential_ref":"vault://providers/kling/acct_01","account":"acct_kling_01"}',
-            "connector": "这里填写你的可灵连接器 Base URL，例如 http://127.0.0.1:9001；授权材料填写连接器输出的引用。",
+            "connector": "连接器 Base URL 填可灵反代服务地址；额度消耗可灵网页账号或第三方反代账户额度。",
         },
         "jimeng": {
-            "title": "即梦 / Seedream / Seedance",
-            "credential_type": "连接器 token_reference",
-            "primary_url": "https://jimeng.jianying.com/",
+            "title": "即梦 / Seedream / Seedance 账号池反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
             "console_url": "",
-            "where": "即梦网页端没有公开给第三方 API 网关使用的 refresh_token 领取页。先在你自己的即梦连接器里完成账号授权，拿连接器返回的 token_reference 或密钥库引用。",
+            "where": "进入即梦/Seedream 反代连接器后台，完成账号授权后复制连接器生成的账号引用，例如 vault://providers/jimeng/acct_01。",
             "paste": '{"credential_ref":"vault://providers/jimeng/acct_01","account":"acct_jimeng_01"}',
-            "connector": "这里填写即梦连接器 Base URL；不要把浏览器页面里的临时验证码、一次性 token 当作长期凭据。",
+            "connector": "连接器 Base URL 填即梦反代服务地址；额度消耗网页账号或第三方反代账户额度。",
         },
         "grok": {
-            "title": "Grok Imagine",
-            "credential_type": "连接器 token_reference",
-            "primary_url": "https://grok.com/",
+            "title": "Grok Imagine 账号池反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
             "console_url": "",
-            "where": "Grok 网页端没有公开的 refresh_token 获取页。用你自己的 Grok 连接器完成账号授权，再把连接器保存后的 token_reference 粘贴进来。",
+            "where": "进入 Grok 反代连接器后台，选择 Grok Imagine 账号并复制 token_reference、subscription_url 或 vault://providers/grok/acct_01。",
             "paste": '{"credential_ref":"vault://providers/grok/acct_01","account":"acct_grok_01"}',
-            "connector": "这里填写 Grok 连接器 Base URL；系统只保存引用并绑定账号池。",
+            "connector": "连接器 Base URL 填 Grok 反代服务地址；系统只保存账号引用并绑定账号池。",
         },
         "pollinations": {
-            "title": "Pollinations",
-            "credential_type": "API Key 或公开额度引用",
-            "primary_url": "https://auth.pollinations.ai/",
-            "console_url": "https://pollinations.ai/",
-            "where": "如果你的 Pollinations 账号或聚合器提供 key，在对应控制台复制 key；如果是公开额度或内部连接器，粘贴连接器返回的引用。",
-            "paste": '{"api_key":"..."} 或 {"credential_ref":"vault://providers/pollinations/acct_01"}',
-            "connector": "支持直接保存 key，也支持保存聚合连接器返回的 vault:// 引用。",
+            "title": "Pollinations 第三方聚合连接器",
+            "credential_type": "聚合连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入 Pollinations 聚合连接器后台，复制账号订阅地址或 token_reference，例如 vault://providers/pollinations/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/pollinations/acct_01","subscription_url":"https://your-connector.example/sub/pollinations/acct_01"}',
+            "connector": "连接器 Base URL 填 Pollinations 聚合反代服务地址；不在本平台保存官方或上游明文 key。",
         },
         "openrouter_image": {
-            "title": "OpenRouter 图像聚合",
-            "credential_type": "API Key",
-            "primary_url": "https://openrouter.ai/settings/keys",
-            "console_url": "https://openrouter.ai/docs",
-            "where": "进入 OpenRouter Settings / Keys 页面创建 API Key。复制 key 后，把 base_url 配为 https://openrouter.ai/api/v1，并在模型列表里确认目标图像模型可用。",
-            "paste": '{"api_key":"sk-or-...","base_url":"https://openrouter.ai/api/v1"}',
-            "connector": "生产环境建议把 OpenRouter key 写入 Vault，在本页粘贴 vault://providers/openrouter_image/acct_01。",
+            "title": "OpenRouter 第三方聚合反代连接器",
+            "credential_type": "聚合连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入 OpenRouter 图像聚合反代连接器后台，选择已配置的上游资源，复制 token_reference、subscription_url 或 vault://providers/openrouter_image/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/openrouter_image/acct_01","quota_source":"third_party_aggregator"}',
+            "connector": "连接器 Base URL 填 OpenRouter 聚合反代服务地址；系统只接收连接器账号引用或订阅地址。",
         },
         "fal_replicate": {
-            "title": "fal / Replicate 聚合",
-            "credential_type": "API Key 或连接器 token_reference",
-            "primary_url": "https://fal.ai/dashboard/keys",
-            "console_url": "https://replicate.com/account/api-tokens",
-            "where": "fal 账号在 Dashboard / Keys 创建 key；Replicate 账号在 Account / API tokens 创建 token。你的 fal_replicate 连接器需要明确使用哪一家上游，并把对应 key 保存成引用。",
-            "paste": '{"credential_ref":"vault://providers/fal_replicate/acct_01","upstream":"fal"}',
-            "connector": "连接器 Base URL 填你的 fal_replicate 适配器地址；授权材料填 fal 或 Replicate key 的托管引用。",
+            "title": "fal / Replicate 第三方聚合反代连接器",
+            "credential_type": "聚合连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入 fal/Replicate 聚合反代连接器后台，选择上游账号资源后复制 token_reference、subscription_url 或 vault://providers/fal_replicate/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/fal_replicate/acct_01","upstream":"connector_pool"}',
+            "connector": "连接器 Base URL 填 fal_replicate 聚合反代地址；系统只接收连接器账号引用或订阅地址。",
         },
         "flux_stability": {
-            "title": "Flux / Stability 图像聚合",
-            "credential_type": "API Key 或连接器 token_reference",
-            "primary_url": "https://platform.stability.ai/account/keys",
-            "console_url": "https://platform.stability.ai/docs/api-reference",
-            "where": "Stability 平台在 Account / API keys 创建 key。Flux 来源如果走你自己的聚合连接器，则在连接器后台保存 BFL、Stability 或其它上游 key，再复制 token_reference。",
-            "paste": '{"credential_ref":"vault://providers/flux_stability/acct_01","upstream":"stability"}',
-            "connector": "连接器 Base URL 填 flux_stability 适配器地址；授权材料填 key 的 Vault/Secret 引用。",
+            "title": "Flux / Stable Image 反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入 Flux/Stability 图像反代连接器后台，选择自建算力、第三方聚合账号或账号池资源，复制 token_reference、subscription_url 或 vault://providers/flux_stability/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/flux_stability/acct_01","quota_source":"third_party_proxy"}',
+            "connector": "连接器 Base URL 填 Flux/Stability 反代服务地址；系统只接收连接器账号引用或订阅地址。",
         },
         "luma": {
-            "title": "Luma",
-            "credential_type": "连接器 token_reference",
-            "primary_url": "https://lumalabs.ai/",
+            "title": "Luma 账号池反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
             "console_url": "",
-            "where": "Luma 选项走你部署的 Luma 账号池连接器。进入该连接器的账号管理页，为 Luma 账号完成授权，然后复制连接器返回的 token_reference。",
+            "where": "进入 Luma 反代连接器后台，在账号池页面复制 token_reference、subscription_url 或 vault://providers/luma/acct_01。",
             "paste": '{"credential_ref":"vault://providers/luma/acct_01","account":"acct_luma_01"}',
-            "connector": "连接器 Base URL 填 Luma 连接器地址；本系统保存连接器引用并绑定账号池。",
+            "connector": "连接器 Base URL 填 Luma 反代服务地址。",
         },
         "runway": {
-            "title": "Runway",
-            "credential_type": "API Key 或连接器 token_reference",
-            "primary_url": "https://dev.runwayml.com/",
-            "console_url": "https://docs.dev.runwayml.com/",
-            "where": "Runway 开发者平台使用 API Key；网页账号池模式使用你自己的 Runway 连接器。官方 API Key 从 dev.runwayml.com 的开发者控制台获取，连接器模式从连接器后台复制 token_reference。",
-            "paste": '{"credential_ref":"vault://providers/runway/acct_01","mode":"connector"}',
-            "connector": "连接器 Base URL 填 Runway 连接器地址；授权材料填 API Key 托管引用或连接器 token_reference。",
+            "title": "Runway 账号池反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入 Runway 反代连接器后台，选择网页账号池或第三方代理资源，复制 token_reference、subscription_url 或 vault://providers/runway/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/runway/acct_01","mode":"connector_pool"}',
+            "connector": "连接器 Base URL 填 Runway 反代服务地址；系统只接收连接器账号引用或订阅地址。",
         },
         "midjourney": {
-            "title": "Midjourney",
-            "credential_type": "连接器 token_reference",
-            "primary_url": "https://www.midjourney.com/",
+            "title": "Midjourney 任务通道反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
             "console_url": "",
-            "where": "Midjourney 选项走你自己的任务通道连接器。进入 Midjourney 连接器后台，绑定账号或频道资源后复制 token_reference。",
+            "where": "进入 Midjourney 任务通道连接器后台，绑定账号或频道资源后复制 token_reference、subscription_url 或 vault://providers/midjourney/acct_01。",
             "paste": '{"credential_ref":"vault://providers/midjourney/acct_01","account":"acct_midjourney_01"}',
-            "connector": "连接器 Base URL 填 Midjourney 任务通道连接器地址；授权材料填连接器输出的引用。",
+            "connector": "连接器 Base URL 填 Midjourney 任务通道反代地址。",
         },
         "seedream_proxy": {
-            "title": "Seedream Proxy",
-            "credential_type": "连接器 token_reference",
-            "primary_url": "https://jimeng.jianying.com/",
+            "title": "Seedream Proxy 反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
             "console_url": "",
-            "where": "Seedream Proxy 对应 Seedream/即梦代理连接器。进入该连接器后台完成账号授权，复制 vault://providers/seedream_proxy/acct_01 这类账号引用。",
+            "where": "进入 Seedream Proxy 后台完成账号资源绑定，复制 token_reference、subscription_url 或 vault://providers/seedream_proxy/acct_01。",
             "paste": '{"credential_ref":"vault://providers/seedream_proxy/acct_01","account":"acct_seedream_01"}',
-            "connector": "连接器 Base URL 填 Seedream Proxy 地址；授权材料填连接器返回的账号引用。",
+            "connector": "连接器 Base URL 填 Seedream Proxy 地址。",
         },
         "amux_qwen": {
-            "title": "AMux Qwen 聚合",
-            "credential_type": "API Key 或连接器 token_reference",
-            "primary_url": "https://bailian.console.aliyun.com/",
-            "console_url": "https://www.alibabacloud.com/help/en/model-studio/get-api-key",
-            "where": "AMux Qwen 选项面向 Qwen 聚合连接器。先在阿里云百炼控制台创建 API Key，再到 AMux Qwen 连接器后台保存该 key，最后复制连接器返回的 token_reference。",
-            "paste": '{"credential_ref":"vault://providers/amux_qwen/acct_01","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1"}',
-            "connector": "连接器 Base URL 填 AMux Qwen 适配器地址；授权材料填百炼 API Key 的托管引用。",
+            "title": "AMux Qwen 第三方反代连接器",
+            "credential_type": "连接器 token_reference / subscription_url",
+            "primary_url": "",
+            "console_url": "",
+            "where": "进入 AMux Qwen 反代连接器后台，选择 Qwen 账号资源或聚合资源，复制 token_reference、subscription_url 或 vault://providers/amux_qwen/acct_01。",
+            "paste": '{"credential_ref":"vault://providers/amux_qwen/acct_01","quota_source":"third_party_proxy"}',
+            "connector": "连接器 Base URL 填 AMux Qwen 反代服务地址；系统只接收连接器账号引用或订阅地址。",
         },
     }
     def connector_oauth_guide(provider: models.Provider) -> dict[str, str]:
         title = f"{provider.name} ({provider.id})"
         return {
             "title": title,
-            "credential_type": f"{provider.id} 连接器 token_reference",
+            "credential_type": f"{provider.id} 连接器 token_reference / subscription_url",
             "primary_url": "",
             "console_url": "",
-            "where": f"当前选择的是 {title}。打开你部署的 {provider.id} 连接器后台，在账号管理页添加或选择该平台账号，完成授权后复制连接器返回的 token_reference、vault://providers/{provider.id}/acct_01 或 secret://{provider.id}/acct_01。",
-            "paste": f'{{"credential_ref":"vault://providers/{provider.id}/acct_01","account":"acct_{provider.id}_01"}}',
-            "connector": f"连接器 Base URL 填 {provider.id} 适配器的服务地址；授权材料只填写该连接器生成的账号引用。",
+            "where": f"当前选择的是 {title}。打开你部署的 {provider.id} 反代连接器后台，在账号订阅或账号池页面添加/选择账号，复制连接器返回的 token_reference、subscription_url、vault://providers/{provider.id}/acct_01 或 secret://{provider.id}/acct_01。",
+            "paste": f'{{"credential_ref":"vault://providers/{provider.id}/acct_01","subscription_url":"https://your-connector.example/sub/{provider.id}/acct_01"}}',
+            "connector": f"连接器 Base URL 填 {provider.id} 反代适配器服务地址；授权材料只填写该连接器生成的账号引用或订阅地址。",
         }
     for provider_id, guide in provider_oauth_guides.items():
         if provider_id in provider_hint_payload:
             provider_hint_payload[provider_id]["oauth"] = guide
     for provider in providers:
         provider_hint_payload[provider.id].setdefault("oauth", connector_oauth_guide(provider))
-
     def pill(value: Any) -> str:
         raw_value = "" if value is None else str(value)
         status_map = {
@@ -8796,15 +8795,15 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
 
           <section id="tab-users" class="tab">
             <div class="two">
-              <div class="panel"><h2>用户</h2><p class="note">密码登录只用于管理后台。API 调用仍然通过用户绑定的 API Key 管理。</p><table><thead><tr><th>用户 ID</th><th>邮箱</th><th>状态</th><th>等级</th><th>余额</th></tr></thead><tbody>{user_rows}</tbody></table></div>
-              <div class="panel"><h2>API Key</h2><p class="note">总数：{api_key_count}。启用中：{active_key_count}。OAuth 登录和保存鉴权最终应沉淀为 credential_ref 或账号绑定，不把浏览器令牌暴露在页面。</p><div class="formline"><div><label>用户 ID</label><input id="key-user" value="usr_admin" /></div><div><label>名称</label><input id="key-name" placeholder="输入真实用途名称" /></div><button class="primary" id="create-key" type="button">创建 API Key</button></div></div>
+              <div class="panel"><h2>用户</h2><p class="note">密码登录只用于管理后台。平台调用通过用户绑定的调用密钥管理。</p><table><thead><tr><th>用户 ID</th><th>邮箱</th><th>状态</th><th>等级</th><th>余额</th></tr></thead><tbody>{user_rows}</tbody></table></div>
+              <div class="panel"><h2>调用密钥</h2><p class="note">总数：{api_key_count}。启用中：{active_key_count}。上游账号授权最终应沉淀为 credential_ref 或账号绑定，不把浏览器令牌暴露在页面。</p><div class="formline"><div><label>用户 ID</label><input id="key-user" value="usr_admin" /></div><div><label>名称</label><input id="key-name" placeholder="输入真实用途名称" /></div><button class="primary" id="create-key" type="button">创建调用密钥</button></div></div>
             </div>
           </section>
 
           <section id="tab-oauth" class="tab">
             <div class="panel">
               <h2>OAuth / 凭据获取位置速查</h2>
-              <p class="note">先选平台。这里会明确告诉你：有没有 refresh_token、要打开哪个链接、应该复制哪个字段、最终粘贴到本系统的什么位置。</p>
+              <p class="note">先选平台。这里会明确告诉你：该平台要进入哪个反代连接器后台、复制哪类订阅地址或账号引用、最终粘贴到本系统的什么位置。</p>
               <div class="formline">
                 <div><label>平台</label><select id="oauth-guide-provider">{provider_options}</select></div>
                 <div><label>推荐凭据类型</label><input id="oauth-guide-type" readonly /></div>
@@ -8813,7 +8812,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <div class="guide-card" id="oauth-provider-guide"></div>
             </div>
             <div class="panel"><h2>OAuth 会话</h2><p class="note">这里是账号鉴权控制台：选择平台，粘贴真实连接器或密钥库返回的授权材料，系统会保存凭据、创建账号、绑定能力，并可立即同步能力和健康检查。</p><div class="ops"><button class="primary" type="button" id="open-account-wizard">添加平台账号</button><button class="op" type="button" id="open-oauth-guide">查看获取教程</button></div><table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
-            <div class="panel"><h2>批量导入账号</h2><p class="note">每行一个 JSON 对象，字段支持 account_id、label、credential_value、credential_ref、concurrency_limit、region、plan。系统会逐行执行真实账号接入流程。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>鉴权方式</label><select id="bulk-auth-method"><option value="secret_json">密钥 JSON</option><option value="token_reference">令牌引用</option><option value="api_key">API Key</option><option value="oauth_result">OAuth 返回结果</option></select></div><button class="primary" type="button" id="bulk-import">批量导入</button></div><label style="margin-top:10px">账号 JSONL</label><textarea id="bulk-jsonl" placeholder="每行粘贴一个真实账号 JSON"></textarea></div>
+            <div class="panel"><h2>批量导入账号</h2><p class="note">每行一个 JSON 对象，字段支持 account_id、label、credential_value、credential_ref、subscription_url、concurrency_limit、region、plan。系统会逐行执行真实账号接入流程。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>鉴权方式</label><select id="bulk-auth-method"><option value="token_reference">连接器引用</option><option value="subscription_url">订阅地址</option><option value="secret_json">托管 JSON</option></select></div><button class="primary" type="button" id="bulk-import">批量导入</button></div><label style="margin-top:10px">账号 JSONL</label><textarea id="bulk-jsonl" placeholder="每行粘贴一个真实账号 JSON"></textarea></div>
           </section>
 
           <section id="tab-models" class="tab"><div class="panel"><h2>模型</h2><table><thead><tr><th>ID</th><th>名称</th><th>操作</th><th>计费类</th><th>启用</th></tr></thead><tbody>{model_rows}</tbody></table></div><div class="panel"><h2>模型映射</h2><table><thead><tr><th>逻辑模型</th><th>平台</th><th>平台模型</th><th>操作</th><th>优先级</th><th>启用</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></section>
@@ -8836,7 +8835,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <div class="guide-card" id="wizard-oauth-guide-card"></div>
           <div class="formline">
             <div><label>平台</label><select id="wizard-provider">{provider_options}</select></div>
-            <div><label>鉴权方式</label><select id="wizard-auth-method"><option value="secret_json">密钥 JSON</option><option value="token_reference">令牌引用</option><option value="api_key">API Key</option><option value="oauth_result">OAuth 返回结果</option></select></div>
+            <div><label>鉴权方式</label><select id="wizard-auth-method"><option value="token_reference">连接器引用</option><option value="subscription_url">订阅地址</option><option value="secret_json">托管 JSON</option></select></div>
             <div><label>账号 ID</label><input id="wizard-account-id" placeholder="留空自动生成" /></div>
           </div>
           <div class="two">
@@ -8853,7 +8852,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div><label style="margin-top:10px">支持平台模型</label><textarea id="wizard-models" placeholder="选择平台后自动带出，可按需修改 JSON 数组"></textarea></div>
           </div>
           <label style="margin-top:10px">授权材料</label>
-          <textarea id="wizard-credential" placeholder="粘贴真实连接器返回的 JSON、密钥库引用、环境变量引用或 API Key"></textarea>
+          <textarea id="wizard-credential" placeholder="粘贴反代连接器返回的 token_reference、subscription_url、vault://、secret:// 或托管 JSON"></textarea>
           <div class="formline" style="margin-top:10px">
             <label><input id="wizard-sync" type="checkbox" checked /> 保存后同步能力</label>
             <label><input id="wizard-health" type="checkbox" checked /> 保存后健康检查</label>
@@ -8868,10 +8867,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <h2>如何获取密钥 JSON / 令牌引用</h2>
           <div class="guide-card">
             <div class="guide-grid">
-              <b>Gemini / Veo</b><span>打开 <a href="https://developers.google.com/oauthplayground/" target="_blank" rel="noreferrer">Google OAuth 2.0 Playground</a>，授权后在 Step 2 复制 <code>refresh_token</code>。也可以只填连接器输出的 <code>vault://...</code>。</span>
-              <b>Qwen / 千问</b><span>打开 <a href="https://bailian.console.aliyun.com/" target="_blank" rel="noreferrer">阿里云百炼控制台</a> 获取 API Key。这里没有公开 refresh_token 页面。</span>
-              <b>OpenAI 图像</b><span>打开 <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">OpenAI API Keys</a> 获取 API Key。这里没有 refresh_token。</span>
-              <b>可灵 / 即梦 / Grok</b><span>网页端没有给本系统直接使用的公开 refresh_token 获取页。先在你自己的账号池连接器里授权，再粘贴连接器返回的 <code>token_reference</code>、<code>vault://...</code> 或 <code>secret://...</code>。</span>
+              <b>Gemini / Veo</b><span>进入你部署的 Gemini/Veo 反代连接器后台，在账号订阅页复制 <code>token_reference</code>、<code>subscription_url</code>、<code>vault://...</code> 或 <code>secret://...</code>。</span>
+              <b>Qwen / 千问</b><span>进入你部署的 Qwen 反代或第三方聚合连接器后台，复制该连接器生成的账号引用或订阅地址。</span>
+              <b>OpenAI 图像</b><span>进入 ChatGPT/Codex 图像账号池连接器或第三方图像聚合连接器后台，复制连接器账号引用。</span>
+              <b>可灵 / 即梦 / Grok</b><span>进入对应账号池反代连接器后台授权账号，再粘贴连接器返回的 <code>token_reference</code>、<code>subscription_url</code>、<code>vault://...</code> 或 <code>secret://...</code>。</span>
               <b>粘贴位置</b><span>回到“添加平台账号”，把真实凭据 JSON 或引用粘贴到“授权材料”，把你的连接器地址填到“连接器 Base URL”。</span>
             </div>
           </div>
@@ -8898,7 +8897,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const guide = hint.oauth || {{}};
           const links = [
             guide.primary_url ? `<a href="${{escapeHtml(guide.primary_url)}}" target="_blank" rel="noreferrer">打开获取入口</a>` : '使用该平台连接器后台',
-            guide.console_url ? `<a href="${{escapeHtml(guide.console_url)}}" target="_blank" rel="noreferrer">官方说明 / 控制台</a>` : '',
+            guide.console_url ? `<a href="${{escapeHtml(guide.console_url)}}" target="_blank" rel="noreferrer">连接器说明</a>` : '',
           ].filter(Boolean).join(' · ');
           return `
             <div class="guide-grid">
@@ -9079,7 +9078,7 @@ async def admin_login(request: Request, db: Session = Depends(get_db)) -> Respon
         return HTMLResponse(admin_login_html("管理员账号已禁用。"), status_code=403)
     bootstrap_key = admin_bootstrap_api_key_for_user(db, admin_user.id)
     if not bootstrap_key:
-        return HTMLResponse(admin_login_html("当前管理员没有启用中的 bootstrap API Key。"), status_code=403)
+        return HTMLResponse(admin_login_html("当前管理员没有启用中的 bootstrap 调用密钥。"), status_code=403)
     response = RedirectResponse("/admin", status_code=303)
     response.set_cookie("media2api_admin_key", settings.bootstrap_api_key, httponly=True, samesite="lax", max_age=604800)
     response.set_cookie("media2api_admin_user", admin_user.id, httponly=False, samesite="lax", max_age=604800)
@@ -9105,7 +9104,7 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
             <html><head><title>media2api admin forbidden</title></head>
             <body style="font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 32px;">
               <h1>Admin access required</h1>
-              <p>The supplied API key is valid but does not belong to an admin user.</p>
+              <p>The supplied calling credential is valid but does not belong to an admin user.</p>
               <p><a href="/admin">Back to admin login</a></p>
             </body></html>
             """,
@@ -9130,7 +9129,7 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
             <body>
               <form method="get" action="/admin">
                 <h1>media2api Admin</h1>
-                <label for="admin_key">API Key</label>
+                <label for="admin_key">调用密钥</label>
                 <input id="admin_key" name="admin_key" type="password" autofocus autocomplete="current-password">
                 <button type="submit">Open Admin</button>
                 <p><a href="/docs">OpenAPI</a> · <a href="/health">Health</a></p>
@@ -9591,14 +9590,14 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     </head>
     <body>
       <h1>media2api Admin</h1>
-      <p>Authenticated admin console. API calls use the key entered below.</p>
+      <p>Authenticated admin console. Platform calls use the credential entered below.</p>
       <h2>Dashboard</h2>
       <div class="cards">{dashboard_cards}</div>
       <h2>Operations</h2>
       <div class="ops">
         <div class="panel">
           <h3>Access</h3>
-          <label for="api-key">API Key</label>
+          <label for="api-key">调用密钥</label>
           <input id="api-key" value="dev-admin-key">
           <label for="job-diagnostics-id">Job ID</label>
           <input id="job-diagnostics-id" placeholder="job_xxx">
@@ -9652,7 +9651,7 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
           <label for="template-secret-id">Secret ID</label>
           <input id="template-secret-id" placeholder="optional stable secret id">
           <label for="template-credential-kind">Credential Kind</label>
-          <select id="template-credential-kind"><option value="api_key">api_key</option><option value="bearer_token">bearer_token</option><option value="cookie">cookie</option></select>
+          <select id="template-credential-kind"><option value="custom">custom</option><option value="bearer_token">bearer_token</option><option value="cookie">cookie</option><option value="subscription">subscription</option></select>
           <label for="template-status">Provider Status</label>
           <select id="template-status"><option value="disabled">disabled</option><option value="active">active</option><option value="cooldown">cooldown</option></select>
           <label for="template-account-status">Account Status</label>
@@ -10349,7 +10348,7 @@ def admin_provider_template_external_acceptance(
     if not template:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
 
-    credential_ref = req.credential_ref or str(template.default_config.get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY")
+    credential_ref = req.credential_ref or str(template.default_config.get("credential_ref") or template.default_config.get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY")
     operations = req.operations or list(template.operations)
     invalid_operations = [operation for operation in operations if operation not in template.operations]
     if invalid_operations:
@@ -12483,6 +12482,11 @@ def admin_compatibility_matrix(
 
 
 def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict[str, Any]:
+    allowed_auth_methods = {"token_reference", "subscription_url", "secret_json"}
+    if req.auth_method not in allowed_auth_methods:
+        raise HTTPException(status_code=400, detail={"error": "UPSTREAM_OFFICIAL_API_AUTH_NOT_ALLOWED", "allowed_auth_methods": sorted(allowed_auth_methods)})
+    if req.credential_kind == "api_key":
+        raise HTTPException(status_code=400, detail={"error": "UPSTREAM_OFFICIAL_API_KEY_NOT_ALLOWED", "allowed_credential_kinds": ["bearer_token", "cookie", "custom", "subscription"]})
     provider = db.get(models.Provider, req.provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
@@ -12505,7 +12509,7 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
     credential_ref = (req.credential_ref or "").strip()
     if req.credential_value.strip():
         secret_id = req.credential_secret_id or f"secret_{account_id}"
-        secret_kind = req.credential_kind if req.credential_kind in {"api_key", "bearer_token", "cookie", "custom"} else "custom"
+        secret_kind = req.credential_kind if req.credential_kind in {"bearer_token", "cookie", "custom"} else "custom"
         secret = db.get(models.CredentialSecret, secret_id)
         metadata = {
             "auth_method": req.auth_method,
@@ -12613,7 +12617,7 @@ def admin_account_onboarding_bulk(req: AccountOnboardingBulkRequest, ctx: AuthCo
                 provider_base_url=item.get("provider_base_url"),
                 provider_config=item.get("provider_config") or {},
                 auth_method=str(item.get("auth_method") or req.auth_method),
-                credential_value=str(item.get("credential_value") or item.get("value") or item.get("token") or item.get("credential_ref") or ""),
+                credential_value=str(item.get("credential_value") or item.get("subscription_url") or item.get("value") or item.get("token") or item.get("credential_ref") or ""),
                 credential_ref=item.get("credential_ref"),
                 credential_secret_id=item.get("credential_secret_id"),
                 credential_kind=str(item.get("credential_kind") or "session"),
@@ -12785,3 +12789,4 @@ def admin_patch_mapping(mapping_id: str, req: MappingPatchRequest, ctx: AuthCont
         mapping.enabled = req.enabled
     db.commit()
     return serialize_mapping(mapping)
+

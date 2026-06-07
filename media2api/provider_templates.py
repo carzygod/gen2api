@@ -200,18 +200,18 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
     ),
     "pollinations": ProviderTemplate(
         id="pollinations",
-        name="Pollinations direct aggregator",
+        name="Pollinations third-party aggregator connector",
         adapter_type="aggregator_adapter",
         models=["gpt-image-2", "nanobanana", "seedream", "qwen-image", "grok-imagine", "veo", "seedance", "wan"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["t2v"], OPS["i2v"]],
-        default_config={"base_url": "https://gen.pollinations.ai", "api_key_ref": "env://POLLINATIONS_KEY", "health_timeout_seconds": 10, "timeout_seconds": 300, "max_reference_assets": 2},
+        default_config={"base_url": "https://gen.pollinations.ai", "credential_ref": "env://POLLINATIONS_CONNECTOR_CREDENTIAL", "health_timeout_seconds": 10, "timeout_seconds": 300, "max_reference_assets": 2},
         mappings=[
             MappingTemplate("t2i-fast", "seedream", [OPS["t2i"]], priority=60, cost_score=0.7),
             MappingTemplate("t2i-pro", "gpt-image-2", [OPS["t2i"]], priority=60, quality_score=0.75),
             MappingTemplate("i2v-fast", "seedance", [OPS["i2v"]], priority=60, speed_score=0.7),
             MappingTemplate("t2v-general", "veo", [OPS["t2v"]], priority=60, quality_score=0.75),
         ],
-        notes="Direct third-party aggregator adapter. Generation endpoints require a Pollinations API key via env://POLLINATIONS_KEY or a secret-backed account credential.",
+        notes="Third-party aggregator connector template. Store access material as credential_ref, subscription_url, or a secret-backed account reference.",
     ),
     "openrouter_image": ProviderTemplate(
         id="openrouter_image",

@@ -479,8 +479,9 @@ class PollinationsProvider:
 
     def _api_key(self, db: Session, config: dict[str, Any], credential_ref: str | None) -> str | None:
         return (
-            resolve_credential(str(config.get("api_key_ref") or ""), db)
+            resolve_credential(str(config.get("credential_ref") or ""), db)
             or resolve_credential(credential_ref, db)
+            or resolve_credential(str(config.get("api_key_ref") or ""), db)
             or os.getenv("POLLINATIONS_KEY")
             or os.getenv("MEDIA2API_POLLINATIONS_KEY")
         )
@@ -809,7 +810,7 @@ class ConnectorProvider:
 
     def _headers(self, db: Session, config: dict[str, Any], credential_ref: str | None) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        api_key = resolve_credential(str(config.get("api_key_ref") or ""), db) or resolve_credential(credential_ref, db)
+        api_key = resolve_credential(str(config.get("credential_ref") or ""), db) or resolve_credential(credential_ref, db) or resolve_credential(str(config.get("api_key_ref") or ""), db)
         if api_key:
             header_name = str(config.get("api_key_header") or "Authorization")
             if header_name.lower() == "authorization":
