@@ -43,7 +43,7 @@ def require_auth(
     x_api_key: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> AuthContext:
-    raw_key = extract_api_key(authorization, x_api_key)
+    raw_key = extract_api_key(authorization, x_api_key) or request.cookies.get("media2api_admin_key")
     if not raw_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"error": "API_KEY_REQUIRED"})
 

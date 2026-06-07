@@ -76,6 +76,7 @@ Environment=DATABASE_URL={db_url}
 Environment=ASSET_DIR={data_dir}/assets
 Environment=PUBLIC_BASE_URL=http://{host}:{public_port}
 Environment=MEDIA2API_BOOTSTRAP_KEY={api_key}
+Environment=MEDIA2API_ADMIN_PASSWORD={api_key}
 Environment=MEDIA2API_ADMIN_TOKEN=admin-token-{int(time.time())}
 Environment=REDIS_URL={redis_url}
 Environment=MEDIA2API_INLINE_ASYNC=false
@@ -98,6 +99,7 @@ Environment=DATABASE_URL={db_url}
 Environment=ASSET_DIR={data_dir}/assets
 Environment=PUBLIC_BASE_URL=http://{host}:{public_port}
 Environment=MEDIA2API_BOOTSTRAP_KEY={api_key}
+Environment=MEDIA2API_ADMIN_PASSWORD={api_key}
 Environment=MEDIA2API_ADMIN_TOKEN=admin-token-{int(time.time())}
 Environment=REDIS_URL={redis_url}
 Environment=MEDIA2API_INLINE_ASYNC=false

@@ -4,6 +4,7 @@ import base64
 from copy import deepcopy
 from datetime import datetime, timedelta
 import hashlib
+import hmac
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -18,7 +19,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, or_, text
 from sqlalchemy.orm import Session
@@ -109,7 +110,7 @@ def auth_snapshot_from_request(request: Request) -> tuple[str, str]:
 
 
 def admin_auth_status_from_request(request: Request) -> tuple[bool, int, str]:
-    raw_key = extract_api_key(request.headers.get("authorization"), request.headers.get("x-api-key"))
+    raw_key = extract_api_key(request.headers.get("authorization"), request.headers.get("x-api-key")) or request.cookies.get("media2api_admin_key")
     if not raw_key:
         return False, 401, "API_KEY_REQUIRED"
     with SessionLocal() as db:
@@ -122,6 +123,33 @@ def admin_auth_status_from_request(request: Request) -> tuple[bool, int, str]:
         if not is_admin_user(user):
             return False, 403, "ADMIN_REQUIRED"
         return True, 200, ""
+
+
+def admin_login_password() -> str:
+    return settings.admin_password or settings.bootstrap_api_key or settings.admin_token
+
+
+def find_admin_login_user(db: Session, username: str) -> models.User | None:
+    username = (username or "").strip()
+    if not username:
+        return None
+    user = db.get(models.User, username)
+    if user and is_admin_user(user):
+        return user
+    user = db.query(models.User).filter(models.User.email == username).first()
+    if user and is_admin_user(user):
+        return user
+    if username.lower() == "admin":
+        user = db.get(models.User, "usr_admin")
+        if user and is_admin_user(user):
+            return user
+    return None
+
+
+def admin_bootstrap_api_key_for_user(db: Session, user_id: str) -> models.ApiKey | None:
+    key_hash = hash_api_key(settings.bootstrap_api_key)
+    api_key = db.query(models.ApiKey).filter(models.ApiKey.user_id == user_id, models.ApiKey.key_hash == key_hash, models.ApiKey.status == "active").first()
+    return api_key
 
 
 def audit_job_id(path: str, payload: dict[str, Any]) -> str:
@@ -8270,7 +8298,330 @@ def admin_dashboard_snapshot(db: Session) -> dict[str, Any]:
     }
 
 
+def admin_escape(value: Any) -> str:
+    return html.escape("" if value is None else str(value))
+
+
+def admin_login_html(error: str = "") -> str:
+    error_html = f'<div class="error">{admin_escape(error)}</div>' if error else ""
+    return f"""
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>media2api Admin</title>
+      <style>
+        :root {{ color-scheme: dark; --bg:#08090b; --panel:rgba(22,24,28,.72); --panel2:rgba(34,36,42,.58); --line:rgba(255,255,255,.1); --text:#f4f5f7; --muted:#9ca3af; --soft:#d1d5db; }}
+        * {{ box-sizing:border-box; }}
+        body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:radial-gradient(circle at 50% 0%, #24262c 0, #090a0d 44%, #050608 100%); color:var(--text); }}
+        .shell {{ width:min(430px, calc(100vw - 32px)); padding:28px; border:1px solid var(--line); border-radius:24px; background:linear-gradient(145deg, rgba(32,34,39,.76), rgba(12,13,16,.82)); box-shadow:18px 18px 50px rgba(0,0,0,.55), -14px -14px 36px rgba(255,255,255,.035); backdrop-filter:blur(22px); }}
+        .mark {{ width:46px; height:46px; border-radius:16px; background:linear-gradient(145deg,#2c2f36,#0c0d10); box-shadow:inset 5px 5px 12px rgba(0,0,0,.55), inset -5px -5px 12px rgba(255,255,255,.045); display:grid; place-items:center; margin-bottom:18px; font-weight:800; }}
+        h1 {{ margin:0; font-size:26px; letter-spacing:0; }}
+        p {{ margin:8px 0 22px; color:var(--muted); line-height:1.55; }}
+        label {{ display:block; margin:14px 0 7px; font-size:12px; color:var(--soft); text-transform:uppercase; }}
+        input {{ width:100%; height:46px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(5,6,8,.72); color:var(--text); padding:0 14px; outline:none; box-shadow:inset 5px 5px 14px rgba(0,0,0,.45), inset -4px -4px 12px rgba(255,255,255,.035); }}
+        input:focus {{ border-color:rgba(255,255,255,.25); }}
+        button {{ width:100%; height:46px; margin-top:20px; border:1px solid rgba(255,255,255,.14); border-radius:14px; background:linear-gradient(145deg,#f5f5f5,#b7bcc5); color:#07080a; font-weight:800; cursor:pointer; }}
+        .error {{ margin:14px 0 4px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:rgba(127,29,29,.32); color:#fecaca; }}
+        .hint {{ margin-top:16px; color:#858b96; font-size:12px; }}
+      </style>
+    </head>
+    <body>
+      <form class="shell" method="post" action="/admin/login">
+        <div class="mark">M2</div>
+        <h1>media2api Admin</h1>
+        <p>Use an admin username and password to manage providers, OAuth Sessions, saved credentials, accounts, models, jobs and delivery.</p>
+        {error_html}
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" value="admin" />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Admin password" />
+        <button type="submit">Log in</button>
+        <div class="hint">Set MEDIA2API_ADMIN_PASSWORD for production. Bootstrap deployments may use the initial admin credential.</div>
+      </form>
+    </body>
+    </html>
+    """
+
+
+def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
+    dashboard = admin_dashboard_snapshot(db)
+    readiness = build_readiness_snapshot(db)
+    users = db.query(models.User).order_by(models.User.created_at.desc()).limit(8).all()
+    providers = db.query(models.Provider).order_by(models.Provider.id.asc()).limit(10).all()
+    accounts = db.query(models.AccountResource).order_by(models.AccountResource.provider_id.asc(), models.AccountResource.id.asc()).limit(10).all()
+    models_rows = db.query(models.LogicalModel).order_by(models.LogicalModel.id.asc()).limit(10).all()
+    mappings = db.query(models.ProviderModelMapping).order_by(models.ProviderModelMapping.priority.asc()).limit(12).all()
+    secrets = db.query(models.CredentialSecret).order_by(models.CredentialSecret.updated_at.desc()).limit(8).all()
+    jobs = db.query(models.MediaJob).order_by(models.MediaJob.created_at.desc()).limit(8).all()
+    assets = db.query(models.MediaAsset).order_by(models.MediaAsset.created_at.desc()).limit(8).all()
+    alerts = db.query(models.AlertEvent).order_by(models.AlertEvent.created_at.desc()).limit(8).all()
+    webhooks = db.query(models.WebhookDelivery).order_by(models.WebhookDelivery.created_at.desc()).limit(8).all()
+    api_key_count = db.query(models.ApiKey).count()
+    active_key_count = db.query(models.ApiKey).filter(models.ApiKey.status == "active").count()
+
+    def pill(value: Any) -> str:
+        text_value = admin_escape(value)
+        tone = "ok" if text_value in {"active", "completed", "delivered", "enabled"} else "warn" if text_value in {"created", "running", "pending", "open"} else "muted"
+        return f'<span class="pill {tone}">{text_value}</span>'
+
+    metric_cards = "".join(
+        f'<div class="metric"><span>{label}</span><strong>{admin_escape(value)}</strong><small>{admin_escape(note)}</small></div>'
+        for label, value, note in [
+            ("Today Jobs", dashboard["jobs"]["today_total"], f'queue {dashboard["jobs"]["queue_length"]}'),
+            ("Success Rate", "-" if dashboard["jobs"]["success_rate"] is None else f'{dashboard["jobs"]["success_rate"] * 100:.1f}%', "terminal jobs"),
+            ("Active Providers", dashboard["providers"]["active"], f'total {dashboard["providers"]["total"]}'),
+            ("Active Accounts", dashboard["accounts"]["active"], f'leases {dashboard["accounts"]["active_leases"]}'),
+            ("Open Alerts", dashboard["alerts"]["open"], f'critical {dashboard["alerts"]["critical_open"]}'),
+            ("Gross Margin", dashboard["billing"]["gross_margin_today"], dashboard["billing"]["currency"]),
+        ]
+    )
+    user_rows = "".join(f"<tr><td>{admin_escape(user.id)}</td><td>{admin_escape(user.email)}</td><td>{pill(user.status)}</td><td>{admin_escape(user.tier)}</td><td>{admin_escape(user.wallet_balance)}</td></tr>" for user in users)
+    provider_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.name)}</td><td>{admin_escape(item.adapter_type)}</td><td>{pill(item.status)}</td></tr>" for item in providers)
+    account_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.label)}</td><td>{admin_escape(item.credential_ref)}</td><td>{pill(item.status)}</td><td>{admin_escape(item.current_leases)}/{admin_escape(item.concurrency_limit)}</td></tr>" for item in accounts)
+    model_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.display_name)}</td><td>{admin_escape(item.operations_json)}</td><td>{admin_escape(item.billing_class)}</td><td>{pill('enabled' if item.enabled else 'disabled')}</td></tr>" for item in models_rows)
+    mapping_rows = "".join(f"<tr><td>{admin_escape(item.logical_model)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.provider_model)}</td><td>{admin_escape(item.operations_json)}</td><td>{admin_escape(item.priority)}</td><td>{pill('enabled' if item.enabled else 'disabled')}</td></tr>" for item in mappings)
+    secret_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.kind)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.account_id)}</td><td>{admin_escape(item.preview)}</td><td>{pill(item.status)}</td></tr>" for item in secrets)
+    job_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.operation)}</td><td>{admin_escape(item.logical_model)}</td><td>{admin_escape(item.provider_id or '-')}</td><td>{pill(item.status)}</td></tr>" for item in jobs)
+    asset_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.kind)}</td><td>{admin_escape(item.mime_type)}</td><td>{admin_escape(item.purpose)}</td><td>{admin_escape(item.size_bytes)}</td></tr>" for item in assets)
+    alert_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.severity)}</td><td>{admin_escape(item.title)}</td><td>{pill(item.status)}</td></tr>" for item in alerts)
+    webhook_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.job_id)}</td><td>{admin_escape(item.target_url[:46])}</td><td>{pill(item.status)}</td></tr>" for item in webhooks)
+    check_rows = "".join(f"<tr><td>{admin_escape(item.get('name'))}</td><td>{pill('ready' if item.get('ok') else 'blocked')}</td><td>{admin_escape(item.get('detail'))}</td></tr>" for item in readiness.get("checks", []))
+
+    operation_buttons = [
+        ("Readiness", "GET", "/v1/admin/readiness"),
+        ("Acceptance Report", "GET", "/v1/admin/acceptance-report"),
+        ("Provider Onboarding", "GET", "/v1/admin/provider-onboarding-report"),
+        ("Operator Workbench", "GET", "/v1/admin/operator-workbench-report"),
+        ("Production Go-Live", "GET", "/v1/admin/production-go-live-plan"),
+        ("Connector Conformance", "GET", "/v1/admin/connector-conformance-report"),
+        ("External Preflight", "GET", "/v1/admin/external-connector-preflight"),
+        ("Connector Manifest", "GET", "/v1/admin/external-connector-manifest-template?provider_id=jimeng"),
+        ("System Requirements", "GET", "/v1/admin/system-requirements-report"),
+        ("Final Acceptance", "GET", "/v1/admin/final-acceptance-matrix"),
+        ("Delivery Package", "GET", "/v1/admin/delivery-package"),
+        ("Config Snapshot", "GET", "/v1/admin/config-export"),
+        ("Export Config", "GET", "/v1/admin/config-export"),
+        ("Dry Run Import", "POST", "/v1/admin/config-import"),
+        ("Activate Template", "POST", "/v1/admin/provider-templates/gemini/activate"),
+        ("Dry Run Activate", "POST", "/v1/admin/provider-templates/gemini/activate"),
+        ("External Acceptance", "POST", "/v1/admin/provider-templates/pollinations/external-acceptance"),
+        ("Account External Acceptance", "POST", "/v1/admin/accounts/acct_mock_default/external-acceptance"),
+        ("Account Acceptance Suite", "POST", "/v1/admin/account-acceptance-suite"),
+        ("Account Diagnostics", "GET", "/v1/admin/accounts/acct_mock_default/diagnostics?limit=20"),
+        ("Job Diagnostics", "GET", "/v1/admin/jobs?limit=5"),
+        ("Lease Self Test", "POST", "/v1/admin/account-leases/self-test-expiry"),
+        ("Stalled Recovery Test", "POST", "/v1/admin/media-jobs/self-test-stalled-recovery"),
+        ("Recover Stalled Jobs", "POST", "/v1/admin/media-jobs/recover-stalled"),
+        ("Mock Stability Test", "POST", "/v1/admin/stability/self-test-mock"),
+        ("Asset Storage Test", "POST", "/v1/admin/assets/self-test-storage"),
+        ("Fallback Self Test", "POST", "/v1/admin/fallback/self-test"),
+        ("Contract Operations", "POST", "/v1/admin/providers/mock/contract-test"),
+        ("Contract Suite", "POST", "/v1/admin/provider-contract-suite"),
+        ("Sync Capabilities", "POST", "/v1/admin/providers/gemini/sync-capabilities"),
+    ]
+    operation_controls = "".join(
+        f'<button class="op" data-method="{method}" data-path="{admin_escape(path)}">{admin_escape(label)}</button>'
+        for label, method, path in operation_buttons
+    )
+    tabs = [
+        ("overview", "Dashboard"),
+        ("users", "Users & Auth"),
+        ("oauth", "OAuth Sessions"),
+        ("models", "Models"),
+        ("providers", "Providers"),
+        ("accounts", "Accounts"),
+        ("jobs", "Jobs"),
+        ("assets", "Assets"),
+        ("billing", "Billing"),
+        ("alerts", "Alerts"),
+        ("webhooks", "Webhooks"),
+        ("audit", "Audit"),
+        ("delivery", "Delivery"),
+    ]
+    nav = "".join(f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}">{admin_escape(label)}</button>' for tab_id, label in tabs)
+    return f"""
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>media2api Admin Dashboard</title>
+      <style>
+        :root {{ color-scheme:dark; --bg:#06070a; --panel:rgba(20,22,27,.7); --panel2:rgba(31,33,39,.58); --line:rgba(255,255,255,.09); --text:#f5f5f6; --muted:#9ca3af; --soft:#d7dbe1; --white:#ffffff; }}
+        * {{ box-sizing:border-box; }}
+        body {{ margin:0; min-height:100vh; overflow:hidden; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:linear-gradient(145deg,#050608,#111318 45%,#050608); color:var(--text); }}
+        .app {{ display:grid; grid-template-columns:282px 1fr; height:100vh; }}
+        aside {{ padding:22px; border-right:1px solid var(--line); background:rgba(8,9,12,.72); backdrop-filter:blur(22px); box-shadow:20px 0 45px rgba(0,0,0,.35); overflow:auto; }}
+        .brand {{ display:flex; gap:12px; align-items:center; margin-bottom:24px; }}
+        .logo {{ width:42px; height:42px; border-radius:15px; display:grid; place-items:center; font-weight:900; background:linear-gradient(145deg,#2a2d34,#090a0d); box-shadow:inset 5px 5px 12px rgba(0,0,0,.65), inset -4px -4px 10px rgba(255,255,255,.04); }}
+        .brand strong {{ display:block; letter-spacing:0; }}
+        .brand span {{ display:block; color:var(--muted); font-size:12px; margin-top:2px; }}
+        .nav-item {{ width:100%; height:42px; margin:4px 0; text-align:left; color:#cfd3da; border:1px solid transparent; border-radius:13px; padding:0 14px; background:transparent; cursor:pointer; }}
+        .nav-item:hover,.nav-item.active {{ background:linear-gradient(145deg, rgba(44,47,55,.86), rgba(14,15,18,.86)); border-color:rgba(255,255,255,.08); box-shadow:8px 8px 20px rgba(0,0,0,.35), -5px -5px 14px rgba(255,255,255,.025); color:white; }}
+        main {{ overflow:auto; padding:24px; }}
+        header {{ min-height:72px; display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }}
+        h1 {{ margin:0; font-size:28px; letter-spacing:0; }}
+        h2 {{ margin:0 0 14px; font-size:18px; letter-spacing:0; }}
+        .sub {{ color:var(--muted); margin-top:6px; }}
+        .logout {{ border:1px solid var(--line); border-radius:13px; height:38px; padding:0 14px; background:rgba(255,255,255,.05); color:white; cursor:pointer; }}
+        .tab {{ display:none; }}
+        .tab.active {{ display:block; }}
+        .grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
+        .metric,.panel {{ border:1px solid var(--line); border-radius:20px; background:linear-gradient(145deg, rgba(34,36,43,.68), rgba(8,9,12,.72)); box-shadow:14px 14px 36px rgba(0,0,0,.42), -9px -9px 24px rgba(255,255,255,.025); backdrop-filter:blur(18px); }}
+        .metric {{ min-height:118px; padding:18px; }}
+        .metric span,.eyebrow {{ color:var(--muted); font-size:12px; text-transform:uppercase; }}
+        .metric strong {{ display:block; font-size:30px; margin:10px 0 6px; }}
+        .metric small {{ color:#b5bac3; }}
+        .panel {{ padding:18px; margin-top:14px; }}
+        .two {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
+        table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+        th,td {{ padding:11px 10px; border-bottom:1px solid rgba(255,255,255,.06); text-align:left; vertical-align:top; }}
+        th {{ color:#b8bec8; font-weight:700; }}
+        td {{ color:#edf0f4; }}
+        .pill {{ display:inline-flex; min-height:24px; align-items:center; border-radius:999px; padding:3px 9px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.05); color:#cfd4dc; }}
+        .pill.ok {{ color:#dcfce7; background:rgba(22,101,52,.22); }}
+        .pill.warn {{ color:#fef3c7; background:rgba(146,64,14,.22); }}
+        .ops {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }}
+        .op {{ min-height:40px; border:1px solid rgba(255,255,255,.1); border-radius:12px; background:rgba(255,255,255,.055); color:#f8fafc; cursor:pointer; text-align:left; padding:0 11px; }}
+        .op:hover {{ background:rgba(255,255,255,.11); }}
+        .formline {{ display:grid; grid-template-columns:1fr 1fr auto; gap:10px; align-items:end; }}
+        label {{ display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }}
+        input,select,textarea {{ width:100%; min-height:40px; border:1px solid rgba(255,255,255,.09); border-radius:12px; background:rgba(4,5,7,.72); color:white; padding:8px 10px; outline:none; }}
+        textarea {{ min-height:92px; resize:vertical; }}
+        .primary {{ min-height:40px; border:1px solid rgba(255,255,255,.2); border-radius:12px; background:#e5e7eb; color:#08090b; font-weight:800; padding:0 14px; cursor:pointer; }}
+        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:14px; background:rgba(0,0,0,.38); color:#e7eaf0; max-height:360px; overflow:auto; }}
+        .note {{ color:#aab0bb; line-height:1.55; }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline {{ grid-template-columns:1fr; }} main {{ padding:16px; }} }}
+      </style>
+    </head>
+    <body>
+      <div class="app">
+        <aside>
+          <div class="brand"><div class="logo">M2</div><div><strong>media2api Admin</strong><span>{admin_escape(admin_user.id)} · cookie session</span></div></div>
+          {nav}
+        </aside>
+        <main>
+          <header>
+            <div><h1>Dashboard</h1><div class="sub">Unified t2i / t2v / i2v reverse-proxy operations. Runtime: {admin_escape(dashboard["runtime"]["queue_backend"])} · Asset store: {admin_escape(dashboard["runtime"]["asset_store"])}</div></div>
+            <form method="post" action="/admin/logout"><button class="logout" type="submit">Log out</button></form>
+          </header>
+
+          <section id="tab-overview" class="tab active">
+            <div class="grid">{metric_cards}</div>
+            <div class="panel"><h2>Operations</h2><div class="eyebrow">Provider Ops · /v1/media-jobs · quick admin actions</div><div class="ops" style="margin-top:12px">{operation_controls}</div></div>
+            <div class="panel"><h2>Readiness</h2><table><thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>{check_rows}</tbody></table></div>
+            <div class="panel"><h2>Result</h2><pre id="result">Select an operation to inspect the response.</pre></div>
+          </section>
+
+          <section id="tab-users" class="tab">
+            <div class="two">
+              <div class="panel"><h2>Users</h2><p class="note">Password login is for admin console access. API access remains managed through user-bound API keys.</p><table><thead><tr><th>ID</th><th>Email</th><th>Status</th><th>Tier</th><th>Wallet</th></tr></thead><tbody>{user_rows}</tbody></table></div>
+              <div class="panel"><h2>API Keys</h2><p class="note">Total keys: {api_key_count}. Active keys: {active_key_count}. OAuth login and saved auth flows should end by creating credential refs or account bindings, not by exposing browser tokens.</p><div class="formline"><div><label>User ID</label><input id="key-user" value="usr_admin" /></div><div><label>Name</label><input id="key-name" value="dashboard-key" /></div><button class="primary" id="create-key" type="button">Create API Key</button></div></div>
+            </div>
+          </section>
+
+          <section id="tab-oauth" class="tab">
+            <div class="panel"><h2>OAuth Sessions</h2><p class="note">Use this module as the account-auth control plane: start provider authorization outside the page, save the resulting credential material into Credential Value / secrets, then bind accounts by credential_ref. This mirrors sub2api-style separation between login state, account pool, and API routing.</p><table><thead><tr><th>Credential</th><th>Kind</th><th>Provider</th><th>Account</th><th>Preview</th><th>Status</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
+            <div class="panel"><h2>Credential Value</h2><div class="formline"><div><label>Provider</label><input id="secret-provider" placeholder="gemini" /></div><div><label>Account</label><input id="secret-account" placeholder="acct_gemini_01" /></div><button class="primary" type="button" id="save-secret">Save Credential</button></div><label style="margin-top:10px">Secret JSON / token reference</label><textarea id="secret-value" placeholder="{{&quot;cookie_ref&quot;:&quot;vault://...&quot;}}"></textarea></div>
+          </section>
+
+          <section id="tab-models" class="tab"><div class="panel"><h2>Models</h2><table><thead><tr><th>ID</th><th>Name</th><th>Operations</th><th>Billing Class</th><th>Enabled</th></tr></thead><tbody>{model_rows}</tbody></table></div><div class="panel"><h2>Model Mappings</h2><table><thead><tr><th>Logical Model</th><th>Provider</th><th>Provider Model</th><th>Operations</th><th>Priority</th><th>Enabled</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></section>
+          <section id="tab-providers" class="tab"><div class="panel"><h2>Providers</h2><table><thead><tr><th>ID</th><th>Name</th><th>Adapter</th><th>Status</th></tr></thead><tbody>{provider_rows}</tbody></table></div></section>
+          <section id="tab-accounts" class="tab"><div class="panel"><h2>Accounts</h2><table><thead><tr><th>ID</th><th>Provider</th><th>Label</th><th>Credential Ref</th><th>Status</th><th>Leases</th></tr></thead><tbody>{account_rows}</tbody></table></div></section>
+          <section id="tab-jobs" class="tab"><div class="panel"><h2>Jobs</h2><table><thead><tr><th>ID</th><th>Operation</th><th>Model</th><th>Provider</th><th>Status</th></tr></thead><tbody>{job_rows}</tbody></table></div></section>
+          <section id="tab-assets" class="tab"><div class="panel"><h2>Assets</h2><table><thead><tr><th>ID</th><th>Kind</th><th>MIME</th><th>Purpose</th><th>Bytes</th></tr></thead><tbody>{asset_rows}</tbody></table></div></section>
+          <section id="tab-billing" class="tab"><div class="panel"><h2>Billing</h2><div class="grid">{metric_cards}</div></div></section>
+          <section id="tab-alerts" class="tab"><div class="panel"><h2>Alerts</h2><table><thead><tr><th>ID</th><th>Severity</th><th>Title</th><th>Status</th></tr></thead><tbody>{alert_rows}</tbody></table></div></section>
+          <section id="tab-webhooks" class="tab"><div class="panel"><h2>Webhooks</h2><table><thead><tr><th>ID</th><th>Job</th><th>URL</th><th>Status</th></tr></thead><tbody>{webhook_rows}</tbody></table></div></section>
+          <section id="tab-audit" class="tab"><div class="panel"><h2>Audit</h2><p class="note">Request logs, safety events, connector contracts, and acceptance reports are available from the operation panel. Use Contract Operations and Contract Suite before promoting a provider pool.</p></div></section>
+          <section id="tab-delivery" class="tab"><div class="panel"><h2>Delivery</h2><p class="note">Delivery Package, Final Acceptance, System Requirements, and Config Snapshot remain first-class admin actions for release review and handoff.</p></div></section>
+        </main>
+      </div>
+      <script>
+        const result = document.getElementById('result');
+        document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {{
+          document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+          document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
+          button.classList.add('active');
+          document.getElementById('tab-' + button.dataset.tab).classList.add('active');
+        }}));
+        async function callAdmin(path, method = 'GET', body = null) {{
+          const options = {{ method, credentials: 'same-origin', headers: {{ 'Content-Type': 'application/json' }} }};
+          if (body !== null) options.body = JSON.stringify(body);
+          const response = await fetch(path, options);
+          const text = await response.text();
+          let payload = text;
+          try {{ payload = JSON.parse(text); }} catch (_) {{}}
+          result.textContent = JSON.stringify(payload, null, 2);
+          if (!response.ok) throw new Error(text);
+          return payload;
+        }}
+        document.querySelectorAll('.op').forEach(button => button.addEventListener('click', async () => {{
+          const label = button.textContent.trim();
+          const path = button.dataset.path;
+          const method = button.dataset.method;
+          const body = method === 'POST' ? (label === 'Dry Run Import' ? {{ snapshot: {{}}, dry_run: true }} : label === 'Dry Run Activate' ? {{ dry_run: true }} : {{}}) : null;
+          result.textContent = 'Running ' + label + '...';
+          try {{ await callAdmin(path, method, body); }} catch (error) {{ result.textContent = String(error); }}
+        }}));
+        document.getElementById('create-key')?.addEventListener('click', async () => {{
+          await callAdmin('/v1/admin/api-keys', 'POST', {{ user_id: document.getElementById('key-user').value, name: document.getElementById('key-name').value }});
+        }});
+        document.getElementById('save-secret')?.addEventListener('click', async () => {{
+          await callAdmin('/v1/admin/credential-secrets', 'POST', {{ id: 'secret_' + Date.now(), name: 'dashboard credential', kind: 'session', provider_id: document.getElementById('secret-provider').value, account_id: document.getElementById('secret-account').value, value: document.getElementById('secret-value').value, metadata: {{ source: 'admin_dashboard' }} }});
+        }});
+      </script>
+    </body>
+    </html>
+    """
+
+
 @app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    raw_admin_key = request.query_params.get("admin_key") or request.query_params.get("api_key") or request.cookies.get("media2api_admin_key") or ""
+    admin_key = db.query(models.ApiKey).filter(models.ApiKey.key_hash == hash_api_key(raw_admin_key), models.ApiKey.status == "active").first() if raw_admin_key else None
+    admin_user = db.get(models.User, admin_key.user_id) if admin_key else None
+    if admin_key and not is_admin_user(admin_user):
+        return HTMLResponse(admin_login_html("Admin access required."), status_code=403)
+    if not admin_key or not admin_user:
+        return HTMLResponse(admin_login_html(), status_code=401)
+    response = HTMLResponse(admin_dashboard_html(db, admin_user))
+    if request.query_params.get("admin_key") or request.query_params.get("api_key"):
+        response.set_cookie("media2api_admin_key", raw_admin_key, httponly=True, samesite="lax", max_age=604800)
+    return response
+
+
+@app.post("/admin/login")
+async def admin_login(request: Request, db: Session = Depends(get_db)) -> Response:
+    form_data = dict(parse_qsl((await request.body()).decode("utf-8"), keep_blank_values=True))
+    username = form_data.get("username", "")
+    password = form_data.get("password", "")
+    admin_user = find_admin_login_user(db, username)
+    expected_password = admin_login_password()
+    if not admin_user or not expected_password or not hmac.compare_digest(password, expected_password):
+        return HTMLResponse(admin_login_html("Invalid username or password."), status_code=401)
+    if admin_user.status != "active":
+        return HTMLResponse(admin_login_html("Admin user is disabled."), status_code=403)
+    bootstrap_key = admin_bootstrap_api_key_for_user(db, admin_user.id)
+    if not bootstrap_key:
+        return HTMLResponse(admin_login_html("Bootstrap admin API key is not active for this user."), status_code=403)
+    response = RedirectResponse("/admin", status_code=303)
+    response.set_cookie("media2api_admin_key", settings.bootstrap_api_key, httponly=True, samesite="lax", max_age=604800)
+    response.set_cookie("media2api_admin_user", admin_user.id, httponly=False, samesite="lax", max_age=604800)
+    return response
+
+
+@app.post("/admin/logout")
+def admin_logout() -> Response:
+    response = RedirectResponse("/admin", status_code=303)
+    response.delete_cookie("media2api_admin_key")
+    response.delete_cookie("media2api_admin_user")
+    return response
+
+
+@app.get("/admin-legacy", response_class=HTMLResponse, include_in_schema=False)
 def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     raw_admin_key = request.query_params.get("admin_key") or request.query_params.get("api_key") or request.cookies.get("media2api_admin_key") or ""
     admin_key = db.query(models.ApiKey).filter(models.ApiKey.key_hash == hash_api_key(raw_admin_key), models.ApiKey.status == "active").first() if raw_admin_key else None

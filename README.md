@@ -130,7 +130,7 @@ set real values through the environment:
 
 ```powershell
 $env:MEDIA2API_BOOTSTRAP_KEY="<admin-api-key>"
-$env:MEDIA2API_ADMIN_TOKEN="<admin-console-token>"
+$env:MEDIA2API_ADMIN_PASSWORD="<admin-dashboard-password>"
 $env:MEDIA2API_SECRET_ENCRYPTION_KEY="<32-byte-or-longer-secret>"
 $env:MEDIA2API_ASSET_SIGNING_SECRET="<asset-url-signing-secret>"
 ```
@@ -147,8 +147,14 @@ curl -H "Authorization: Bearer $env:MEDIA2API_API_KEY" http://localhost:8080/v1/
 Admin console:
 
 ```text
-http://localhost:8080/admin?admin_key=<admin-api-key>
+http://localhost:8080/admin
 ```
+
+Default local login is `admin` plus `MEDIA2API_ADMIN_PASSWORD`. If that
+variable is not set, the dashboard falls back to `MEDIA2API_BOOTSTRAP_KEY` for
+bootstrap deployments. Successful login stores an HttpOnly
+`media2api_admin_key` session cookie, so the dashboard can call `/v1/admin/*`
+without pasting an API key into the page.
 
 ## Docker Compose
 
@@ -373,4 +379,3 @@ Generated files are ignored by `.gitignore`, including:
 - `var/`
 - logs
 - downloaded artifacts
-

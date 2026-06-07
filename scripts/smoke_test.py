@@ -80,8 +80,10 @@ def main() -> None:
         assert dashboard["object"] == "admin.dashboard" and "success_rate" in dashboard["jobs"] and "usage_today" in dashboard["billing"], dashboard
         assert "worker_concurrency" in dashboard["runtime"] and "active_leases" in dashboard["accounts"], dashboard
         admin_login = client.get("/admin")
-        assert admin_login.status_code == 401 and "media2api Admin" in admin_login.text and "API Key" in admin_login.text
-        admin_page = client.get("/admin?admin_key=dev-admin-key")
+        assert admin_login.status_code == 401 and "media2api Admin" in admin_login.text and "Username" in admin_login.text and "Password" in admin_login.text
+        login_response = client.post("/admin/login", data={"username": "admin", "password": "dev-admin-key"}, follow_redirects=False)
+        assert login_response.status_code in {302, 303} and "media2api_admin_key" in login_response.headers.get("set-cookie", "")
+        admin_page = client.get("/admin")
         assert admin_page.status_code == 200 and "Dashboard" in admin_page.text and "Today Jobs" in admin_page.text and "Operations" in admin_page.text
         for admin_control in ["Activate Template", "Dry Run Activate", "External Acceptance", "Account External Acceptance", "Account Acceptance Suite", "Account Diagnostics", "Job Diagnostics", "Acceptance Report", "Provider Onboarding", "Operator Workbench", "Production Go-Live", "Connector Conformance", "External Preflight", "Connector Manifest", "System Requirements", "Final Acceptance", "Delivery Package", "Lease Self Test", "Stalled Recovery Test", "Recover Stalled Jobs", "Mock Stability Test", "Asset Storage Test", "Fallback Self Test", "Readiness", "Credential Value", "Contract Operations", "Contract Suite", "Sync Capabilities", "Config Snapshot", "Export Config", "Dry Run Import"]:
             assert admin_control in admin_page.text, admin_control

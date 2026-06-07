@@ -19,6 +19,7 @@ class Settings:
     public_base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:8080").rstrip("/")
     bootstrap_api_key = os.getenv("MEDIA2API_BOOTSTRAP_KEY", "dev-admin-key")
     admin_token = os.getenv("MEDIA2API_ADMIN_TOKEN", "dev-admin-token")
+    admin_password = os.getenv("MEDIA2API_ADMIN_PASSWORD", "")
     redis_url = os.getenv("REDIS_URL", "")
     inline_async = os.getenv("MEDIA2API_INLINE_ASYNC", "true").lower() == "true"
     default_user_email = os.getenv("MEDIA2API_DEFAULT_USER", "admin@media2api.local")

@@ -6,6 +6,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 from typing import Any
 
 
@@ -53,6 +54,25 @@ class ApiClient:
                 return resp.status, resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode("utf-8")
+
+    def form_status(self, path: str, payload: dict[str, str]) -> tuple[int, str, str]:
+        data = urlencode(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=data,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with opener.open(req, timeout=self.timeout) as resp:
+                return resp.status, resp.headers.get("Set-Cookie", ""), resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers.get("Set-Cookie", ""), exc.read().decode("utf-8")
 
     def bytes_url(self, url: str) -> tuple[int, bytes]:
         try:
@@ -305,8 +325,18 @@ def main() -> int:
     audit.check("target_platform_contracts", not target_contract_failures, target_contract_failures[:10])
 
     admin_login_status, admin_login_html = client.text("/admin")
-    audit.check("admin_requires_key", admin_login_status == 401 and "API Key" in admin_login_html, {"status": admin_login_status})
-    admin_status, admin_html = client.text(f"/admin?admin_key={args.api_key}")
+    audit.check(
+        "admin_requires_password_login",
+        admin_login_status == 401 and "Username" in admin_login_html and "Password" in admin_login_html,
+        {"status": admin_login_status},
+    )
+    admin_cookie_status, admin_cookie, _ = client.form_status("/admin/login", {"username": "admin", "password": args.api_key})
+    audit.check(
+        "admin_password_login_sets_cookie",
+        admin_cookie_status in {302, 303} and "media2api_admin_key" in admin_cookie,
+        {"status": admin_cookie_status},
+    )
+    admin_status, admin_html = client.text("/admin", extra_headers={"Cookie": admin_cookie.split(";", 1)[0]})
     audit.check(
         "admin_console",
         admin_status == 200
