@@ -562,6 +562,37 @@ class AccountPatchRequest(BaseModel):
     status: str | None = None
 
 
+class AccountOnboardingRequest(BaseModel):
+    provider_id: str
+    account_id: str | None = None
+    label: str
+    provider_base_url: str | None = None
+    provider_config: dict[str, Any] = Field(default_factory=dict)
+    auth_method: str = "secret_json"
+    credential_value: str
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str = "session"
+    supported_operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    region: str = ""
+    plan: str = ""
+    status: str = "active"
+    upsert: bool = True
+    sync_capabilities: bool = True
+    run_health_check: bool = True
+
+
+class AccountOnboardingBulkRequest(BaseModel):
+    provider_id: str
+    auth_method: str = "secret_json"
+    items: list[dict[str, Any]]
+    sync_capabilities: bool = False
+    run_health_check: bool = False
+
+
 class AccountBulkUpsertItem(BaseModel):
     id: str | None = None
     provider_id: str
@@ -1279,6 +1310,42 @@ def serialize_account(account: models.AccountResource) -> dict[str, Any]:
         "last_failed_at": account.last_failed_at.isoformat() + "Z" if account.last_failed_at else None,
         "last_health_check_at": account.last_health_check_at.isoformat() + "Z" if account.last_health_check_at else None,
     }
+
+
+def provider_default_operations_and_models(provider_id: str) -> tuple[list[str], list[str]]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    target = next((row for row in TARGET_MODEL_TABLE if row[0] == provider_id), None)
+    operations: list[str] = []
+    provider_models: list[str] = []
+    if template:
+        operations.extend(template.operations)
+        provider_models.extend(template.models)
+        for mapping in template.mappings:
+            operations.extend(mapping.operations)
+            provider_models.append(mapping.provider_model)
+    if target:
+        provider_models.extend(target[1])
+        operations.extend(target[2])
+    return list(dict.fromkeys(operations)), list(dict.fromkeys(provider_models))
+
+
+def run_provider_health_check_preserve_active(db: Session, provider: models.Provider) -> dict[str, Any]:
+    adapter = get_provider(provider.id)
+    result = adapter.health_check(db, provider.id)
+    check = models.ProviderHealthCheck(
+        id=new_id("phc"),
+        provider_id=provider.id,
+        status=str(result.get("status") or "unknown"),
+        latency_ms=result.get("latency_ms"),
+        message=str(result.get("message") or ""),
+        detail_json=dumps(result.get("detail") or {}),
+    )
+    db.add(check)
+    provider.status = "active"
+    if check.status != "ok":
+        alert_service.provider_health(db, check)
+    db.commit()
+    return serialize_health_check(check)
 
 
 def credential_ref_info(db: Session, credential_ref: str) -> dict[str, Any]:
@@ -8375,6 +8442,25 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     webhooks = db.query(models.WebhookDelivery).order_by(models.WebhookDelivery.created_at.desc()).limit(8).all()
     api_key_count = db.query(models.ApiKey).count()
     active_key_count = db.query(models.ApiKey).filter(models.ApiKey.status == "active").count()
+    provider_options = "".join(f'<option value="{admin_escape(item.id)}">{admin_escape(item.name)} ({admin_escape(item.id)})</option>' for item in providers)
+    provider_hint_text = {
+        "gemini": "Gemini / Veo / Nano Banana：填写你的 Gemini 连接器 Base URL，授权材料建议保存 OAuth 返回 JSON、密钥库引用或服务端 token 引用。",
+        "kling": "可灵：填写可灵连接器 Base URL，授权材料通常来自账号池连接器导出的会话引用或密钥库引用。",
+        "jimeng": "即梦 / Seedream / Seedance：填写即梦连接器 Base URL，授权材料建议使用连接器生成的账号引用，不直接保存明文浏览器会话。",
+        "qwen": "千问 / Qwen：填写 Qwen 连接器 Base URL，授权材料可为 API Key、OAuth 返回 JSON 或密钥库引用。",
+        "grok": "Grok Imagine：填写 Grok 连接器 Base URL，授权材料可为连接器保存后的 token reference。",
+        "pollinations": "Pollinations：填写聚合器 Key 或 secret 引用，系统会绑定到 Pollinations 账号资源。",
+        "openai_image": "OpenAI 图像连接器：填写图像连接器 Base URL，授权材料使用服务端密钥库引用。",
+    }
+    provider_hint_payload = {
+        item.id: {
+            "models": provider_default_operations_and_models(item.id)[1],
+            "operations": provider_default_operations_and_models(item.id)[0],
+            "auth_methods": ["secret_json", "token_reference", "api_key", "oauth_result"],
+            "help": provider_hint_text.get(item.id, "填写该平台真实连接器 Base URL，并粘贴连接器或密钥库返回的授权材料。"),
+        }
+        for item in providers
+    }
 
     def pill(value: Any) -> str:
         raw_value = "" if value is None else str(value)
@@ -8556,13 +8642,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           </section>
 
           <section id="tab-oauth" class="tab">
-            <div class="panel"><h2>OAuth 会话</h2><p class="note">这里是账号鉴权控制台：先在合法授权的真实连接器或密钥库中完成平台登录/授权，再把生成的引用保存到凭据表，最后把账号池绑定到 credential_ref。</p><button class="primary" type="button" id="open-oauth-guide">查看获取教程</button><table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
-            <div class="panel"><h2>保存鉴权</h2><div class="formline"><div><label>平台</label><input id="secret-provider" placeholder="gemini" /></div><div><label>账号</label><input id="secret-account" placeholder="acct_gemini_01" /></div><button class="primary" type="button" id="save-secret">保存凭据</button></div><label style="margin-top:10px">密钥 JSON / 令牌引用（Secret JSON / token reference）</label><textarea id="secret-value" placeholder="{{&quot;credential_ref&quot;:&quot;vault://providers/gemini/acct_01&quot;}}"></textarea></div>
+            <div class="panel"><h2>OAuth 会话</h2><p class="note">这里是账号鉴权控制台：选择平台，粘贴真实连接器或密钥库返回的授权材料，系统会保存凭据、创建账号、绑定能力，并可立即同步能力和健康检查。</p><div class="ops"><button class="primary" type="button" id="open-account-wizard">添加平台账号</button><button class="op" type="button" id="open-oauth-guide">查看获取教程</button></div><table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
+            <div class="panel"><h2>批量导入账号</h2><p class="note">每行一个 JSON 对象，字段支持 account_id、label、credential_value、credential_ref、concurrency_limit、region、plan。系统会逐行执行真实账号接入流程。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>鉴权方式</label><select id="bulk-auth-method"><option value="secret_json">密钥 JSON</option><option value="token_reference">令牌引用</option><option value="api_key">API Key</option><option value="oauth_result">OAuth 返回结果</option></select></div><button class="primary" type="button" id="bulk-import">批量导入</button></div><label style="margin-top:10px">账号 JSONL</label><textarea id="bulk-jsonl" placeholder="每行粘贴一个真实账号 JSON"></textarea></div>
           </section>
 
           <section id="tab-models" class="tab"><div class="panel"><h2>模型</h2><table><thead><tr><th>ID</th><th>名称</th><th>操作</th><th>计费类</th><th>启用</th></tr></thead><tbody>{model_rows}</tbody></table></div><div class="panel"><h2>模型映射</h2><table><thead><tr><th>逻辑模型</th><th>平台</th><th>平台模型</th><th>操作</th><th>优先级</th><th>启用</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></section>
           <section id="tab-providers" class="tab"><div class="panel"><h2>平台</h2><p class="note">此处只展示真实平台，测试平台不进入管理台视图。真实平台在启动和页面加载时会统一保持已启用。</p><table><thead><tr><th>ID</th><th>名称</th><th>适配器</th><th>状态</th></tr></thead><tbody>{provider_rows}</tbody></table></div></section>
-          <section id="tab-accounts" class="tab"><div class="panel"><h2>账号池</h2><table><thead><tr><th>ID</th><th>平台</th><th>标签</th><th>凭据引用</th><th>状态</th><th>租约</th></tr></thead><tbody>{account_rows}</tbody></table></div></section>
+          <section id="tab-accounts" class="tab"><div class="panel"><h2>账号池</h2><div class="ops"><button class="primary" type="button" id="open-account-wizard-accounts">添加平台账号</button><button class="op" type="button" data-method="POST" data-path="/v1/admin/account-acceptance-suite">运行账号验收套件</button></div><table style="margin-top:14px"><thead><tr><th>ID</th><th>平台</th><th>标签</th><th>凭据引用</th><th>状态</th><th>租约</th></tr></thead><tbody>{account_rows}</tbody></table></div></section>
           <section id="tab-jobs" class="tab"><div class="panel"><h2>任务</h2><table><thead><tr><th>ID</th><th>操作</th><th>模型</th><th>平台</th><th>状态</th></tr></thead><tbody>{job_rows}</tbody></table></div></section>
           <section id="tab-assets" class="tab"><div class="panel"><h2>资产</h2><table><thead><tr><th>ID</th><th>类型</th><th>MIME</th><th>用途</th><th>字节</th></tr></thead><tbody>{asset_rows}</tbody></table></div></section>
           <section id="tab-billing" class="tab"><div class="panel"><h2>计费</h2><div class="grid">{metric_cards}</div></div></section>
@@ -8571,6 +8657,40 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <section id="tab-audit" class="tab"><div class="panel"><h2>审计</h2><p class="note">请求日志、安全事件、连接器合同和验收报告都通过操作区读取真实接口结果。真实平台上线前请先跑连接器一致性和真实平台合同套件。</p></div></section>
           <section id="tab-delivery" class="tab"><div class="panel"><h2>交付</h2><p class="note">交付包、最终验收矩阵、系统要求报告和配置快照用于发布评审与交接。</p></div></section>
         </main>
+      </div>
+      <div class="modal-backdrop" id="account-wizard">
+        <div class="modal">
+          <h2>添加平台账号</h2>
+          <p class="note">按步骤接入真实账号：选择平台，选择鉴权方式，填写账号信息，粘贴授权材料，保存后系统会创建凭据和账号，并按需同步能力与健康检查。</p>
+          <p class="note" id="wizard-provider-help"></p>
+          <div class="formline">
+            <div><label>平台</label><select id="wizard-provider">{provider_options}</select></div>
+            <div><label>鉴权方式</label><select id="wizard-auth-method"><option value="secret_json">密钥 JSON</option><option value="token_reference">令牌引用</option><option value="api_key">API Key</option><option value="oauth_result">OAuth 返回结果</option></select></div>
+            <div><label>账号 ID</label><input id="wizard-account-id" placeholder="留空自动生成" /></div>
+          </div>
+          <div class="two">
+            <div><label style="margin-top:10px">连接器 Base URL</label><input id="wizard-base-url" placeholder="填写真实连接器地址" /></div>
+            <div><label style="margin-top:10px">平台配置 JSON</label><textarea id="wizard-provider-config" placeholder="可选，填写真实连接器配置 JSON"></textarea></div>
+          </div>
+          <div class="formline" style="margin-top:10px">
+            <div><label>账号备注</label><input id="wizard-label" placeholder="填写真实账号备注" /></div>
+            <div><label>并发限制</label><input id="wizard-concurrency" type="number" value="1" min="1" /></div>
+            <div><label>区域 / 套餐</label><input id="wizard-region-plan" placeholder="例如 hk / pro" /></div>
+          </div>
+          <div class="two">
+            <div><label style="margin-top:10px">支持操作</label><textarea id="wizard-operations" placeholder="选择平台后自动带出，可按需修改 JSON 数组"></textarea></div>
+            <div><label style="margin-top:10px">支持平台模型</label><textarea id="wizard-models" placeholder="选择平台后自动带出，可按需修改 JSON 数组"></textarea></div>
+          </div>
+          <label style="margin-top:10px">授权材料</label>
+          <textarea id="wizard-credential" placeholder="粘贴真实连接器返回的 JSON、密钥库引用、环境变量引用或 API Key"></textarea>
+          <div class="formline" style="margin-top:10px">
+            <label><input id="wizard-sync" type="checkbox" checked /> 保存后同步能力</label>
+            <label><input id="wizard-health" type="checkbox" checked /> 保存后健康检查</label>
+            <button class="primary" type="button" id="wizard-submit">保存并测试</button>
+          </div>
+          <p class="note">保存成功后，到“账号池”查看账号，到“返回结果”查看真实接口返回。失败不会生成演示数据。</p>
+          <button class="logout" type="button" id="close-account-wizard">关闭</button>
+        </div>
       </div>
       <div class="modal-backdrop" id="oauth-guide">
         <div class="modal">
@@ -8588,6 +8708,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         </div>
       </div>
       <script>
+        const providerHints = {json.dumps(provider_hint_payload, ensure_ascii=False)};
         const result = document.getElementById('result');
         document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {{
           document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
@@ -8622,6 +8743,79 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('oauth-guide')?.addEventListener('click', event => {{
           if (event.target.id === 'oauth-guide') event.currentTarget.classList.remove('open');
+        }});
+        function openAccountWizard() {{
+          document.getElementById('account-wizard')?.classList.add('open');
+          fillProviderHints();
+        }}
+        function closeAccountWizard() {{
+          document.getElementById('account-wizard')?.classList.remove('open');
+        }}
+        function parseJsonArrayField(id) {{
+          const text = document.getElementById(id).value.trim();
+          if (!text) return [];
+          const parsed = JSON.parse(text);
+          if (!Array.isArray(parsed)) throw new Error('字段必须是 JSON 数组：' + id);
+          return parsed;
+        }}
+        function fillProviderHints() {{
+          const providerId = document.getElementById('wizard-provider')?.value;
+          const hint = providerHints[providerId] || {{ operations: [], models: [] }};
+          document.getElementById('wizard-provider-help').textContent = hint.help || '';
+          document.getElementById('wizard-operations').value = JSON.stringify(hint.operations || [], null, 2);
+          document.getElementById('wizard-models').value = JSON.stringify(hint.models || [], null, 2);
+        }}
+        document.getElementById('open-account-wizard')?.addEventListener('click', openAccountWizard);
+        document.getElementById('open-account-wizard-accounts')?.addEventListener('click', openAccountWizard);
+        document.getElementById('close-account-wizard')?.addEventListener('click', closeAccountWizard);
+        document.getElementById('account-wizard')?.addEventListener('click', event => {{
+          if (event.target.id === 'account-wizard') closeAccountWizard();
+        }});
+        document.getElementById('wizard-provider')?.addEventListener('change', fillProviderHints);
+        document.getElementById('wizard-submit')?.addEventListener('click', async () => {{
+          try {{
+            const regionPlan = document.getElementById('wizard-region-plan').value.split('/').map(item => item.trim());
+            const payload = {{
+              provider_id: document.getElementById('wizard-provider').value,
+              account_id: document.getElementById('wizard-account-id').value || null,
+              label: document.getElementById('wizard-label').value || document.getElementById('wizard-provider').value + ' 账号',
+              provider_base_url: document.getElementById('wizard-base-url').value || null,
+              provider_config: document.getElementById('wizard-provider-config').value.trim() ? JSON.parse(document.getElementById('wizard-provider-config').value) : {{}},
+              auth_method: document.getElementById('wizard-auth-method').value,
+              credential_value: document.getElementById('wizard-credential').value,
+              credential_kind: document.getElementById('wizard-auth-method').value,
+              supported_operations: parseJsonArrayField('wizard-operations'),
+              supported_provider_models: parseJsonArrayField('wizard-models'),
+              concurrency_limit: Number(document.getElementById('wizard-concurrency').value || 1),
+              region: regionPlan[0] || '',
+              plan: regionPlan[1] || '',
+              sync_capabilities: document.getElementById('wizard-sync').checked,
+              run_health_check: document.getElementById('wizard-health').checked,
+            }};
+            if (!payload.credential_value.trim()) throw new Error('请填写真实授权材料。');
+            result.textContent = '正在保存平台账号...';
+            const response = await callAdmin('/v1/admin/account-onboarding', 'POST', payload);
+            closeAccountWizard();
+            result.textContent = JSON.stringify(response, null, 2);
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        document.getElementById('bulk-import')?.addEventListener('click', async () => {{
+          try {{
+            const lines = document.getElementById('bulk-jsonl').value.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
+            const items = lines.map(line => JSON.parse(line));
+            if (!items.length) throw new Error('请至少粘贴一行真实账号 JSON。');
+            await callAdmin('/v1/admin/account-onboarding/bulk', 'POST', {{
+              provider_id: document.getElementById('bulk-provider').value,
+              auth_method: document.getElementById('bulk-auth-method').value,
+              items,
+              sync_capabilities: false,
+              run_health_check: false,
+            }});
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
         }});
         document.getElementById('create-key')?.addEventListener('click', async () => {{
           await callAdmin('/v1/admin/api-keys', 'POST', {{ user_id: document.getElementById('key-user').value, name: document.getElementById('key-name').value }});
@@ -12064,6 +12258,160 @@ def admin_compatibility_matrix(
             }
         )
     return {"object": "list", "data": rows}
+
+
+def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict[str, Any]:
+    provider = db.get(models.Provider, req.provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    if provider.id == "mock":
+        raise HTTPException(status_code=400, detail={"error": "MOCK_PROVIDER_NOT_ALLOWED"})
+    provider_config = loads(provider.base_config_json, {})
+    provider_config.update(req.provider_config or {})
+    if req.provider_base_url:
+        provider_config["base_url"] = req.provider_base_url.strip()
+    provider.base_config_json = dumps(provider_config)
+    account_id = req.account_id or new_id(f"acct_{req.provider_id}")
+    default_operations, default_models = provider_default_operations_and_models(req.provider_id)
+    supported_operations = req.supported_operations or default_operations
+    supported_provider_models = req.supported_provider_models or default_models
+    if not supported_operations or not supported_provider_models:
+        raise HTTPException(status_code=400, detail={"error": "ACCOUNT_CAPABILITIES_REQUIRED"})
+    provider.status = "active"
+
+    secret_payload = None
+    credential_ref = (req.credential_ref or "").strip()
+    if req.credential_value.strip():
+        secret_id = req.credential_secret_id or f"secret_{account_id}"
+        secret_kind = req.credential_kind if req.credential_kind in {"api_key", "bearer_token", "cookie", "custom"} else "custom"
+        secret = db.get(models.CredentialSecret, secret_id)
+        metadata = {
+            "auth_method": req.auth_method,
+            "requested_credential_kind": req.credential_kind,
+            "source": "account_onboarding_wizard",
+            "credential_ref": credential_ref,
+        }
+        if secret:
+            secret.name = f"{req.label} 鉴权"
+            secret.kind = secret_kind
+            secret.provider_id = req.provider_id
+            secret.account_id = account_id
+            secret.status = "active"
+            secret.metadata_json = dumps(metadata)
+            secret_service.update_value(secret, req.credential_value)
+        else:
+            secret = secret_service.create(
+                db,
+                secret_id=secret_id,
+                name=f"{req.label} 鉴权",
+                value=req.credential_value,
+                kind=secret_kind,
+                provider_id=req.provider_id,
+                account_id=account_id,
+                metadata=metadata,
+                status="active",
+            )
+        credential_ref = f"secret://{secret_id}"
+        secret_payload = serialize_secret(secret)
+    if not credential_ref:
+        raise HTTPException(status_code=400, detail={"error": "CREDENTIAL_VALUE_REQUIRED"})
+
+    account = db.get(models.AccountResource, account_id)
+    created = account is None
+    if account and not req.upsert:
+        raise HTTPException(status_code=409, detail={"error": "ACCOUNT_EXISTS"})
+    if not account:
+        account = models.AccountResource(id=account_id, provider_id=req.provider_id, label=req.label, credential_ref=credential_ref, supported_operations_json="[]", supported_provider_models_json="[]")
+        db.add(account)
+    account.provider_id = req.provider_id
+    account.label = req.label
+    account.credential_ref = credential_ref
+    account.supported_operations_json = dumps(supported_operations)
+    account.supported_provider_models_json = dumps(supported_provider_models)
+    account.quota_buckets_json = dumps(req.quota_buckets)
+    account.concurrency_limit = max(1, req.concurrency_limit)
+    account.region = req.region
+    account.plan = req.plan
+    account.status = req.status
+    db.commit()
+
+    sync_result: dict[str, Any] | None = None
+    if req.sync_capabilities:
+        try:
+            sync_result = capability_service.sync_remote(db, provider)
+            if sync_result.get("status") != "ok":
+                provider.status = "active"
+                db.commit()
+        except Exception as exc:
+            provider.status = "active"
+            db.commit()
+            sync_result = {"status": "failed", "error": type(exc).__name__, "message": str(exc)}
+
+    health_result: dict[str, Any] | None = None
+    if req.run_health_check:
+        try:
+            health_result = run_provider_health_check_preserve_active(db, provider)
+        except Exception as exc:
+            provider.status = "active"
+            db.commit()
+            health_result = {"status": "failed", "error": type(exc).__name__, "message": str(exc)}
+
+    return {
+        "object": "account.onboarding",
+        "created": created,
+        "provider": serialize_provider(provider),
+        "account": serialize_account(account),
+        "secret": secret_payload,
+        "sync_capabilities": sync_result,
+        "health_check": health_result,
+        "next_steps": [
+            "确认账号状态为 active。",
+            "查看同步能力和健康检查结果。",
+            "到模型映射中确认该账号支持的 provider_model 已覆盖目标模型。",
+            "运行账号验收套件或真实平台外部验收。",
+        ],
+    }
+
+
+@app.post("/v1/admin/account-onboarding")
+def admin_account_onboarding(req: AccountOnboardingRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return apply_account_onboarding(db, req)
+
+
+@app.post("/v1/admin/account-onboarding/bulk")
+def admin_account_onboarding_bulk(req: AccountOnboardingBulkRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for index, item in enumerate(req.items):
+        try:
+            account_req = AccountOnboardingRequest(
+                provider_id=str(item.get("provider_id") or req.provider_id),
+                account_id=item.get("account_id") or item.get("id"),
+                label=str(item.get("label") or item.get("account_id") or item.get("id") or f"{req.provider_id}-{index + 1}"),
+                provider_base_url=item.get("provider_base_url"),
+                provider_config=item.get("provider_config") or {},
+                auth_method=str(item.get("auth_method") or req.auth_method),
+                credential_value=str(item.get("credential_value") or item.get("value") or item.get("token") or item.get("credential_ref") or ""),
+                credential_ref=item.get("credential_ref"),
+                credential_secret_id=item.get("credential_secret_id"),
+                credential_kind=str(item.get("credential_kind") or "session"),
+                supported_operations=item.get("supported_operations") or [],
+                supported_provider_models=item.get("supported_provider_models") or [],
+                quota_buckets=item.get("quota_buckets") or [],
+                concurrency_limit=int(item.get("concurrency_limit") or 1),
+                region=str(item.get("region") or ""),
+                plan=str(item.get("plan") or ""),
+                status=str(item.get("status") or "active"),
+                upsert=True,
+                sync_capabilities=req.sync_capabilities,
+                run_health_check=req.run_health_check,
+            )
+            results.append(apply_account_onboarding(db, account_req))
+        except HTTPException as exc:
+            errors.append({"index": index, "detail": exc.detail})
+        except Exception as exc:
+            errors.append({"index": index, "error": type(exc).__name__, "message": str(exc)})
+    return {"object": "account.onboarding.bulk", "created_or_updated": len(results), "failed": len(errors), "data": results, "results": results, "errors": errors}
 
 
 @app.post("/v1/admin/accounts")

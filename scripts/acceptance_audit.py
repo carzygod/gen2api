@@ -367,11 +367,40 @@ def main() -> int:
         and "试运行导入" in admin_html
         and "OAuth 会话" in admin_html
         and "查看获取教程" in admin_html
+        and "添加平台账号" in admin_html
+        and "批量导入账号" in admin_html
+        and "保存并测试" in admin_html
         and "Mock Stability Test" not in admin_html
         and "acct_mock_default" not in admin_html
         and "/v1/media-jobs" in admin_html
         and all(section in admin_html for section in ["用户", "模型", "模型映射", "资产", "回调"]),
         {"status": admin_status},
+    )
+    onboard_suffix = int(time.time() * 1000)
+    onboarding = client.json(
+        "POST",
+        "/v1/admin/account-onboarding",
+        {
+            "provider_id": "qwen",
+            "account_id": f"acct_acceptance_onboarding_{onboard_suffix}",
+            "label": "acceptance onboarding account",
+            "provider_base_url": "http://127.0.0.1:18091",
+            "provider_config": {"source": "acceptance"},
+            "auth_method": "token_reference",
+            "credential_value": "vault://acceptance/qwen/account",
+            "supported_operations": ["text_to_image"],
+            "supported_provider_models": ["qwen-image"],
+            "sync_capabilities": False,
+            "run_health_check": False,
+        },
+    )
+    audit.check(
+        "admin_account_onboarding_flow",
+        onboarding.get("object") == "account.onboarding"
+        and (onboarding.get("account") or {}).get("provider_id") == "qwen"
+        and (onboarding.get("provider") or {}).get("status") == "active"
+        and (onboarding.get("secret") or {}).get("id"),
+        onboarding,
     )
     operator_workbench = client.json("GET", "/v1/admin/operator-workbench-report")
     operator_modules = {item.get("module") for item in operator_workbench.get("modules", [])}

@@ -63,6 +63,7 @@ def main() -> None:
         assert models["data"]
         providers = assert_ok(client.get("/v1/providers", headers=headers))
         assert len(providers["data"]) >= 1
+        dashboard_suffix = int(time.time() * 1000)
         accounts = assert_ok(client.get("/v1/accounts", headers=headers))
         assert len(accounts["data"]) >= 1
         mappings = assert_ok(client.get("/v1/model-mappings", headers=headers))
@@ -85,9 +86,33 @@ def main() -> None:
         assert login_response.status_code in {302, 303} and "media2api_admin_key" in login_response.headers.get("set-cookie", "")
         admin_page = client.get("/admin")
         assert admin_page.status_code == 200 and "总览" in admin_page.text and "今日任务" in admin_page.text and "操作" in admin_page.text
-        for admin_control in ["启用 Gemini 模板", "试运行启用模板", "真实平台外部验收", "账号验收套件", "任务诊断", "验收报告", "平台接入报告", "运维工作台报告", "生产上线计划", "连接器一致性", "外部连接器预检", "连接器清单模板", "系统要求报告", "最终验收矩阵", "交付包", "租约自检", "停滞任务恢复测试", "恢复停滞任务", "资产存储测试", "故障转移自检", "就绪检查", "保存鉴权", "真实平台合同套件", "同步 Gemini 能力", "配置快照", "导出配置", "试运行导入", "OAuth 会话", "查看获取教程"]:
+        for admin_control in ["启用 Gemini 模板", "试运行启用模板", "真实平台外部验收", "账号验收套件", "任务诊断", "验收报告", "平台接入报告", "运维工作台报告", "生产上线计划", "连接器一致性", "外部连接器预检", "连接器清单模板", "系统要求报告", "最终验收矩阵", "交付包", "租约自检", "停滞任务恢复测试", "恢复停滞任务", "资产存储测试", "故障转移自检", "就绪检查", "添加平台账号", "批量导入账号", "真实平台合同套件", "同步 Gemini 能力", "配置快照", "导出配置", "试运行导入", "OAuth 会话", "查看获取教程"]:
             assert admin_control in admin_page.text, admin_control
+        for admin_dom in ["wizard-base-url", "wizard-provider-config", "wizard-submit", "/v1/admin/account-onboarding", "/v1/admin/account-onboarding/bulk"]:
+            assert admin_dom in admin_page.text, admin_dom
         assert "Mock Stability Test" not in admin_page.text and "acct_mock_default" not in admin_page.text
+        onboarding_account_id = f"acct_dashboard_onboarding_{dashboard_suffix}"
+        onboarding_result = assert_ok(
+            client.post(
+                "/v1/admin/account-onboarding",
+                headers=headers,
+                json={
+                    "provider_id": "gemini",
+                    "account_id": onboarding_account_id,
+                    "label": "dashboard onboarding smoke",
+                    "provider_base_url": "http://127.0.0.1:18091",
+                    "provider_config": {"source": "smoke"},
+                    "auth_method": "token_reference",
+                    "credential_value": "vault://smoke/gemini/account",
+                    "supported_operations": ["text_to_image"],
+                    "supported_provider_models": ["nano-banana-pro"],
+                    "sync_capabilities": False,
+                    "run_health_check": False,
+                },
+            )
+        )
+        assert onboarding_result["object"] == "account.onboarding" and onboarding_result["account"]["id"] == onboarding_account_id, onboarding_result
+        assert onboarding_result["account"]["provider_id"] == "gemini" and onboarding_result["provider"]["status"] == "active", onboarding_result
         operator_workbench = assert_ok(client.get("/v1/admin/operator-workbench-report", headers=headers))
         assert operator_workbench["object"] == "media2api.operator_workbench_report", operator_workbench
         assert operator_workbench["summary"]["required_missing_routes"] == 0, operator_workbench
