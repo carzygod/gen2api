@@ -88,7 +88,7 @@ def main() -> None:
         assert admin_page.status_code == 200 and "总览" in admin_page.text and "今日任务" in admin_page.text and "操作" in admin_page.text
         for admin_control in ["启用 Gemini 模板", "试运行启用模板", "真实平台外部验收", "账号验收套件", "任务诊断", "验收报告", "平台接入报告", "运维工作台报告", "生产上线计划", "连接器一致性", "外部连接器预检", "连接器清单模板", "系统要求报告", "最终验收矩阵", "交付包", "租约自检", "停滞任务恢复测试", "恢复停滞任务", "资产存储测试", "故障转移自检", "就绪检查", "添加平台账号", "批量导入账号", "真实平台合同套件", "同步 Gemini 能力", "配置快照", "导出配置", "试运行导入", "OAuth 会话", "查看获取教程"]:
             assert admin_control in admin_page.text, admin_control
-        for admin_dom in ["wizard-base-url", "wizard-provider-config", "wizard-submit", "/v1/admin/account-onboarding", "/v1/admin/account-onboarding/bulk"]:
+        for admin_dom in ["wizard-base-url", "wizard-provider-config", "wizard-submit", "oauth-provider-guide", "oauth-guide-provider", "Google OAuth 2.0 Playground", "https://developers.google.com/oauthplayground/", "https://bailian.console.aliyun.com/", "https://platform.openai.com/api-keys", "/v1/admin/account-onboarding", "/v1/admin/account-onboarding/bulk"]:
             assert admin_dom in admin_page.text, admin_dom
         assert "Mock Stability Test" not in admin_page.text and "acct_mock_default" not in admin_page.text
         onboarding_account_id = f"acct_dashboard_onboarding_{dashboard_suffix}"

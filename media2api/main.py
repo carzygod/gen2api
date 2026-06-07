@@ -8461,6 +8461,85 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }
         for item in providers
     }
+    provider_oauth_guides = {
+        "gemini": {
+            "title": "Gemini / Veo / Nano Banana",
+            "credential_type": "OAuth refresh_token 或服务端 token_reference",
+            "primary_url": "https://developers.google.com/oauthplayground/",
+            "console_url": "https://console.cloud.google.com/apis/credentials",
+            "where": "打开 Google OAuth 2.0 Playground。右上角设置里勾选 Use your own OAuth credentials，填入 Google Cloud 里的 OAuth Client ID / Client Secret；授权后在 Step 2 点击 Exchange authorization code for tokens，复制返回 JSON 里的 refresh_token。",
+            "paste": '{"refresh_token":"...","client_id":"...","client_secret":"...","token_uri":"https://oauth2.googleapis.com/token"}',
+            "connector": "如果你已经有 Gemini 连接器，推荐只粘贴连接器保存后的 vault:// 或 secret:// 引用，避免在页面长期保存明文 refresh_token。",
+        },
+        "qwen": {
+            "title": "千问 / Qwen / 通义百炼",
+            "credential_type": "API Key，不是 refresh_token",
+            "primary_url": "https://bailian.console.aliyun.com/",
+            "console_url": "https://www.alibabacloud.com/help/en/model-studio/get-api-key",
+            "where": "进入阿里云百炼 Model Studio 控制台，在 API Key 管理页创建或复制 API Key。Qwen 常规接入没有公开 OAuth refresh_token 获取页。",
+            "paste": '{"api_key":"sk-...","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1"}',
+            "connector": "如果通过账号池连接器托管，把 API Key 写入 Vault，然后在这里粘贴 vault://providers/qwen/acct_01。",
+        },
+        "openai_image": {
+            "title": "OpenAI 图像",
+            "credential_type": "API Key，不是 refresh_token",
+            "primary_url": "https://platform.openai.com/api-keys",
+            "console_url": "https://platform.openai.com/docs/api-reference/authentication/keys",
+            "where": "进入 OpenAI API Keys 页面创建 Project API Key。OpenAI 官方 API 调用使用 API Key，不需要 OAuth refresh_token。",
+            "paste": '{"api_key":"sk-proj-...","base_url":"https://api.openai.com/v1"}',
+            "connector": "生产环境建议填 env://OPENAI_API_KEY 或 secret://openai/image，而不是把明文 key 留在页面。",
+        },
+        "kling": {
+            "title": "可灵 / Kling",
+            "credential_type": "连接器 token_reference",
+            "primary_url": "https://app.klingai.com/",
+            "console_url": "",
+            "where": "可灵网页端没有面向本系统的公开 refresh_token 领取页。先在你自己的可灵账号池连接器里完成授权，连接器应输出 token_reference、vault:// 或 secret://。",
+            "paste": '{"credential_ref":"vault://providers/kling/acct_01","account":"acct_kling_01"}',
+            "connector": "这里填写你的可灵连接器 Base URL，例如 http://127.0.0.1:9001；授权材料填写连接器输出的引用。",
+        },
+        "jimeng": {
+            "title": "即梦 / Seedream / Seedance",
+            "credential_type": "连接器 token_reference",
+            "primary_url": "https://jimeng.jianying.com/",
+            "console_url": "",
+            "where": "即梦网页端没有公开给第三方 API 网关使用的 refresh_token 领取页。先在你自己的即梦连接器里完成账号授权，拿连接器返回的 token_reference 或密钥库引用。",
+            "paste": '{"credential_ref":"vault://providers/jimeng/acct_01","account":"acct_jimeng_01"}',
+            "connector": "这里填写即梦连接器 Base URL；不要把浏览器页面里的临时验证码、一次性 token 当作长期凭据。",
+        },
+        "grok": {
+            "title": "Grok Imagine",
+            "credential_type": "连接器 token_reference",
+            "primary_url": "https://grok.com/",
+            "console_url": "",
+            "where": "Grok 网页端没有公开的 refresh_token 获取页。用你自己的 Grok 连接器完成账号授权，再把连接器保存后的 token_reference 粘贴进来。",
+            "paste": '{"credential_ref":"vault://providers/grok/acct_01","account":"acct_grok_01"}',
+            "connector": "这里填写 Grok 连接器 Base URL；系统只保存引用并绑定账号池。",
+        },
+        "pollinations": {
+            "title": "Pollinations",
+            "credential_type": "API Key 或公开额度引用",
+            "primary_url": "https://auth.pollinations.ai/",
+            "console_url": "https://pollinations.ai/",
+            "where": "如果你的 Pollinations 账号或聚合器提供 key，在对应控制台复制 key；如果是公开额度或内部连接器，粘贴连接器返回的引用。",
+            "paste": '{"api_key":"..."} 或 {"credential_ref":"vault://providers/pollinations/acct_01"}',
+            "connector": "支持直接保存 key，也支持保存聚合连接器返回的 vault:// 引用。",
+        },
+    }
+    default_oauth_guide = {
+        "title": "通用第三方连接器",
+        "credential_type": "token_reference / secret 引用",
+        "primary_url": "",
+        "console_url": "",
+        "where": "如果该平台没有官方 API Key 或公开 OAuth refresh_token 页面，就先在你自己的连接器里完成授权，然后复制连接器返回的 token_reference、vault:// 或 secret://。",
+        "paste": '{"credential_ref":"vault://providers/{provider}/acct_01"}',
+        "connector": "连接器 Base URL 填你自己部署的平台代理地址；授权材料只填可复用的托管引用。",
+    }
+    for provider_id, guide in provider_oauth_guides.items():
+        if provider_id in provider_hint_payload:
+            provider_hint_payload[provider_id]["oauth"] = guide
+    for provider_id in provider_hint_payload:
+        provider_hint_payload[provider_id].setdefault("oauth", {**default_oauth_guide, "paste": default_oauth_guide["paste"].replace("{provider}", provider_id)})
 
     def pill(value: Any) -> str:
         raw_value = "" if value is None else str(value)
@@ -8610,6 +8689,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .modal-backdrop {{ display:none; position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.62); backdrop-filter:blur(12px); place-items:center; padding:18px; }}
         .modal-backdrop.open {{ display:grid; }}
         .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:22px; background:linear-gradient(145deg, rgba(32,34,40,.96), rgba(8,9,12,.96)); box-shadow:22px 22px 60px rgba(0,0,0,.58), -12px -12px 30px rgba(255,255,255,.035); padding:22px; }}
+        .modal.wide {{ width:min(980px, 100%); }}
+        .guide-card {{ margin-top:12px; padding:14px; border:1px solid rgba(255,255,255,.09); border-radius:16px; background:rgba(255,255,255,.045); }}
+        .guide-grid {{ display:grid; grid-template-columns:150px 1fr; gap:8px 12px; align-items:start; font-size:13px; line-height:1.55; }}
+        .guide-grid b {{ color:#ffffff; }}
+        .guide-grid span {{ color:#cfd4dc; }}
+        .guide-grid a {{ color:#ffffff; text-decoration:underline; text-underline-offset:3px; word-break:break-all; }}
+        .guide-json {{ margin-top:10px; min-height:0; max-height:132px; font-size:12px; }}
         .steps {{ margin:0; padding-left:20px; color:#e7eaf0; line-height:1.7; }}
         code {{ color:#fff; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.08); border-radius:7px; padding:1px 5px; }}
         @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline {{ grid-template-columns:1fr; }} main {{ padding:16px; }} }}
@@ -8642,6 +8728,16 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           </section>
 
           <section id="tab-oauth" class="tab">
+            <div class="panel">
+              <h2>OAuth / 凭据获取位置速查</h2>
+              <p class="note">先选平台。这里会明确告诉你：有没有 refresh_token、要打开哪个链接、应该复制哪个字段、最终粘贴到本系统的什么位置。</p>
+              <div class="formline">
+                <div><label>平台</label><select id="oauth-guide-provider">{provider_options}</select></div>
+                <div><label>推荐凭据类型</label><input id="oauth-guide-type" readonly /></div>
+                <button class="primary" type="button" id="open-account-wizard-from-guide">按此平台添加账号</button>
+              </div>
+              <div class="guide-card" id="oauth-provider-guide"></div>
+            </div>
             <div class="panel"><h2>OAuth 会话</h2><p class="note">这里是账号鉴权控制台：选择平台，粘贴真实连接器或密钥库返回的授权材料，系统会保存凭据、创建账号、绑定能力，并可立即同步能力和健康检查。</p><div class="ops"><button class="primary" type="button" id="open-account-wizard">添加平台账号</button><button class="op" type="button" id="open-oauth-guide">查看获取教程</button></div><table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
             <div class="panel"><h2>批量导入账号</h2><p class="note">每行一个 JSON 对象，字段支持 account_id、label、credential_value、credential_ref、concurrency_limit、region、plan。系统会逐行执行真实账号接入流程。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>鉴权方式</label><select id="bulk-auth-method"><option value="secret_json">密钥 JSON</option><option value="token_reference">令牌引用</option><option value="api_key">API Key</option><option value="oauth_result">OAuth 返回结果</option></select></div><button class="primary" type="button" id="bulk-import">批量导入</button></div><label style="margin-top:10px">账号 JSONL</label><textarea id="bulk-jsonl" placeholder="每行粘贴一个真实账号 JSON"></textarea></div>
           </section>
@@ -8659,10 +8755,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         </main>
       </div>
       <div class="modal-backdrop" id="account-wizard">
-        <div class="modal">
+        <div class="modal wide">
           <h2>添加平台账号</h2>
           <p class="note">按步骤接入真实账号：选择平台，选择鉴权方式，填写账号信息，粘贴授权材料，保存后系统会创建凭据和账号，并按需同步能力与健康检查。</p>
           <p class="note" id="wizard-provider-help"></p>
+          <div class="guide-card" id="wizard-oauth-guide-card"></div>
           <div class="formline">
             <div><label>平台</label><select id="wizard-provider">{provider_options}</select></div>
             <div><label>鉴权方式</label><select id="wizard-auth-method"><option value="secret_json">密钥 JSON</option><option value="token_reference">令牌引用</option><option value="api_key">API Key</option><option value="oauth_result">OAuth 返回结果</option></select></div>
@@ -8695,6 +8792,15 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
       <div class="modal-backdrop" id="oauth-guide">
         <div class="modal">
           <h2>如何获取密钥 JSON / 令牌引用</h2>
+          <div class="guide-card">
+            <div class="guide-grid">
+              <b>Gemini / Veo</b><span>打开 <a href="https://developers.google.com/oauthplayground/" target="_blank" rel="noreferrer">Google OAuth 2.0 Playground</a>，授权后在 Step 2 复制 <code>refresh_token</code>。也可以只填连接器输出的 <code>vault://...</code>。</span>
+              <b>Qwen / 千问</b><span>打开 <a href="https://bailian.console.aliyun.com/" target="_blank" rel="noreferrer">阿里云百炼控制台</a> 获取 API Key。这里没有公开 refresh_token 页面。</span>
+              <b>OpenAI 图像</b><span>打开 <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">OpenAI API Keys</a> 获取 API Key。这里没有 refresh_token。</span>
+              <b>可灵 / 即梦 / Grok</b><span>网页端没有给本系统直接使用的公开 refresh_token 获取页。先在你自己的账号池连接器里授权，再粘贴连接器返回的 <code>token_reference</code>、<code>vault://...</code> 或 <code>secret://...</code>。</span>
+              <b>粘贴位置</b><span>回到“添加平台账号”，把真实凭据 JSON 或引用粘贴到“授权材料”，把你的连接器地址填到“连接器 Base URL”。</span>
+            </div>
+          </div>
           <ol class="steps">
             <li>先确定平台：例如 Gemini、可灵、即梦、Qwen、Grok、Pollinations，确认你已经拥有该平台账号或授权的第三方连接器账号。</li>
             <li>在对应的真实连接器服务里完成 OAuth 登录或账号授权。连接器应返回一个可保存的引用，而不是把明文浏览器会话散落在页面里。</li>
@@ -8710,6 +8816,39 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
       <script>
         const providerHints = {json.dumps(provider_hint_payload, ensure_ascii=False)};
         const result = document.getElementById('result');
+        function escapeHtml(value) {{
+          return String(value || '').replace(/[&<>"']/g, char => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
+        }}
+        function guideHtml(providerId) {{
+          const hint = providerHints[providerId] || {{}};
+          const guide = hint.oauth || {{}};
+          const links = [
+            guide.primary_url ? `<a href="${{escapeHtml(guide.primary_url)}}" target="_blank" rel="noreferrer">打开获取入口</a>` : '无公开获取入口',
+            guide.console_url ? `<a href="${{escapeHtml(guide.console_url)}}" target="_blank" rel="noreferrer">官方说明 / 控制台</a>` : '',
+          ].filter(Boolean).join(' · ');
+          return `
+            <div class="guide-grid">
+              <b>平台</b><span>${{escapeHtml(guide.title || providerId)}}</span>
+              <b>要拿什么</b><span>${{escapeHtml(guide.credential_type || 'token_reference / secret 引用')}}</span>
+              <b>去哪里拿</b><span>${{links}}</span>
+              <b>具体步骤</b><span>${{escapeHtml(guide.where || '')}}</span>
+              <b>填到哪里</b><span>打开“添加平台账号”，把下面示例里的真实字段填入“授权材料”；连接器地址填入“连接器 Base URL”。</span>
+              <b>连接器建议</b><span>${{escapeHtml(guide.connector || '')}}</span>
+            </div>
+            <pre class="guide-json">${{escapeHtml(guide.paste || '')}}</pre>
+          `;
+        }}
+        function renderOAuthGuide(providerId) {{
+          const provider = providerId || document.getElementById('oauth-guide-provider')?.value || document.getElementById('wizard-provider')?.value;
+          const hint = providerHints[provider] || {{}};
+          const guide = hint.oauth || {{}};
+          const quickCard = document.getElementById('oauth-provider-guide');
+          const wizardCard = document.getElementById('wizard-oauth-guide-card');
+          if (quickCard) quickCard.innerHTML = guideHtml(provider);
+          if (wizardCard) wizardCard.innerHTML = guideHtml(provider);
+          const typeInput = document.getElementById('oauth-guide-type');
+          if (typeInput) typeInput.value = guide.credential_type || 'token_reference / secret 引用';
+        }}
         document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {{
           document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
           document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
@@ -8745,6 +8884,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (event.target.id === 'oauth-guide') event.currentTarget.classList.remove('open');
         }});
         function openAccountWizard() {{
+          const quickProvider = document.getElementById('oauth-guide-provider')?.value;
+          if (quickProvider && document.getElementById('wizard-provider')) document.getElementById('wizard-provider').value = quickProvider;
           document.getElementById('account-wizard')?.classList.add('open');
           fillProviderHints();
         }}
@@ -8764,7 +8905,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           document.getElementById('wizard-provider-help').textContent = hint.help || '';
           document.getElementById('wizard-operations').value = JSON.stringify(hint.operations || [], null, 2);
           document.getElementById('wizard-models').value = JSON.stringify(hint.models || [], null, 2);
+          renderOAuthGuide(providerId);
         }}
+        document.getElementById('oauth-guide-provider')?.addEventListener('change', event => {{
+          renderOAuthGuide(event.target.value);
+          if (document.getElementById('wizard-provider')) document.getElementById('wizard-provider').value = event.target.value;
+        }});
+        document.getElementById('open-account-wizard-from-guide')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard-accounts')?.addEventListener('click', openAccountWizard);
         document.getElementById('close-account-wizard')?.addEventListener('click', closeAccountWizard);
@@ -8772,6 +8919,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (event.target.id === 'account-wizard') closeAccountWizard();
         }});
         document.getElementById('wizard-provider')?.addEventListener('change', fillProviderHints);
+        renderOAuthGuide();
         document.getElementById('wizard-submit')?.addEventListener('click', async () => {{
           try {{
             const regionPlan = document.getElementById('wizard-region-plan').value.split('/').map(item => item.trim());

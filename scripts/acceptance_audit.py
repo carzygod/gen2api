@@ -370,6 +370,13 @@ def main() -> int:
         and "添加平台账号" in admin_html
         and "批量导入账号" in admin_html
         and "保存并测试" in admin_html
+        and "OAuth / 凭据获取位置速查" in admin_html
+        and "Google OAuth 2.0 Playground" in admin_html
+        and "https://developers.google.com/oauthplayground/" in admin_html
+        and "https://bailian.console.aliyun.com/" in admin_html
+        and "https://platform.openai.com/api-keys" in admin_html
+        and "refresh_token" in admin_html
+        and "token_reference" in admin_html
         and "Mock Stability Test" not in admin_html
         and "acct_mock_default" not in admin_html
         and "/v1/media-jobs" in admin_html
