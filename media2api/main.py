@@ -8525,21 +8525,95 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             "paste": '{"api_key":"..."} 或 {"credential_ref":"vault://providers/pollinations/acct_01"}',
             "connector": "支持直接保存 key，也支持保存聚合连接器返回的 vault:// 引用。",
         },
+        "openrouter_image": {
+            "title": "OpenRouter 图像聚合",
+            "credential_type": "API Key",
+            "primary_url": "https://openrouter.ai/settings/keys",
+            "console_url": "https://openrouter.ai/docs",
+            "where": "进入 OpenRouter Settings / Keys 页面创建 API Key。复制 key 后，把 base_url 配为 https://openrouter.ai/api/v1，并在模型列表里确认目标图像模型可用。",
+            "paste": '{"api_key":"sk-or-...","base_url":"https://openrouter.ai/api/v1"}',
+            "connector": "生产环境建议把 OpenRouter key 写入 Vault，在本页粘贴 vault://providers/openrouter_image/acct_01。",
+        },
+        "fal_replicate": {
+            "title": "fal / Replicate 聚合",
+            "credential_type": "API Key 或连接器 token_reference",
+            "primary_url": "https://fal.ai/dashboard/keys",
+            "console_url": "https://replicate.com/account/api-tokens",
+            "where": "fal 账号在 Dashboard / Keys 创建 key；Replicate 账号在 Account / API tokens 创建 token。你的 fal_replicate 连接器需要明确使用哪一家上游，并把对应 key 保存成引用。",
+            "paste": '{"credential_ref":"vault://providers/fal_replicate/acct_01","upstream":"fal"}',
+            "connector": "连接器 Base URL 填你的 fal_replicate 适配器地址；授权材料填 fal 或 Replicate key 的托管引用。",
+        },
+        "flux_stability": {
+            "title": "Flux / Stability 图像聚合",
+            "credential_type": "API Key 或连接器 token_reference",
+            "primary_url": "https://platform.stability.ai/account/keys",
+            "console_url": "https://platform.stability.ai/docs/api-reference",
+            "where": "Stability 平台在 Account / API keys 创建 key。Flux 来源如果走你自己的聚合连接器，则在连接器后台保存 BFL、Stability 或其它上游 key，再复制 token_reference。",
+            "paste": '{"credential_ref":"vault://providers/flux_stability/acct_01","upstream":"stability"}',
+            "connector": "连接器 Base URL 填 flux_stability 适配器地址；授权材料填 key 的 Vault/Secret 引用。",
+        },
+        "luma": {
+            "title": "Luma",
+            "credential_type": "连接器 token_reference",
+            "primary_url": "https://lumalabs.ai/",
+            "console_url": "",
+            "where": "Luma 选项走你部署的 Luma 账号池连接器。进入该连接器的账号管理页，为 Luma 账号完成授权，然后复制连接器返回的 token_reference。",
+            "paste": '{"credential_ref":"vault://providers/luma/acct_01","account":"acct_luma_01"}',
+            "connector": "连接器 Base URL 填 Luma 连接器地址；本系统保存连接器引用并绑定账号池。",
+        },
+        "runway": {
+            "title": "Runway",
+            "credential_type": "API Key 或连接器 token_reference",
+            "primary_url": "https://dev.runwayml.com/",
+            "console_url": "https://docs.dev.runwayml.com/",
+            "where": "Runway 开发者平台使用 API Key；网页账号池模式使用你自己的 Runway 连接器。官方 API Key 从 dev.runwayml.com 的开发者控制台获取，连接器模式从连接器后台复制 token_reference。",
+            "paste": '{"credential_ref":"vault://providers/runway/acct_01","mode":"connector"}',
+            "connector": "连接器 Base URL 填 Runway 连接器地址；授权材料填 API Key 托管引用或连接器 token_reference。",
+        },
+        "midjourney": {
+            "title": "Midjourney",
+            "credential_type": "连接器 token_reference",
+            "primary_url": "https://www.midjourney.com/",
+            "console_url": "",
+            "where": "Midjourney 选项走你自己的任务通道连接器。进入 Midjourney 连接器后台，绑定账号或频道资源后复制 token_reference。",
+            "paste": '{"credential_ref":"vault://providers/midjourney/acct_01","account":"acct_midjourney_01"}',
+            "connector": "连接器 Base URL 填 Midjourney 任务通道连接器地址；授权材料填连接器输出的引用。",
+        },
+        "seedream_proxy": {
+            "title": "Seedream Proxy",
+            "credential_type": "连接器 token_reference",
+            "primary_url": "https://jimeng.jianying.com/",
+            "console_url": "",
+            "where": "Seedream Proxy 对应 Seedream/即梦代理连接器。进入该连接器后台完成账号授权，复制 vault://providers/seedream_proxy/acct_01 这类账号引用。",
+            "paste": '{"credential_ref":"vault://providers/seedream_proxy/acct_01","account":"acct_seedream_01"}',
+            "connector": "连接器 Base URL 填 Seedream Proxy 地址；授权材料填连接器返回的账号引用。",
+        },
+        "amux_qwen": {
+            "title": "AMux Qwen 聚合",
+            "credential_type": "API Key 或连接器 token_reference",
+            "primary_url": "https://bailian.console.aliyun.com/",
+            "console_url": "https://www.alibabacloud.com/help/en/model-studio/get-api-key",
+            "where": "AMux Qwen 选项面向 Qwen 聚合连接器。先在阿里云百炼控制台创建 API Key，再到 AMux Qwen 连接器后台保存该 key，最后复制连接器返回的 token_reference。",
+            "paste": '{"credential_ref":"vault://providers/amux_qwen/acct_01","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1"}',
+            "connector": "连接器 Base URL 填 AMux Qwen 适配器地址；授权材料填百炼 API Key 的托管引用。",
+        },
     }
-    default_oauth_guide = {
-        "title": "通用第三方连接器",
-        "credential_type": "token_reference / secret 引用",
-        "primary_url": "",
-        "console_url": "",
-        "where": "如果该平台没有官方 API Key 或公开 OAuth refresh_token 页面，就先在你自己的连接器里完成授权，然后复制连接器返回的 token_reference、vault:// 或 secret://。",
-        "paste": '{"credential_ref":"vault://providers/{provider}/acct_01"}',
-        "connector": "连接器 Base URL 填你自己部署的平台代理地址；授权材料只填可复用的托管引用。",
-    }
+    def connector_oauth_guide(provider: models.Provider) -> dict[str, str]:
+        title = f"{provider.name} ({provider.id})"
+        return {
+            "title": title,
+            "credential_type": f"{provider.id} 连接器 token_reference",
+            "primary_url": "",
+            "console_url": "",
+            "where": f"当前选择的是 {title}。打开你部署的 {provider.id} 连接器后台，在账号管理页添加或选择该平台账号，完成授权后复制连接器返回的 token_reference、vault://providers/{provider.id}/acct_01 或 secret://{provider.id}/acct_01。",
+            "paste": f'{{"credential_ref":"vault://providers/{provider.id}/acct_01","account":"acct_{provider.id}_01"}}',
+            "connector": f"连接器 Base URL 填 {provider.id} 适配器的服务地址；授权材料只填写该连接器生成的账号引用。",
+        }
     for provider_id, guide in provider_oauth_guides.items():
         if provider_id in provider_hint_payload:
             provider_hint_payload[provider_id]["oauth"] = guide
-    for provider_id in provider_hint_payload:
-        provider_hint_payload[provider_id].setdefault("oauth", {**default_oauth_guide, "paste": default_oauth_guide["paste"].replace("{provider}", provider_id)})
+    for provider in providers:
+        provider_hint_payload[provider.id].setdefault("oauth", connector_oauth_guide(provider))
 
     def pill(value: Any) -> str:
         raw_value = "" if value is None else str(value)
@@ -8823,7 +8897,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const hint = providerHints[providerId] || {{}};
           const guide = hint.oauth || {{}};
           const links = [
-            guide.primary_url ? `<a href="${{escapeHtml(guide.primary_url)}}" target="_blank" rel="noreferrer">打开获取入口</a>` : '无公开获取入口',
+            guide.primary_url ? `<a href="${{escapeHtml(guide.primary_url)}}" target="_blank" rel="noreferrer">打开获取入口</a>` : '使用该平台连接器后台',
             guide.console_url ? `<a href="${{escapeHtml(guide.console_url)}}" target="_blank" rel="noreferrer">官方说明 / 控制台</a>` : '',
           ].filter(Boolean).join(' · ');
           return `

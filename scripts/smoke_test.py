@@ -90,6 +90,8 @@ def main() -> None:
             assert admin_control in admin_page.text, admin_control
         for admin_dom in ["wizard-base-url", "wizard-provider-config", "wizard-submit", "oauth-provider-guide", "oauth-guide-provider", "Google OAuth 2.0 Playground", "https://developers.google.com/oauthplayground/", "https://bailian.console.aliyun.com/", "https://platform.openai.com/api-keys", "/v1/admin/account-onboarding", "/v1/admin/account-onboarding/bulk"]:
             assert admin_dom in admin_page.text, admin_dom
+        for banned_oauth_copy in ["如果该平台没有官方 API Key 或公开 OAuth", "通用第三方连接器", "无公开获取入口"]:
+            assert banned_oauth_copy not in admin_page.text, banned_oauth_copy
         assert "Mock Stability Test" not in admin_page.text and "acct_mock_default" not in admin_page.text
         onboarding_account_id = f"acct_dashboard_onboarding_{dashboard_suffix}"
         onboarding_result = assert_ok(

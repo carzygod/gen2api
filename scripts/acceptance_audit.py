@@ -377,6 +377,10 @@ def main() -> int:
         and "https://platform.openai.com/api-keys" in admin_html
         and "refresh_token" in admin_html
         and "token_reference" in admin_html
+        and "使用该平台连接器后台" in admin_html
+        and "如果该平台没有官方 API Key 或公开 OAuth" not in admin_html
+        and "通用第三方连接器" not in admin_html
+        and "无公开获取入口" not in admin_html
         and "Mock Stability Test" not in admin_html
         and "acct_mock_default" not in admin_html
         and "/v1/media-jobs" in admin_html
