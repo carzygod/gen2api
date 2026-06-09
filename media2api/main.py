@@ -25,19 +25,22 @@ from sqlalchemy import case, func, or_, text
 from sqlalchemy.orm import Session
 
 from . import models
-from .catalog import TARGET_MODEL_TABLE, seed_defaults
+from .catalog import LOGICAL_MODELS, TARGET_MODEL_TABLE, seed_defaults
 from .config import settings
 from .database import SessionLocal, get_db, init_db
 from .security import AuthContext, extract_api_key, hash_api_key, is_admin_user, require_admin, require_auth
 from .services_alerts import AlertService
 from .services_assets import AssetService
 from .services_capabilities import ProviderCapabilityService
+from .services_account_import import AccountSubscriptionImportService, sanitize_import_plan
 from .services_contracts import ProviderContractService
+from .services_connector_registry import ACCOUNT_RESOURCE_TYPES, ConnectorRegistryService, PLATFORM_INPUT_REQUIREMENTS, REFERENCE_AUTH_TYPES
 from .services_core import ACTIVE_ATTEMPT_STATUSES, JobRuntime, UNLEASED_STALLED_JOB_STATUSES, account_credential_available, quota_remaining
 from .services_governance import GovernanceService
+from .services_oauth_sessions import ConnectorOAuthSessionService
 from .services_secrets import SecretService, serialize_secret
 from .services_webhooks import WebhookService
-from .providers import ProviderContext, get_provider
+from .providers import ASSET_PAYLOAD_FIELDS, CONNECTOR_REFERENCE_PREFIXES, DEFAULT_OUTPUT_PATHS, DEFAULT_STATUS_PATHS, DEFAULT_TASK_ID_PATHS, ProviderContext, connector_reference_only, get_provider
 from .provider_templates import PROVIDER_TEMPLATES, template_as_dict
 from .utils import DomainError, dumps, is_sensitive_key, loads, new_id
 
@@ -50,9 +53,12 @@ contract_service = ProviderContractService()
 governance_service = GovernanceService()
 secret_service = SecretService()
 webhook_service = WebhookService()
+connector_registry_service = ConnectorRegistryService()
+account_import_service = AccountSubscriptionImportService(REFERENCE_AUTH_TYPES)
+oauth_session_service = ConnectorOAuthSessionService()
 
 EXTERNAL_ACCEPTANCE_REFERENCE_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAAD09D8LAAAAG0lEQVR4nGNkaGD4z0BFwMRAiikGqmgqBgBT9AEc5gYPmwAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNkaGAAAAACAAH0nWNTAAAAAElFTkSuQmCC"
 )
 ASSET_STORAGE_SELF_TEST_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKUlEQVR4nGNkYPjPQC5gIlvnqOZRzaOaRzWPal7QMRg1g9EwYBgAq7cCP7wf1QQAAAAASUVORK5CYII="
@@ -534,9 +540,11 @@ class AccountAdminRequest(BaseModel):
     id: str | None = None
     provider_id: str
     label: str
-    credential_ref: str = "env://MEDIA2API_CONNECTOR_KEY"
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    credential_ref: str = "agent://providers/manual/acct_01"
     credential_secret_id: str | None = None
-    credential_kind: str = "custom"
+    credential_kind: str = "agent_provider"
     supported_operations: list[str]
     supported_provider_models: list[str]
     quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
@@ -548,6 +556,8 @@ class AccountAdminRequest(BaseModel):
 
 class AccountPatchRequest(BaseModel):
     label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] | None = None
     credential_ref: str | None = None
     credential_secret_id: str | None = None
     credential_kind: str = "custom"
@@ -566,10 +576,12 @@ class AccountOnboardingRequest(BaseModel):
     provider_id: str
     account_id: str | None = None
     label: str
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
     provider_base_url: str | None = None
     provider_config: dict[str, Any] = Field(default_factory=dict)
-    auth_method: str = "token_reference"
-    credential_value: str
+    auth_method: str = "agent_provider_credential"
+    credential_value: Any = ""
     credential_ref: str | None = None
     credential_secret_id: str | None = None
     credential_kind: str = "session"
@@ -581,24 +593,335 @@ class AccountOnboardingRequest(BaseModel):
     plan: str = ""
     status: str = "active"
     upsert: bool = True
+    auto_create_mappings: bool = True
     sync_capabilities: bool = True
     run_health_check: bool = True
 
 
 class AccountOnboardingBulkRequest(BaseModel):
     provider_id: str
-    auth_method: str = "token_reference"
+    auth_method: str = "agent_provider_credential"
     items: list[dict[str, Any]]
     sync_capabilities: bool = False
     run_health_check: bool = False
+
+
+class AccountSubscriptionImportRequest(BaseModel):
+    provider_id: str
+    auth_method: str = "agent_provider_credential"
+    subscription_url: str | None = None
+    content: str | None = None
+    accounts: list[dict[str, Any]] = Field(default_factory=list)
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    provider_base_url: str | None = None
+    provider_config: dict[str, Any] = Field(default_factory=dict)
+    supported_operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    region: str = ""
+    plan: str = ""
+    status: str = "active"
+    upsert: bool = True
+    auto_create_mappings: bool = True
+    sync_capabilities: bool = False
+    run_health_check: bool = False
+    fetch_timeout_seconds: int = 15
+    max_items: int = 200
+
+
+class AccountSubscriptionSourceRequest(BaseModel):
+    id: str | None = None
+    provider_id: str
+    name: str | None = None
+    auth_method: str = "agent_provider_credential"
+    subscription_url: str | None = None
+    content: str | None = None
+    persist_content: bool = False
+    provider_base_url: str | None = None
+    provider_config: dict[str, Any] = Field(default_factory=dict)
+    supported_operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    region: str = ""
+    plan: str = ""
+    status: str = "active"
+    max_items: int = 200
+    fetch_timeout_seconds: int = 15
+    sync_capabilities: bool = False
+    run_health_check: bool = False
+    sync_now: bool = False
+
+
+class AccountSubscriptionSourcePatchRequest(BaseModel):
+    name: str | None = None
+    auth_method: str | None = None
+    subscription_url: str | None = None
+    content: str | None = None
+    persist_content: bool | None = None
+    provider_base_url: str | None = None
+    provider_config: dict[str, Any] | None = None
+    supported_operations: list[str] | None = None
+    supported_provider_models: list[str] | None = None
+    quota_buckets: list[dict[str, Any]] | None = None
+    concurrency_limit: int | None = None
+    region: str | None = None
+    plan: str | None = None
+    status: str | None = None
+    max_items: int | None = None
+    fetch_timeout_seconds: int | None = None
+    sync_capabilities: bool | None = None
+    run_health_check: bool | None = None
+
+
+class AccountSubscriptionSourceSyncRequest(BaseModel):
+    content: str | None = None
+    dry_run: bool = False
+    sync_capabilities: bool | None = None
+    run_health_check: bool | None = None
+
+
+class AccountSubscriptionSourceProductionSyncRequest(BaseModel):
+    content: str | None = None
+    dry_run: bool = True
+    operations: list[str] = Field(default_factory=list)
+    sync_capabilities: bool = True
+    run_health_check: bool = True
+    run_quota_sync: bool = True
+    include_preflight: bool = True
+    run_acceptance: bool = False
+    run_samples: bool = False
+    max_samples: int = 1
+    max_accounts: int = 20
+    require_production_ready: bool = False
+    contract_run_submit: bool = False
+
+
+class ConnectorRegistryRefreshRequest(BaseModel):
+    res_repo_path: str | None = None
+
+
+class AccountOnboardingPlanRequest(BaseModel):
+    provider_id: str
+    account_id: str | None = None
+    label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    provider_base_url: str | None = None
+    auth_method: str | None = None
+    credential_ref: str | None = None
+    credential_value: str | None = None
+    credential_kind: str | None = None
+    supported_operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int | None = None
+    region: str | None = None
+    plan: str | None = None
+    sync_capabilities: bool | None = None
+    run_health_check: bool | None = None
+
+
+class ConnectorProjectBlueprintRequest(BaseModel):
+    provider_id: str | None = None
+    base_url: str | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    auth_method: str | None = None
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str | None = None
+    credential_value: str | None = None
+    status: str = "active"
+    account_status: str = "active"
+    concurrency_limit: int = 1
+    priority_offset: int = 0
+    operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    region: str = ""
+    plan: str = ""
+    subscription_url: str | None = None
+    subscription_content: str | None = None
+    persist_subscription_content: bool = False
+    create_subscription_source: bool = False
+    source_id: str | None = None
+    source_name: str | None = None
+    source_max_items: int = 200
+    sync_source_now: bool = False
+    sync_capabilities: bool = False
+    run_health_check: bool = False
+    run_quota_sync: bool = False
+    run_contract_tests: bool = False
+    contract_run_submit: bool = False
+    include_preflight: bool = True
+    apply_manifest: bool = True
+    run_production_sync: bool = False
+    production_sync_dry_run: bool = True
+    run_acceptance: bool = False
+    run_samples: bool = False
+    max_samples: int = 1
+    dry_run: bool = True
+
+
+class AccountSetupWorkflowRunRequest(BaseModel):
+    step: str = "plan"
+    project_id: str | None = None
+    base_url: str | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    auth_method: str | None = None
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str | None = None
+    credential_value: str | None = None
+    subscription_url: str | None = None
+    subscription_content: str | None = None
+    persist_subscription_content: bool = False
+    create_subscription_source: bool = False
+    source_id: str | None = None
+    source_name: str | None = None
+    operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    sync_capabilities: bool = False
+    run_health_check: bool = False
+    run_contract_tests: bool = False
+    run_quota_sync: bool = False
+    include_preflight: bool = True
+    run_acceptance: bool = False
+    run_samples: bool = False
+    max_samples: int = 1
+    dry_run: bool = True
+
+
+class AccountSetupQuickstartRequest(BaseModel):
+    provider_id: str
+    mode: str = "auto"
+    project_id: str | None = None
+    base_url: str | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    auth_method: str | None = None
+    credential_ref: str | None = None
+    credential_value: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str | None = None
+    subscription_url: str | None = None
+    subscription_content: str | None = None
+    accounts: list[dict[str, Any]] = Field(default_factory=list)
+    create_subscription_source: bool = False
+    persist_subscription_content: bool = False
+    source_id: str | None = None
+    source_name: str | None = None
+    operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    region: str = ""
+    plan: str = ""
+    status: str = "active"
+    dry_run: bool = True
+    apply_manifest: bool = True
+    auto_create_mappings: bool = True
+    sync_capabilities: bool = True
+    run_health_check: bool = True
+    run_contract_tests: bool = True
+    contract_run_submit: bool = False
+    run_quota_sync: bool = False
+    run_preflight: bool = True
+    run_acceptance: bool = False
+    run_samples: bool = False
+    max_samples: int = 1
+    max_accounts: int = 20
+
+
+ACCOUNT_SETUP_STEP_ALIASES = {
+    "oauth": "start_authorized_session",
+    "start_oauth": "start_authorized_session",
+    "authorized_session": "start_authorized_session",
+    "authorized_resource_session": "start_authorized_session",
+    "start_authorized_resource_session": "start_authorized_session",
+}
+
+
+ACCOUNT_SETUP_MODE_ALIASES = {
+    "oauth": "authorized_session",
+    "authorized_resource_session": "authorized_session",
+}
+
+
+def normalize_account_setup_step(step: str | None) -> str:
+    value = (step or "plan").strip().lower()
+    return ACCOUNT_SETUP_STEP_ALIASES.get(value, value)
+
+
+def normalize_account_setup_mode(mode: str | None) -> str:
+    value = (mode or "auto").strip().lower()
+    return ACCOUNT_SETUP_MODE_ALIASES.get(value, value)
+
+
+class ConnectorOAuthStartRequest(BaseModel):
+    provider_id: str
+    account_id: str | None = None
+    session_id: str | None = None
+    label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    provider_base_url: str | None = None
+    auth_method: str = "agent_provider_credential"
+    callback_url: str | None = None
+    oauth_start_endpoint: str | None = None
+    supported_operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    ttl_minutes: int = 30
+    dry_run: bool = False
+
+
+class ConnectorOAuthCompleteRequest(BaseModel):
+    credential_ref: str | None = None
+    credential_value: Any = None
+    credential_secret_id: str | None = None
+    connector_response: dict[str, Any] | None = None
+    status: str | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    auth_method: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    oauth_status_endpoint: str | None = None
+    oauth_status_method: str | None = None
+    create_account: bool = True
+    label: str | None = None
+    provider_base_url: str | None = None
+    supported_operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int = 1
+    region: str = ""
+    plan: str = ""
+    sync_capabilities: bool = True
+    run_health_check: bool = True
 
 
 class AccountBulkUpsertItem(BaseModel):
     id: str | None = None
     provider_id: str
     label: str
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    auth_method: str | None = None
     credential_ref: str | None = None
-    credential_value: str | None = None
+    credential_value: Any = None
     credential_secret_id: str | None = None
     credential_kind: str = "custom"
     supported_operations: list[str]
@@ -880,9 +1203,11 @@ class ProviderCapabilitySyncRequest(BaseModel):
 
 class TemplateInstallRequest(BaseModel):
     base_url: str | None = None
-    credential_ref: str = "env://MEDIA2API_CONNECTOR_KEY"
+    credential_ref: str = "agent://providers/template/acct_01"
     credential_secret_id: str | None = None
-    credential_kind: str = "custom"
+    credential_kind: str = "agent_provider"
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
     status: str = "disabled"
     account_status: str = "active"
     account_id: str | None = None
@@ -915,6 +1240,8 @@ class TemplateExternalAcceptanceRequest(TemplateActivateRequest):
 class ExternalConnectorManifestAccount(BaseModel):
     account_id: str | None = None
     account_label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
     credential_ref: str | None = None
     credential_secret_id: str | None = None
     credential_kind: str | None = None
@@ -927,9 +1254,11 @@ class ExternalConnectorManifestAccount(BaseModel):
 class ExternalConnectorManifestRequest(BaseModel):
     provider_id: str = "jimeng"
     base_url: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
     credential_ref: str | None = None
     credential_secret_id: str | None = None
-    credential_kind: str = "bearer_token"
+    credential_kind: str = "agent_provider"
     credential_value: str | None = None
     status: str = "active"
     account_status: str = "active"
@@ -1240,7 +1569,1307 @@ def _max_asset_value(value: int | None, limit: Any, error: str, asset_id: str, f
         raise HTTPException(status_code=400, detail={"error": error, "asset_id": asset_id, "field": field, "value": int(value), "limit": int(limit)})
 
 
-SAFE_CONFIG_REF_PREFIXES = ("env://", "secret://", "public://")
+SAFE_CONFIG_REF_PREFIXES = ("env://", "secret://", "public://", "vault://", "subscription://", "oauth://", "cli://", "websession://", "agent://", "mcp://", "endpoint://", "connector://")
+SAFE_ACCOUNT_REF_PREFIXES = SAFE_CONFIG_REF_PREFIXES + ("tokenref://",)
+DIRECT_ACCOUNT_REF_PREFIXES = ("secret://", "agent://")
+LEGACY_ACCOUNT_REF_PREFIXES = tuple(prefix for prefix in SAFE_ACCOUNT_REF_PREFIXES if prefix not in DIRECT_ACCOUNT_REF_PREFIXES)
+AUTH_METHOD_CREDENTIAL_KIND = {
+    "cookie_secret": "cookie",
+    "agent_provider_credential": "agent_provider",
+    "subscription_url": "subscription",
+    "oauth_reference": "oauth_reference",
+    "cli_credential_reference": "cli_credential",
+    "web_session_reference": "web_session",
+    "mcp_config_reference": "mcp_config",
+    "self_hosted_endpoint": "self_hosted_endpoint",
+    "aggregator_api_key": "custom",
+    "token_reference": "custom",
+    "secret_json": "custom",
+}
+
+
+def credential_kind_for_auth_method(auth_method: str) -> str:
+    return AUTH_METHOD_CREDENTIAL_KIND.get(auth_method, "custom")
+
+
+def infer_account_resource_type(provider_id: str, auth_method: str, requested: str | None = None) -> str:
+    requested_value = (requested or "").strip()
+    if requested_value:
+        return requested_value
+    if auth_method in {"cookie_secret", "web_session_reference"}:
+        return "web_cookie_provider"
+    if auth_method in {"agent_provider_credential", "cli_credential_reference", "mcp_config_reference", "oauth_reference"}:
+        return "agent_provider"
+    return {
+        "openai_image": "web_cookie_provider",
+        "grok": "web_cookie_provider",
+        "jimeng": "agent_provider",
+        "kling": "agent_provider",
+        "midjourney": "web_cookie_provider",
+        "seedream_proxy": "agent_provider",
+        "runway": "agent_provider",
+        "gemini": "agent_provider",
+        "qwen": "agent_provider",
+        "amux_qwen": "agent_provider",
+        "luma": "agent_provider",
+        "pollinations": "agent_provider",
+        "openrouter_image": "agent_provider",
+        "fal_replicate": "agent_provider",
+        "flux_stability": "agent_provider",
+    }.get(provider_id, "agent_provider")
+
+
+RUNTIME_BASE_URL_INPUT_NAMES = {
+    "connector_base_url",
+    "agent_runtime_endpoint",
+    "runner_endpoint",
+    "channel_base_url",
+    "sdk_runtime_endpoint",
+    "self_hosted_endpoint",
+}
+
+RUNTIME_BASE_URL_FIELD_NAMES = RUNTIME_BASE_URL_INPUT_NAMES | {
+    "provider_base_url",
+    "providerBaseUrl",
+    "connectorBaseUrl",
+    "base_url",
+    "baseUrl",
+    "upstream_url",
+    "upstreamUrl",
+    "agentRuntimeEndpoint",
+    "runtime_endpoint",
+    "runtimeEndpoint",
+    "runnerEndpoint",
+    "channelBaseUrl",
+    "sdkRuntimeEndpoint",
+    "selfHostedEndpoint",
+    "endpoint",
+}
+
+RESOURCE_PROFILE_METADATA_FIELD_NAMES = {
+    "provider_id",
+    "providerId",
+    "resource_type",
+    "resourceType",
+    "auth_method",
+    "authMethod",
+    "credential_kind",
+    "credentialKind",
+    "cookie_domain_scope",
+    "cookieDomainScope",
+    "domain",
+    "domain_scope",
+    "domainScope",
+    "session_expires_at",
+    "sessionExpiresAt",
+    "expires_at",
+    "expiresAt",
+    "workspace_policy",
+    "workspacePolicy",
+    "network_policy",
+    "networkPolicy",
+    "input_requirements",
+    "inputRequirements",
+    "opensource_basis",
+    "opensourceBasis",
+    "opensource_input_field",
+    "opensourceInputField",
+    "input_material_policy",
+    "inputMaterialPolicy",
+    "source",
+    "source_id",
+    "sourceId",
+    "source_name",
+    "sourceName",
+    "requires_encrypted_secret",
+    "requiresEncryptedSecret",
+    "domain_allowlist_required",
+    "domainAllowlistRequired",
+    "requires_runtime_isolation",
+    "requiresRuntimeIsolation",
+    "health_check",
+    "healthCheck",
+    "region",
+    "plan",
+}
+
+PROVIDER_EXECUTION_CONFIG_FIELD_NAMES = {
+    "api_key_ref",
+    "apiKeyRef",
+    "credential_ref",
+    "credentialRef",
+    "headers",
+    "header_template",
+    "headerTemplate",
+    "timeout_seconds",
+    "timeoutSeconds",
+    "oauth_start_endpoint",
+    "oauthStartEndpoint",
+    "oauth_status_endpoint",
+    "oauthStatusEndpoint",
+    "oauth_status_method",
+    "oauthStatusMethod",
+    "oauth_callback_url",
+    "oauthCallbackUrl",
+    "callback_url",
+    "callbackUrl",
+    "oauth_timeout_seconds",
+    "oauthTimeoutSeconds",
+    "capabilities_endpoint",
+    "capabilitiesEndpoint",
+    "health_endpoint",
+    "healthEndpoint",
+    "quota_endpoint",
+    "quotaEndpoint",
+    "submit_endpoint",
+    "submitEndpoint",
+    "status_endpoint",
+    "statusEndpoint",
+    "result_endpoint",
+    "resultEndpoint",
+    "cancel_endpoint",
+    "cancelEndpoint",
+    "model_operation_hints",
+    "modelOperationHints",
+    "model_operations",
+    "modelOperations",
+}
+
+OFFICIAL_API_AUTH_METHODS = {"api_key", "aggregator_api_key", "bearer_token", "official_api_key"}
+
+
+def provider_runtime_base_url_allowed(provider_id: str) -> bool:
+    requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id)
+    if not requirements:
+        return True
+    return any(item.get("name") in RUNTIME_BASE_URL_INPUT_NAMES for item in requirements.get("user_inputs", []))
+
+
+def provider_runtime_profile_field_name(provider_id: str) -> str:
+    requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id)
+    if not requirements:
+        return "connector_base_url"
+    for item in requirements.get("user_inputs", []):
+        name = str(item.get("name") or "").strip()
+        if name in RUNTIME_BASE_URL_INPUT_NAMES:
+            return name
+    return ""
+
+
+def provider_allowed_auth_methods(provider_id: str) -> list[str]:
+    requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id)
+    if not requirements:
+        return list(REFERENCE_AUTH_TYPES)
+    methods: list[str] = []
+    for item in requirements.get("user_inputs", []):
+        method = str(item.get("auth_method") or "").strip()
+        if method and method in REFERENCE_AUTH_TYPES and method not in methods:
+            methods.append(method)
+    if methods:
+        return methods
+    resource_type = str(requirements.get("primary_resource_type") or "")
+    if resource_type == "web_cookie_provider":
+        return ["cookie_secret"]
+    if resource_type == "agent_provider":
+        return ["agent_provider_credential"]
+    return list(REFERENCE_AUTH_TYPES)
+
+
+def provider_allowed_resource_types(provider_id: str) -> list[str]:
+    requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id)
+    if not requirements:
+        return sorted(ACCOUNT_RESOURCE_TYPES)
+    values = requirements.get("accepted_resource_types") or [requirements.get("primary_resource_type")]
+    allowed = [str(item) for item in values if str(item) in ACCOUNT_RESOURCE_TYPES]
+    return allowed or sorted(ACCOUNT_RESOURCE_TYPES)
+
+
+def expected_resource_type_for_auth_method(auth_method: str | None) -> str:
+    method = (auth_method or "").strip()
+    if method in {"cookie_secret", "web_session_reference"}:
+        return "web_cookie_provider"
+    if method in {"agent_provider_credential", "oauth_reference", "cli_credential_reference", "mcp_config_reference"}:
+        return "agent_provider"
+    return ""
+
+
+def expected_resource_type_for_credential_kind(credential_kind: str | None) -> str:
+    kind = (credential_kind or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if kind in {"cookie", "cookie_secret", "web_session"}:
+        return "web_cookie_provider"
+    if kind in {
+        "agent_provider",
+        "agent",
+        "mcp_config",
+        "mcp_config_reference",
+        "cli_credential",
+        "cli_credential_reference",
+        "oauth_reference",
+        "api_key",
+        "bearer_token",
+        "aggregator_api_key",
+        "token",
+        "token_reference",
+        "secret_json",
+        "subscription",
+        "subscription_url",
+        "self_hosted_endpoint",
+    }:
+        return "agent_provider"
+    return ""
+
+
+COOKIE_ACCOUNT_CREDENTIAL_KIND_ALIASES = {"cookie", "cookie_secret", "web_session", "web_session_reference"}
+AGENT_ACCOUNT_CREDENTIAL_KIND_ALIASES = {
+    "agent_provider",
+    "agent",
+    "mcp_config",
+    "mcp_config_reference",
+    "cli_credential",
+    "cli_credential_reference",
+    "oauth_reference",
+    "api_key",
+    "bearer_token",
+    "aggregator_api_key",
+    "token",
+    "token_reference",
+    "secret_json",
+    "subscription",
+    "subscription_url",
+    "self_hosted_endpoint",
+}
+
+
+def normalize_account_secret_kind(resource_type: str | None, credential_kind: str | None) -> str:
+    resource_value = (resource_type or "").strip()
+    kind = (credential_kind or "").strip().replace("-", "_").replace(" ", "_")
+    if not kind or kind in {"custom", "session"}:
+        return "cookie" if resource_value == "web_cookie_provider" else "agent_provider"
+    if kind in COOKIE_ACCOUNT_CREDENTIAL_KIND_ALIASES:
+        if resource_value and resource_value != "web_cookie_provider":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "ACCOUNT_CREDENTIAL_KIND_RESOURCE_MISMATCH",
+                    "resource_type": resource_value,
+                    "credential_kind": credential_kind,
+                    "expected_resource_type": "web_cookie_provider",
+                },
+            )
+        return "cookie"
+    if kind in AGENT_ACCOUNT_CREDENTIAL_KIND_ALIASES:
+        if resource_value and resource_value != "agent_provider":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "ACCOUNT_CREDENTIAL_KIND_RESOURCE_MISMATCH",
+                    "resource_type": resource_value,
+                    "credential_kind": credential_kind,
+                    "expected_resource_type": "agent_provider",
+                },
+            )
+        return "agent_provider"
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": "ACCOUNT_CREDENTIAL_KIND_UNSUPPORTED",
+            "credential_kind": credential_kind,
+            "allowed_credential_kinds": ["cookie", "cookie_secret", "agent_provider"],
+            "compatibility_policy": "legacy api_key/bearer/oauth/cli/mcp/token inputs are normalized into agent_provider resources.",
+        },
+    )
+
+
+def expected_resource_type_for_credential_ref(credential_ref: str | None, credential_kind: str | None = None) -> str:
+    ref = (credential_ref or "").strip()
+    if not ref:
+        return expected_resource_type_for_credential_kind(credential_kind)
+    lower = ref.lower()
+    if lower.startswith("agent://"):
+        return "agent_provider"
+    if lower.startswith("websession://"):
+        return "web_cookie_provider"
+    if lower.startswith(("oauth://", "cli://", "mcp://", "endpoint://", "connector://", "tokenref://", "subscription://", "vault://", "env://", "public://")):
+        return "agent_provider"
+    return expected_resource_type_for_credential_kind(credential_kind)
+
+
+def expected_resource_type_for_secret_ref(db: Session | None, credential_ref: str | None) -> str:
+    ref = (credential_ref or "").strip()
+    if not db or not ref.lower().startswith("secret://"):
+        return ""
+    secret = db.get(models.CredentialSecret, ref.replace("secret://", "", 1))
+    if not secret:
+        return ""
+    return expected_resource_type_for_credential_kind(secret.kind)
+
+
+def credential_ref_prefix(credential_ref: str | None) -> str:
+    ref = (credential_ref or "").strip()
+    if "://" not in ref:
+        return ""
+    return ref.split("://", 1)[0] + "://"
+
+
+def validate_credential_ref_resource_type(
+    provider_id: str,
+    resource_type: str | None,
+    credential_ref: str | None,
+    *,
+    credential_kind: str | None = None,
+    db: Session | None = None,
+) -> None:
+    value = (resource_type or "").strip()
+    expected = expected_resource_type_for_secret_ref(db, credential_ref) or expected_resource_type_for_credential_ref(credential_ref, credential_kind)
+    if not value or not expected or value == expected:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": "ACCOUNT_CREDENTIAL_REF_RESOURCE_MISMATCH",
+            "provider_id": provider_id,
+            "resource_type": value,
+            "credential_ref_prefix": credential_ref_prefix(credential_ref),
+            "credential_kind": credential_kind,
+            "expected_resource_type": expected,
+            "message": "credential_ref must match the Web Cookie or Agent Provider resource type; legacy refs are accepted only as compatibility input and normalized before storage.",
+        },
+    )
+
+
+def validate_provider_resource_type(
+    provider_id: str,
+    resource_type: str | None,
+    *,
+    auth_method: str | None = None,
+    credential_kind: str | None = None,
+) -> str:
+    value = (resource_type or "").strip()
+    if not value:
+        return ""
+    allowed = provider_allowed_resource_types(provider_id)
+    if value not in set(allowed):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "PROVIDER_RESOURCE_TYPE_NOT_ALLOWED",
+                "provider_id": provider_id,
+                "resource_type": value,
+                "allowed_resource_types": allowed,
+                "input_requirements": PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []),
+            },
+        )
+    expected = expected_resource_type_for_auth_method(auth_method) or expected_resource_type_for_credential_kind(credential_kind)
+    if expected and value != expected:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "PROVIDER_RESOURCE_AUTH_MISMATCH",
+                "provider_id": provider_id,
+                "resource_type": value,
+                "auth_method": auth_method,
+                "credential_kind": credential_kind,
+                "expected_resource_type": expected,
+                "allowed_resource_types": allowed,
+            },
+        )
+    return value
+
+
+def validate_provider_auth_method(provider_id: str, auth_method: str | None) -> str:
+    method = (auth_method or "").strip()
+    if not method:
+        return ""
+    if method in OFFICIAL_API_AUTH_METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "UPSTREAM_OFFICIAL_API_AUTH_NOT_ALLOWED",
+                "allowed_auth_methods": REFERENCE_AUTH_TYPES,
+                "aggregator_hint": "Use a Web Cookie/session secret or an Agent Provider credential/profile; official upstream API keys are out of scope.",
+            },
+        )
+    if method not in set(REFERENCE_AUTH_TYPES):
+        raise HTTPException(status_code=400, detail={"error": "AUTH_METHOD_UNSUPPORTED", "allowed_auth_methods": REFERENCE_AUTH_TYPES})
+    allowed_methods = provider_allowed_auth_methods(provider_id)
+    if method not in set(allowed_methods):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "PROVIDER_AUTH_METHOD_NOT_ALLOWED",
+                "provider_id": provider_id,
+                "auth_method": method,
+                "allowed_auth_methods": allowed_methods,
+                "input_requirements": PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []),
+            },
+        )
+    return method
+
+
+def validate_provider_base_url_input(provider_id: str, provider_base_url: str | None, *, field_name: str = "provider_base_url") -> str:
+    value = (provider_base_url or "").strip()
+    if not value:
+        return ""
+    if provider_runtime_base_url_allowed(provider_id):
+        return value
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": "PROVIDER_BASE_URL_NOT_ALLOWED",
+            "provider_id": provider_id,
+            "field": field_name,
+            "message": "This provider's open-source connector profile does not require a runner/base_url field; submit only the fields listed in input_requirements.",
+            "allowed_input_requirements": PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []),
+        },
+    )
+
+
+def first_runtime_base_url_field(data: Any, *, field_name: str) -> tuple[str, str]:
+    stack: list[tuple[str, Any]] = [(field_name, data)]
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if key in RUNTIME_BASE_URL_FIELD_NAMES and child is not None and str(child).strip():
+                    return child_path, str(child).strip()
+                if isinstance(child, (dict, list)):
+                    stack.append((child_path, child))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                if isinstance(child, (dict, list)):
+                    stack.append((f"{path}[{index}]", child))
+    return "", ""
+
+
+def validate_runtime_base_url_fields(provider_id: str, data: Any, *, field_name: str) -> None:
+    path, value = first_runtime_base_url_field(data, field_name=field_name)
+    if value:
+        validate_provider_base_url_input(provider_id, value, field_name=path)
+
+
+def platform_input_field_aliases(name: str) -> set[str]:
+    clean = str(name or "").strip()
+    if not clean:
+        return set()
+    parts = [part for part in clean.replace("-", "_").split("_") if part]
+    camel = parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:]) if parts else clean
+    snake = clean.replace("-", "_")
+    kebab = clean.replace("_", "-")
+    return {clean, snake, kebab, camel, clean.upper(), snake.upper(), kebab.upper()}
+
+
+def platform_input_value(name: str, *sources: dict[str, Any] | None) -> Any:
+    aliases = platform_input_field_aliases(name)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in aliases:
+            value = source.get(key)
+            if profile_value_present(value):
+                return value
+    return None
+
+
+def platform_input_value_for_item(item: dict[str, Any], *sources: dict[str, Any] | None) -> Any:
+    name = str(item.get("name") or "").strip()
+    aliases = set(platform_input_field_aliases(name))
+    for alias in item.get("aliases") or item.get("field_aliases") or []:
+        aliases.update(platform_input_field_aliases(str(alias)))
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in aliases:
+            value = source.get(key)
+            if profile_value_present(value):
+                return value
+    return None
+
+
+def platform_input_match_for_item(item: dict[str, Any], *sources: dict[str, Any] | None) -> tuple[str, Any] | None:
+    name = str(item.get("name") or "").strip()
+    aliases = set(platform_input_field_aliases(name))
+    for alias in item.get("aliases") or item.get("field_aliases") or []:
+        aliases.update(platform_input_field_aliases(str(alias)))
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if str(key) in aliases and profile_value_present(value):
+                return str(key), value
+    return None
+
+
+def profile_value_present(value: Any) -> bool:
+    if isinstance(value, str):
+        clean = value.strip().lower()
+        if clean in {"<required>", "<optional>", "<one-of-required>"} or clean.startswith("<required:") or clean.startswith("<optional:") or clean.startswith("<one-of-required:"):
+            return False
+    return value not in (None, "", [], {})
+
+
+def platform_input_item_aliases(item: dict[str, Any]) -> set[str]:
+    aliases = set(platform_input_field_aliases(str(item.get("name") or "")))
+    for alias in item.get("aliases") or item.get("field_aliases") or []:
+        aliases.update(platform_input_field_aliases(str(alias)))
+    return {alias for alias in aliases if alias}
+
+
+def platform_allowed_resource_profile_field_names(provider_id: str, *, allow_runtime: bool = True) -> set[str]:
+    allowed = set(RESOURCE_PROFILE_METADATA_FIELD_NAMES)
+    requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {})
+    for item in requirements.get("user_inputs", []):
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        if item.get("auth_method") or item.get("store_as"):
+            continue
+        if name in RUNTIME_BASE_URL_INPUT_NAMES and not allow_runtime:
+            continue
+        if name in RUNTIME_BASE_URL_INPUT_NAMES and not provider_runtime_base_url_allowed(provider_id):
+            continue
+        allowed.update(platform_input_item_aliases(item))
+    return allowed
+
+
+def validate_platform_resource_profile_fields(provider_id: str, data: dict[str, Any] | None, *, field_name: str) -> None:
+    if not provider_id or provider_id not in PLATFORM_INPUT_REQUIREMENTS or not isinstance(data, dict):
+        return
+    allowed = platform_allowed_resource_profile_field_names(provider_id)
+    unexpected = sorted(str(key) for key, value in data.items() if profile_value_present(value) and str(key) not in allowed)
+    if unexpected:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "PROVIDER_INPUT_FIELD_NOT_ALLOWED",
+                "provider_id": provider_id,
+                "field": field_name,
+                "unexpected_fields": unexpected,
+                "allowed_fields": sorted(allowed),
+                "message": "Only submit resource_profile fields that are declared by the matched open-source platform profile or gen2api resource metadata.",
+            },
+        )
+
+
+def validate_platform_provider_config_fields(provider_id: str, data: dict[str, Any] | None, *, field_name: str = "provider_config") -> None:
+    if not provider_id or provider_id not in PLATFORM_INPUT_REQUIREMENTS or not isinstance(data, dict):
+        return
+    allowed = platform_allowed_resource_profile_field_names(provider_id) | set(PROVIDER_EXECUTION_CONFIG_FIELD_NAMES)
+    if provider_runtime_base_url_allowed(provider_id):
+        for runtime_name in RUNTIME_BASE_URL_INPUT_NAMES:
+            allowed.update(platform_input_field_aliases(runtime_name))
+    unexpected = sorted(str(key) for key, value in data.items() if profile_value_present(value) and str(key) not in allowed)
+    if unexpected:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "PROVIDER_INPUT_FIELD_NOT_ALLOWED",
+                "provider_id": provider_id,
+                "field": field_name,
+                "unexpected_fields": unexpected,
+                "allowed_fields": sorted(allowed),
+                "message": "Only submit provider_config fields that are declared by the matched open-source connector profile or execution-layer contract.",
+            },
+        )
+
+
+def credential_material_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list)):
+        return dumps(value)
+    return ""
+
+
+def credential_value_field_map(value: Any) -> dict[str, Any]:
+    raw = credential_material_to_text(value)
+    if not raw:
+        return {}
+    fields: dict[str, Any] = {}
+
+    def collect(data: Any) -> None:
+        if isinstance(data, dict):
+            for key, child in data.items():
+                if profile_value_present(child):
+                    fields[str(key)] = child
+                if isinstance(child, dict):
+                    collect(child)
+        elif isinstance(data, list):
+            for child in data:
+                collect(child)
+
+    try:
+        parsed = json.loads(raw)
+        collect(parsed)
+    except Exception:
+        pass
+    for line in raw.splitlines():
+        clean = line.strip()
+        if not clean or clean.startswith("#"):
+            continue
+        separator = "=" if "=" in clean else (":" if ":" in clean and not clean.lower().startswith(("http://", "https://")) else "")
+        if not separator:
+            continue
+        key, field_value = clean.split(separator, 1)
+        key = key.strip().strip('"').strip("'")
+        field_value = field_value.strip().strip('"').strip("'")
+        if key and profile_value_present(field_value):
+            fields[key] = field_value
+    return fields
+
+
+def effective_platform_auth_method(auth_method: str | None, resource_type: str | None = None) -> str:
+    value = (auth_method or "").strip()
+    if value:
+        return value
+    return "cookie_secret" if resource_type == "web_cookie_provider" else "agent_provider_credential"
+
+
+def required_credential_input_items(provider_id: str, effective_auth: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []):
+        if not item.get("required"):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in RUNTIME_BASE_URL_INPUT_NAMES:
+            continue
+        input_auth = str(item.get("auth_method") or "").strip()
+        if input_auth and input_auth != effective_auth:
+            continue
+        if input_auth or item.get("store_as"):
+            items.append(item)
+    return items
+
+
+def unique_platform_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        name = str(item.get("name") or "")
+        if name in seen:
+            continue
+        seen.add(name)
+        unique.append(item)
+    return unique
+
+
+def missing_required_credential_material_inputs(provider_id: str, effective_auth: str, credential_value: Any) -> list[dict[str, Any]]:
+    if not credential_material_to_text(credential_value):
+        return required_credential_input_items(provider_id, effective_auth)
+    credential_fields = credential_value_field_map(credential_value)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    ungrouped: list[dict[str, Any]] = []
+    for item in required_credential_input_items(provider_id, effective_auth):
+        group = str(item.get("any_of_group") or "").strip()
+        if group:
+            grouped.setdefault(group, []).append(item)
+        else:
+            ungrouped.append(item)
+    missing: list[dict[str, Any]] = []
+    for group_items in grouped.values():
+        if not any(platform_input_value_for_item(item, credential_fields) is not None for item in group_items):
+            missing.extend(group_items)
+    for item in ungrouped:
+        if item.get("require_named_field") and platform_input_value_for_item(item, credential_fields) is None:
+            missing.append(item)
+    if len(ungrouped) > 1:
+        for item in ungrouped:
+            name = str(item.get("name") or "").strip()
+            if name and platform_input_value_for_item(item, credential_fields) is None:
+                missing.append(item)
+    return unique_platform_input_items(missing)
+
+
+def raise_required_platform_input_error(
+    provider_id: str,
+    resource_type: str | None,
+    effective_auth: str,
+    missing: list[dict[str, Any]],
+) -> None:
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": "PROVIDER_REQUIRED_INPUT_MISSING",
+            "provider_id": provider_id,
+            "resource_type": resource_type,
+            "auth_method": effective_auth,
+            "missing_input_fields": [
+                {
+                    "name": item.get("name"),
+                    "label": item.get("label"),
+                    "any_of_group": item.get("any_of_group"),
+                    "evidence": item.get("evidence"),
+                }
+                for item in unique_platform_input_items(missing)
+            ],
+            "message": "Submit exactly the required fields from the matched open-source platform profile. For direct credential_value with multiple required credential fields, use JSON or .env-style key/value material.",
+        },
+    )
+
+
+def credential_secret_ref_value_for_validation(db: Session | None, credential_ref: str | None, credential_secret_id: str | None = None, *, require_active: bool = True) -> str:
+    if not db:
+        return ""
+    ref = (credential_ref or "").strip()
+    if not ref and credential_secret_id:
+        ref = f"secret://{credential_secret_id}"
+    if not ref.lower().startswith("secret://"):
+        return ""
+    secret = db.get(models.CredentialSecret, ref.replace("secret://", "", 1))
+    if not secret or (require_active and secret.status != "active"):
+        return ""
+    try:
+        return secret_service.decrypt(secret.ciphertext)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"error": "CREDENTIAL_SECRET_DECRYPT_FAILED", "secret_ref": redact_credential_ref(ref)}) from exc
+
+
+def validate_credential_secret_material_for_provider(
+    *,
+    provider_id: str,
+    kind: str,
+    value: str,
+    resource_type: str | None = None,
+) -> None:
+    if not provider_id or provider_id == "mock" or provider_id not in PLATFORM_INPUT_REQUIREMENTS:
+        return
+    inferred_resource_type = resource_type or expected_resource_type_for_credential_kind(kind)
+    effective_auth = "cookie_secret" if inferred_resource_type == "web_cookie_provider" else "agent_provider_credential"
+    validate_provider_auth_method(provider_id, effective_auth)
+    if inferred_resource_type:
+        validate_provider_resource_type(provider_id, inferred_resource_type, auth_method=effective_auth, credential_kind=kind)
+    missing = missing_required_credential_material_inputs(provider_id, effective_auth, value)
+    if missing:
+        raise_required_platform_input_error(provider_id, inferred_resource_type, effective_auth, missing)
+
+
+def merge_resource_profiles(*sources: dict[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if profile_value_present(value):
+                merged[key] = value
+    return merged
+
+
+def validate_required_platform_inputs(
+    provider_id: str,
+    *,
+    auth_method: str | None,
+    resource_type: str | None,
+    provider_config: dict[str, Any] | None = None,
+    resource_profile: dict[str, Any] | None = None,
+    credential_ref: str | None = None,
+    credential_value: Any | None = None,
+    credential_secret_id: str | None = None,
+    db: Session | None = None,
+) -> None:
+    requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {})
+    user_inputs = requirements.get("user_inputs", [])
+    if not user_inputs:
+        return
+    effective_auth = effective_platform_auth_method(auth_method, resource_type)
+    credential_ref_present = any(str(value or "").strip() for value in [credential_ref, credential_secret_id])
+    direct_credential_present = bool(credential_material_to_text(credential_value))
+    credential_present = credential_ref_present or direct_credential_present
+    missing: list[dict[str, Any]] = []
+    for item in user_inputs:
+        if not item.get("required"):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        input_auth = str(item.get("auth_method") or "").strip()
+        if input_auth and input_auth != effective_auth:
+            continue
+        if name in RUNTIME_BASE_URL_INPUT_NAMES:
+            continue
+        if input_auth or item.get("store_as"):
+            if not credential_present:
+                missing.append(item)
+            continue
+        if platform_input_value_for_item(item, resource_profile, provider_config) is None:
+            missing.append(item)
+    if direct_credential_present:
+        missing.extend(missing_required_credential_material_inputs(provider_id, effective_auth, credential_value))
+    elif credential_ref_present:
+        inline = inline_credential_parts(str(credential_ref or "").strip())
+        if inline:
+            missing.extend(missing_required_credential_material_inputs(provider_id, effective_auth, inline[1]))
+        else:
+            secret_ref_requested = bool(credential_secret_id) or str(credential_ref or "").strip().lower().startswith("secret://")
+            secret_value = credential_secret_ref_value_for_validation(db, credential_ref, credential_secret_id)
+            if secret_value:
+                missing.extend(missing_required_credential_material_inputs(provider_id, effective_auth, secret_value))
+            elif secret_ref_requested:
+                missing.extend(required_credential_input_items(provider_id, effective_auth))
+    if missing:
+        raise_required_platform_input_error(provider_id, resource_type, effective_auth, missing)
+
+
+def platform_dynamic_profile_inputs(provider_id: str) -> list[dict[str, Any]]:
+    runtime_names = set(RUNTIME_BASE_URL_INPUT_NAMES)
+    fields: list[dict[str, Any]] = []
+    for item in PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []):
+        name = str(item.get("name") or "").strip()
+        if not name or name in runtime_names:
+            continue
+        if item.get("auth_method") or item.get("store_as"):
+            continue
+        fields.append(deepcopy(item))
+    return fields
+
+
+def platform_resource_profile_template(provider_id: str) -> dict[str, Any]:
+    return {
+        str(item.get("name")): "<required>" if item.get("required") else "<optional>"
+        for item in platform_dynamic_profile_inputs(provider_id)
+        if item.get("name")
+    }
+
+
+def missing_required_profile_inputs(provider_id: str, resource_profile: dict[str, Any] | None) -> list[dict[str, Any]]:
+    missing: list[dict[str, Any]] = []
+    for item in platform_dynamic_profile_inputs(provider_id):
+        if item.get("required") and platform_input_value_for_item(item, resource_profile) is None:
+            missing.append(item)
+    return missing
+
+
+def strip_runtime_base_url_fields(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {
+            key: strip_runtime_base_url_fields(value)
+            for key, value in data.items()
+            if key not in RUNTIME_BASE_URL_FIELD_NAMES
+        }
+    if isinstance(data, list):
+        return [strip_runtime_base_url_fields(item) for item in data]
+    return data
+
+
+def provider_runtime_config(provider_id: str, config: dict[str, Any] | None) -> dict[str, Any]:
+    value = deepcopy(config or {})
+    return value if provider_runtime_base_url_allowed(provider_id) else strip_runtime_base_url_fields(value)
+
+
+def is_placeholder_runtime_base_url(value: str | None) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "0.0.0.0", "connector.example.com"}
+
+
+def template_default_provider_base_url(provider_id: str) -> str:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        return ""
+    value = str((template.default_config or {}).get("base_url") or "").strip()
+    if is_placeholder_runtime_base_url(value):
+        return ""
+    return permitted_provider_base_url(provider_id, value)
+
+
+def provider_template_default_config(provider_id: str, config: dict[str, Any] | None) -> dict[str, Any]:
+    value = provider_runtime_config(provider_id, config)
+    base_url = str(value.get("base_url") or "").strip()
+    if is_placeholder_runtime_base_url(base_url):
+        value = deepcopy(value)
+        value.pop("base_url", None)
+    return value
+
+
+def provider_template_payload(template: Any) -> dict[str, Any]:
+    payload = template_as_dict(template)
+    payload["default_config"] = provider_template_default_config(template.id, payload.get("default_config") or {})
+    payload["runtime_base_url_allowed"] = provider_runtime_base_url_allowed(template.id)
+    return payload
+
+
+def permitted_provider_base_url(provider_id: str, provider_base_url: str | None) -> str:
+    value = (provider_base_url or "").strip()
+    if not value:
+        return ""
+    return value if provider_runtime_base_url_allowed(provider_id) else ""
+
+
+def first_response_provider_base_url(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict):
+        return ""
+    sources: list[dict[str, Any]] = [data]
+    for key in ["account", "resource", "credential", "credentials", "session"]:
+        value = data.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    for source in sources:
+        for key in ["provider_base_url", "connector_base_url", "base_url"]:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def first_response_resource_type(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict):
+        return ""
+    sources: list[dict[str, Any]] = [data]
+    for key in ["account", "resource", "credential", "credentials", "session"]:
+        value = data.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    for source in sources:
+        for key in ["resource_type", "resourceType", "source_type", "sourceType"]:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def first_response_resource_profile(provider_id: str, data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    sources: list[dict[str, Any]] = [data]
+    for key in ["account", "resource", "credential", "credentials", "session"]:
+        value = data.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    profile: dict[str, Any] = {}
+    for source in sources:
+        for key in ["resource_profile", "resourceProfile", "account_profile", "accountProfile"]:
+            value = source.get(key)
+            if isinstance(value, dict):
+                profile = merge_resource_profiles(profile, value)
+    for item in PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []):
+        name = str(item.get("name") or "").strip()
+        if not name or item.get("auth_method") or item.get("store_as") or name in RUNTIME_BASE_URL_INPUT_NAMES:
+            continue
+        value = platform_input_value(name, *sources)
+        if value is not None:
+            profile[name] = value
+    return profile
+
+
+def normalize_credential_material(value: Any) -> str:
+    return credential_material_to_text(value)
+
+
+def response_source_dicts(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    sources: list[dict[str, Any]] = []
+    stack: list[Any] = [data]
+    while stack:
+        source = stack.pop(0)
+        if not isinstance(source, dict):
+            continue
+        sources.append(source)
+        for key in ["account", "resource", "credential", "credentials", "session", "data"]:
+            nested = source.get(key)
+            if isinstance(nested, dict):
+                stack.append(nested)
+            elif isinstance(nested, list):
+                stack.extend(item for item in nested if isinstance(item, dict))
+    return sources
+
+
+def first_response_credential_ref(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for source in response_source_dicts(data):
+        for key in [
+            "credential_ref",
+            "credentialRef",
+            "credential_reference",
+            "account_ref",
+            "accountRef",
+            "oauth_ref",
+            "oauthRef",
+            "websession_ref",
+            "web_session_ref",
+            "webSessionRef",
+            "session_ref",
+            "sessionRef",
+            "token_reference",
+            "tokenReference",
+            "subscription_ref",
+            "subscriptionRef",
+            "vault_ref",
+            "vaultRef",
+            "resource_ref",
+            "resourceRef",
+        ]:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def first_response_credential_value(provider_id: str, data: dict[str, Any] | None) -> str:
+    sources = response_source_dicts(data)
+    if not sources:
+        return ""
+    for source in sources:
+        for key in [
+            "credential_value",
+            "credentialValue",
+            "credential_material",
+            "credentialMaterial",
+            "credential_secret",
+            "credentialSecret",
+            "secret_value",
+            "secretValue",
+        ]:
+            value = normalize_credential_material(source.get(key))
+            if value:
+                return value
+    material: dict[str, Any] = {}
+    for item in PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []):
+        if not (item.get("auth_method") or item.get("store_as")):
+            continue
+        match = platform_input_match_for_item(item, *sources)
+        if match:
+            key, value = match
+            material[key] = value
+    return dumps(material) if material else ""
+
+
+def materialize_authorized_session_credential_value(
+    db: Session,
+    *,
+    session_id: str,
+    provider_id: str,
+    account_id: str,
+    label: str,
+    auth_method: str,
+    resource_type: str,
+    credential_value: str,
+    credential_secret_id: str | None = None,
+    resource_profile: dict[str, Any] | None = None,
+) -> str:
+    value = str(credential_value or "").strip()
+    if not value:
+        return ""
+    secret_id = credential_secret_id or f"secret_{account_id or session_id}"
+    secret_kind = "cookie" if resource_type == "web_cookie_provider" or auth_method == "cookie_secret" else "agent_provider"
+    metadata = {
+        "auth_method": auth_method,
+        "resource_type": resource_type,
+        "source": "authorized_resource_session",
+        "session_id": session_id,
+        "resource_profile": redact_resource_profile(resource_profile or {}),
+    }
+    secret = db.get(models.CredentialSecret, secret_id)
+    if secret:
+        secret.name = f"{label} 鉴权"
+        secret.kind = secret_kind
+        secret.provider_id = provider_id
+        secret.account_id = account_id
+        secret.status = "active"
+        secret.metadata_json = dumps(metadata)
+        secret_service.update_value(secret, value)
+    else:
+        secret = secret_service.create(
+            db,
+            secret_id=secret_id,
+            name=f"{label} 鉴权",
+            value=value,
+            kind=secret_kind,
+            provider_id=provider_id,
+            account_id=account_id,
+            metadata=metadata,
+            status="active",
+        )
+    session = db.get(models.ConnectorOAuthSession, session_id)
+    if session:
+        session.credential_ref = f"secret://{secret.id}"
+        session.status = "completed"
+        session.completed_at = session.completed_at or datetime.utcnow()
+        merged = loads(session.metadata_json, {})
+        merged["credential_value_materialized"] = {
+            "secret_ref": f"secret://{secret.id}",
+            "secret_kind": secret_kind,
+            "source": "authorized_resource_session",
+        }
+        session.metadata_json = dumps(merged)
+    db.commit()
+    return f"secret://{secret.id}"
+
+
+def validate_started_authorized_resource_session(
+    db: Session,
+    req: ConnectorOAuthStartRequest,
+    session_payload: dict[str, Any],
+) -> dict[str, Any]:
+    credential_value = str(session_payload.pop("_credential_value", "") or "").strip()
+    if session_payload.get("status") != "completed" or (not session_payload.get("credential_ref") and not credential_value):
+        return session_payload
+    auth_method = validate_provider_auth_method(req.provider_id, str(session_payload.get("auth_method") or req.auth_method))
+    resource_type = validate_provider_resource_type(
+        req.provider_id,
+        req.resource_type or infer_account_resource_type(req.provider_id, auth_method),
+        auth_method=auth_method,
+        credential_kind=credential_kind_for_auth_method(auth_method),
+    )
+    metadata = session_payload.get("metadata") if isinstance(session_payload.get("metadata"), dict) else {}
+    completion = metadata.get("completion") if isinstance(metadata.get("completion"), dict) else {}
+    request_metadata = metadata.get("request") if isinstance(metadata.get("request"), dict) else {}
+    resource_profile = merge_resource_profiles(
+        request_metadata.get("resource_profile") if isinstance(request_metadata.get("resource_profile"), dict) else {},
+        completion.get("resource_profile") if isinstance(completion.get("resource_profile"), dict) else {},
+        req.resource_profile or {},
+    )
+    try:
+        validate_platform_resource_profile_fields(req.provider_id, resource_profile, field_name="resource_profile")
+        validate_credential_ref_resource_type(
+            req.provider_id,
+            resource_type,
+            str(session_payload.get("credential_ref") or ""),
+            credential_kind=credential_kind_for_auth_method(auth_method),
+            db=db,
+        )
+        validate_required_platform_inputs(
+            req.provider_id,
+            auth_method=auth_method,
+            resource_type=resource_type,
+            resource_profile=resource_profile,
+            credential_ref=str(session_payload.get("credential_ref") or ""),
+            credential_value=credential_value,
+            db=db,
+        )
+        if credential_value and not session_payload.get("credential_ref"):
+            credential_ref = materialize_authorized_session_credential_value(
+                db,
+                session_id=str(session_payload.get("id") or ""),
+                provider_id=req.provider_id,
+                account_id=str(session_payload.get("account_id") or req.account_id or ""),
+                label=str(session_payload.get("label") or req.label or f"{req.provider_id} authorized resource"),
+                auth_method=auth_method,
+                resource_type=resource_type,
+                credential_value=credential_value,
+                resource_profile=resource_profile,
+            )
+            session_payload["credential_ref"] = credential_ref
+            materialized_session = db.get(models.ConnectorOAuthSession, str(session_payload.get("id") or ""))
+            if materialized_session:
+                return oauth_session_service.serialize(materialized_session)
+    except HTTPException as exc:
+        session = db.get(models.ConnectorOAuthSession, str(session_payload.get("id") or ""))
+        if not session:
+            raise
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+        session.status = "failed"
+        session.credential_ref = ""
+        session.error_code = str(detail.get("error") or "AUTHORIZED_RESOURCE_SESSION_VALIDATION_FAILED")
+        session.error_message = str(detail.get("message") or session.error_code)
+        merged = loads(session.metadata_json, {})
+        merged["validation_error"] = detail
+        session.metadata_json = dumps(merged)
+        db.commit()
+        return oauth_session_service.serialize(session)
+    return session_payload
+
+
+def platform_input_requirement_row(provider_id: str, requirements: dict[str, Any]) -> dict[str, Any]:
+    user_inputs = list(requirements.get("user_inputs", []))
+    runtime_input_fields = [
+        str(item.get("name"))
+        for item in user_inputs
+        if item.get("name") in RUNTIME_BASE_URL_INPUT_NAMES
+    ]
+    credential_input_fields = [
+        str(item.get("name"))
+        for item in user_inputs
+        if item.get("auth_method") or item.get("store_as")
+    ]
+    dynamic_profile_fields = [
+        str(item.get("name"))
+        for item in user_inputs
+        if item.get("name")
+        and item.get("name") not in RUNTIME_BASE_URL_INPUT_NAMES
+        and not item.get("auth_method")
+        and not item.get("store_as")
+    ]
+    accepted_resource_types = provider_allowed_resource_types(provider_id)
+    return {
+        "provider_id": provider_id,
+        **requirements,
+        "product_resource_scope": accepted_resource_types,
+        "credential_input_fields": credential_input_fields,
+        "accepted_auth_methods": provider_allowed_auth_methods(provider_id),
+        "dynamic_profile_fields": dynamic_profile_fields,
+        "runtime_base_url_allowed": bool(runtime_input_fields),
+        "runtime_base_url_input_fields": runtime_input_fields,
+        "base_url_policy": "forbidden unless input_requirements includes a runner/sidecar/runtime endpoint field",
+    }
+
+
+def platform_input_conformance_report(provider_id: str | None = None) -> dict[str, Any]:
+    rows = []
+    for key, value in PLATFORM_INPUT_REQUIREMENTS.items():
+        if provider_id and key != provider_id:
+            continue
+        rows.append(platform_input_requirement_row(key, value))
+    return {
+        "object": "media2api.platform_input_conformance",
+        "policy": "Product onboarding accepts only Web Cookie or Agent Provider resources; runner/base_url fields are exposed only when the matched open-source project requires a sidecar/runtime endpoint.",
+        "summary": {
+            "providers": len(rows),
+            "web_cookie_providers": sum(1 for item in rows if item.get("primary_resource_type") == "web_cookie_provider"),
+            "agent_providers": sum(1 for item in rows if item.get("primary_resource_type") == "agent_provider"),
+            "runtime_base_url_allowed": sum(1 for item in rows if item.get("runtime_base_url_allowed")),
+            "runtime_base_url_blocked": sum(1 for item in rows if not item.get("runtime_base_url_allowed")),
+            "providers_with_dynamic_profile_fields": [
+                item["provider_id"] for item in rows if item.get("dynamic_profile_fields")
+            ],
+        },
+        "data": rows,
+    }
+
+
+def build_account_resource_profile(
+    *,
+    provider_id: str,
+    auth_method: str,
+    resource_type: str,
+    credential_kind: str,
+    provider_base_url: str | None,
+    resource_profile: dict[str, Any] | None,
+    provider_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile = dict(resource_profile or {})
+    runtime_field_name = provider_runtime_profile_field_name(provider_id)
+    if runtime_field_name:
+        runtime_value = (provider_base_url or "").strip()
+        for key in list(RUNTIME_BASE_URL_FIELD_NAMES):
+            value = profile.pop(key, None)
+            if not runtime_value and profile_value_present(value):
+                runtime_value = str(value).strip()
+        if runtime_value:
+            profile[runtime_field_name] = runtime_value
+    else:
+        profile = strip_runtime_base_url_fields(profile)
+    profile.setdefault("provider_id", provider_id)
+    profile["resource_type"] = resource_type
+    profile["auth_method"] = auth_method
+    profile["credential_kind"] = credential_kind
+    if provider_config:
+        for key in ["agent_runtime_endpoint", "workspace_policy", "network_policy", "cookie_domain_scope", "guild_id", "channel_id", "discord_server", "session_expires_at"]:
+            if key in RUNTIME_BASE_URL_FIELD_NAMES and key != runtime_field_name:
+                continue
+            if key in provider_config and key not in profile:
+                profile[key] = provider_config[key]
+    if resource_type == "web_cookie_provider":
+        profile.setdefault("requires_encrypted_secret", True)
+        profile.setdefault("domain_allowlist_required", True)
+        profile.setdefault("health_check", "session_status")
+    if resource_type == "agent_provider":
+        profile.setdefault("requires_runtime_isolation", True)
+        profile.setdefault("health_check", "agent_runtime_probe")
+    return redact_resource_profile(profile)
 
 
 def redact_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -1261,13 +2890,56 @@ def redact_config(config: dict[str, Any]) -> dict[str, Any]:
     return redacted if isinstance(redacted, dict) else {}
 
 
+RESOURCE_PROFILE_SAFE_KEYS = {
+    "resource_type",
+    "auth_method",
+    "credential_kind",
+    "cookie_domain_scope",
+    "domain",
+    "domain_scope",
+    "session_expires_at",
+    "expires_at",
+    "connector_base_url",
+    "agent_runtime_endpoint",
+    "runtime_endpoint",
+    "workspace_policy",
+    "network_policy",
+    "guild_id",
+    "guildId",
+    "channel_id",
+    "channelId",
+    "discord_server",
+    "server",
+    "input_requirements",
+    "opensource_basis",
+    "requires_encrypted_secret",
+    "domain_allowlist_required",
+    "requires_runtime_isolation",
+    "health_check",
+}
+
+
+def redact_resource_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    def scrub(value: Any, key: str = "") -> Any:
+        if isinstance(value, dict):
+            return {str(child_key): scrub(child_value, str(child_key)) for child_key, child_value in value.items()}
+        if isinstance(value, list):
+            return [scrub(item, key) for item in value]
+        if key not in RESOURCE_PROFILE_SAFE_KEYS and is_sensitive_key(key):
+            return "[redacted]"
+        return value
+
+    redacted = scrub(profile)
+    return redacted if isinstance(redacted, dict) else {}
+
+
 def serialize_provider(provider: models.Provider) -> dict[str, Any]:
     return {
         "id": provider.id,
         "name": provider.name,
         "adapter_type": provider.adapter_type,
         "status": provider.status,
-        "base_config": redact_config(loads(provider.base_config_json, {})),
+        "base_config": redact_config(provider_runtime_config(provider.id, loads(provider.base_config_json, {}))),
         "notes": provider.notes,
     }
 
@@ -1279,7 +2951,7 @@ def credential_ref_type(credential_ref: str) -> str:
 
 
 def redact_credential_ref(credential_ref: str) -> str:
-    if credential_ref.startswith(("secret://", "env://", "public://")):
+    if credential_ref.startswith(SAFE_ACCOUNT_REF_PREFIXES):
         return credential_ref
     if credential_ref.startswith(("plain://", "bearer://")):
         return credential_ref.split("://", 1)[0] + "://***"
@@ -1294,6 +2966,8 @@ def serialize_account(account: models.AccountResource) -> dict[str, Any]:
         "provider_id": account.provider_id,
         "label": account.label,
         "status": account.status,
+        "resource_type": account.resource_type,
+        "resource_profile": redact_resource_profile(loads(account.resource_profile_json, {})),
         "credential_ref": redact_credential_ref(account.credential_ref),
         "credential_ref_type": credential_ref_type(account.credential_ref),
         "supported_operations": loads(account.supported_operations_json, []),
@@ -1327,6 +3001,259 @@ def provider_default_operations_and_models(provider_id: str) -> tuple[list[str],
         provider_models.extend(target[1])
         operations.extend(target[2])
     return list(dict.fromkeys(operations)), list(dict.fromkeys(provider_models))
+
+
+AUTO_LOGICAL_MODEL_BY_OPERATION = {
+    "text_to_image": "t2i-fast",
+    "image_to_image": "image-variation",
+    "image_edit": "image-edit",
+    "text_to_video": "t2v-general",
+    "image_to_video": "i2v-fast",
+    "video_extend": "video-extend",
+}
+LOGICAL_MODEL_DEFAULTS = {model_id: (display_name, operations, billing_class) for model_id, display_name, operations, billing_class in LOGICAL_MODELS}
+
+
+def ensure_logical_model_seed(db: Session, logical_model: str) -> models.LogicalModel | None:
+    model = db.get(models.LogicalModel, logical_model)
+    if model:
+        return model
+    default = LOGICAL_MODEL_DEFAULTS.get(logical_model)
+    if not default:
+        return None
+    display_name, operations, billing_class = default
+    model = models.LogicalModel(
+        id=logical_model,
+        display_name=display_name,
+        operations_json=dumps(operations),
+        constraints_json=dumps({"max_prompt_length": 8000, "supports_asset_ids": True}),
+        default_params_json=dumps({"quality": "standard"}),
+        billing_class=billing_class,
+        enabled=True,
+    )
+    db.add(model)
+    db.flush()
+    return model
+
+
+def auto_mapping_operations_for_model(provider_model: str, supported_operations: list[str], provider_config: dict[str, Any]) -> list[str]:
+    hints = provider_config.get("model_operation_hints") or provider_config.get("model_operations") or {}
+    if isinstance(hints, dict):
+        for key in (provider_model, provider_model.lower()):
+            value = hints.get(key)
+            if isinstance(value, list):
+                return [str(operation) for operation in value if str(operation) in supported_operations]
+    text = provider_model.lower()
+    video_ops = [operation for operation in supported_operations if operation in {"text_to_video", "image_to_video", "video_extend"}]
+    image_ops = [operation for operation in supported_operations if operation in {"text_to_image", "image_to_image", "image_edit"}]
+    if any(token in text for token in ["veo", "video", "wan", "kling", "luma", "runway", "ray", "seedance", "i2v", "t2v"]):
+        return video_ops or supported_operations
+    if any(token in text for token in ["edit", "seededit", "inpaint", "controlnet"]):
+        return [operation for operation in image_ops if operation in {"image_edit", "image_to_image"}] or image_ops or supported_operations
+    if any(token in text for token in ["image", "img", "banana", "imagen", "seedream", "flux", "sdxl", "stable", "gpt"]):
+        return image_ops or supported_operations
+    return supported_operations
+
+
+def ensure_account_model_mappings(
+    db: Session,
+    *,
+    provider_id: str,
+    supported_operations: list[str],
+    supported_provider_models: list[str],
+    provider_config: dict[str, Any],
+    priority: int = 90,
+) -> dict[str, Any]:
+    created: list[dict[str, Any]] = []
+    updated: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    available_operations = [operation for operation in supported_operations if operation in AUTO_LOGICAL_MODEL_BY_OPERATION]
+    for provider_model in [model for model in supported_provider_models if model]:
+        model_operations = auto_mapping_operations_for_model(provider_model, available_operations, provider_config)
+        for operation in model_operations:
+            logical_model = AUTO_LOGICAL_MODEL_BY_OPERATION.get(operation)
+            if not logical_model:
+                continue
+            if not ensure_logical_model_seed(db, logical_model):
+                skipped.append({"provider_model": provider_model, "operation": operation, "reason": "logical_model_missing", "logical_model": logical_model})
+                continue
+            mapping_id = f"{logical_model}:{provider_id}:{provider_model}"
+            mapping = db.get(models.ProviderModelMapping, mapping_id)
+            if mapping:
+                current_operations = loads(mapping.operations_json, [])
+                if operation not in current_operations:
+                    mapping.operations_json = dumps(list(dict.fromkeys([*current_operations, operation])))
+                    updated.append(serialize_mapping(mapping))
+                else:
+                    skipped.append({"provider_model": provider_model, "operation": operation, "reason": "mapping_exists", "mapping_id": mapping_id})
+                continue
+            mapping = models.ProviderModelMapping(
+                id=mapping_id,
+                logical_model=logical_model,
+                provider_id=provider_id,
+                provider_model=provider_model,
+                operations_json=dumps([operation]),
+                priority=priority,
+                weight=1,
+                cost_score=0.5,
+                speed_score=0.5,
+                quality_score=0.5,
+                reliability_score=0.5,
+                enabled=True,
+            )
+            db.add(mapping)
+            db.flush()
+            created.append(serialize_mapping(mapping))
+    return {
+        "object": "media2api.auto_model_mappings",
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "summary": {"created": len(created), "updated": len(updated), "skipped": len(skipped)},
+    }
+
+
+def connector_runtime_endpoint_for(operation: str, config: dict[str, Any]) -> str:
+    endpoints = config.get("endpoints") or {}
+    if isinstance(endpoints, dict) and operation in endpoints:
+        return str(endpoints[operation])
+    if operation == "text_to_image":
+        return "/v1/images/generations"
+    if operation in {"image_to_image", "image_edit"}:
+        return "/v1/images/edits"
+    if operation in {"text_to_video", "image_to_video", "video_extend"}:
+        return "/v1/videos/generations"
+    return ""
+
+
+def build_connector_runtime_diagnostics(db: Session, provider_id: str, account_id: str | None = None) -> dict[str, Any]:
+    provider = db.get(models.Provider, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND", "provider_id": provider_id})
+    config = provider_runtime_config(provider_id, loads(provider.base_config_json, {}))
+    base_url = str(config.get("base_url") or "").rstrip("/")
+    operations, provider_models = provider_default_operations_and_models(provider_id)
+    account_query = db.query(models.AccountResource).filter(models.AccountResource.provider_id == provider_id)
+    if account_id:
+        account_query = account_query.filter(models.AccountResource.id == account_id)
+    accounts = account_query.order_by(models.AccountResource.status.desc(), models.AccountResource.id).limit(50).all()
+    if account_id and not accounts:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_NOT_FOUND", "provider_id": provider_id, "account_id": account_id})
+
+    header_prefix = str(config.get("account_header_prefix") or "X-Media2API").strip() or "X-Media2API"
+    credential_ref_headers_enabled = config.get("forward_credential_ref_headers", True) is not False
+    default_header_names = {
+        "provider_id": str(config.get("provider_id_header") or f"{header_prefix}-Provider-ID"),
+        "account_id": str(config.get("account_id_header") or f"{header_prefix}-Account-ID"),
+        "account_label": str(config.get("account_label_header") or f"{header_prefix}-Account-Label"),
+        "credential_ref": str(config.get("credential_ref_header") or f"{header_prefix}-Credential-Ref"),
+        "credential_type": str(config.get("credential_type_header") or f"{header_prefix}-Credential-Type"),
+        "credential_reference_only": str(config.get("credential_reference_only_header") or f"{header_prefix}-Credential-Reference-Only"),
+    }
+    provider_auth_ref = str(config.get("credential_ref") or config.get("api_key_ref") or "")
+    account_rows = []
+    for account in accounts:
+        credential = credential_ref_info(db, account.credential_ref)
+        credential_ref = account.credential_ref or ""
+        forwardable_ref = credential_ref.startswith(CONNECTOR_REFERENCE_PREFIXES) and credential_ref_headers_enabled
+        account_rows.append(
+            {
+                "account": serialize_account(account),
+                "credential": credential,
+                "connector_forwarding": {
+                    "headers_enabled": credential_ref_headers_enabled,
+                    "forwardable_reference": forwardable_ref,
+                    "credential_reference_only": connector_reference_only(credential_ref, None),
+                    "header_names": default_header_names,
+                    "header_preview": {
+                        default_header_names["provider_id"]: provider_id,
+                        default_header_names["account_id"]: account.id,
+                        default_header_names["account_label"]: account.label,
+                        default_header_names["credential_ref"]: redact_credential_ref(credential_ref) if forwardable_ref else "",
+                        default_header_names["credential_type"]: credential_ref_type(credential_ref) if forwardable_ref else "",
+                        default_header_names["credential_reference_only"]: "true" if connector_reference_only(credential_ref, None) else "false",
+                    },
+                    "payload_account_fields": {
+                        "id": account.id,
+                        "label": account.label,
+                        "credential_ref": redact_credential_ref(credential_ref),
+                        "credential_ref_type": credential_ref_type(credential_ref),
+                        "credential_reference_only": connector_reference_only(credential_ref, None),
+                        "supported_operations": loads(account.supported_operations_json, []),
+                        "supported_provider_models": loads(account.supported_provider_models_json, []),
+                        "region": account.region,
+                        "plan": account.plan,
+                    },
+                },
+            }
+        )
+
+    endpoint_operations = operations or ["text_to_image", "image_to_image", "image_edit", "text_to_video", "image_to_video", "video_extend"]
+    endpoints = {
+        operation: connector_runtime_endpoint_for(operation, config)
+        for operation in endpoint_operations
+        if connector_runtime_endpoint_for(operation, config)
+    }
+    checks = [
+        {"id": "provider_active", "ok": provider.status == "active", "label": "Provider is active"},
+        {"id": "runner_base_url", "ok": bool(base_url), "label": "Optional runner base_url configured"},
+        {"id": "account_available", "ok": any(account_credential_available(db, account) for account in accounts), "label": "At least one account credential/reference is available"},
+        {"id": "endpoint_mapping", "ok": bool(endpoints), "label": "Submit endpoints are configured or inferable"},
+        {"id": "credential_ref_forwarding", "ok": credential_ref_headers_enabled, "label": "Credential reference forwarding headers enabled"},
+    ]
+    action_items = []
+    for check in checks:
+        if not check["ok"] and check["id"] != "runner_base_url":
+            action_items.append({"check": check["id"], "detail": {"label": check["label"]}})
+
+    return {
+        "object": "media2api.connector_runtime_diagnostics",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider": serialize_provider(provider),
+        "status": "ready" if not action_items else "action_required",
+        "summary": {
+            "provider_id": provider_id,
+            "adapter_type": provider.adapter_type,
+            "provider_status": provider.status,
+            "base_url_configured": bool(base_url),
+            "accounts": len(accounts),
+            "credential_ref_headers_enabled": credential_ref_headers_enabled,
+            "provider_auth_ref_configured": bool(provider_auth_ref),
+            "operations": list(endpoints.keys()),
+            "provider_models": provider_models,
+        },
+        "checks": checks,
+        "action_items": action_items,
+        "runtime_contract": {
+            "base_url": base_url,
+            "submit_method": "POST",
+            "endpoints": endpoints,
+            "health_endpoint": str(config.get("health_endpoint") or "/health"),
+            "quota_endpoint": str(config.get("quota_endpoint") or ""),
+            "poll_endpoint": str(config.get("poll_endpoint") or "{submit_endpoint}/{task_id}"),
+            "cancel_endpoint": str(config.get("cancel_endpoint") or ""),
+            "task_id_paths": config.get("task_id_paths") or config.get("task_id_fields") or DEFAULT_TASK_ID_PATHS,
+            "status_paths": config.get("status_paths") or config.get("status_fields") or DEFAULT_STATUS_PATHS,
+            "output_paths": config.get("output_paths") or config.get("result_paths") or DEFAULT_OUTPUT_PATHS,
+            "asset_payload_fields": ASSET_PAYLOAD_FIELDS,
+            "request_templates_configured": bool(config.get("request_templates") or config.get("payload_templates") or config.get("request_template") or config.get("payload_template")),
+            "request_template_operations": sorted((config.get("request_templates") or config.get("payload_templates") or {}).keys()) if isinstance(config.get("request_templates") or config.get("payload_templates"), dict) else [],
+            "merge_standard_account_context": config.get("merge_standard_account_context", True) is not False,
+            "drop_empty_template_values": config.get("drop_empty_template_values", True) is not False,
+            "completed_statuses": config.get("completed_statuses") or ["completed", "succeeded", "success", "done"],
+            "failed_statuses": config.get("failed_statuses") or ["failed", "error", "cancelled"],
+        },
+        "auth_contract": {
+            "provider_auth_ref": redact_credential_ref(provider_auth_ref),
+            "provider_auth_header": str(config.get("api_key_header") or "Authorization"),
+            "credential_ref_headers_enabled": credential_ref_headers_enabled,
+            "header_names": default_header_names,
+            "supported_reference_prefixes": list(CONNECTOR_REFERENCE_PREFIXES),
+            "inline_credentials_forwarded_as_reference": False,
+            "message": "Sidecars should authorize the media2api process with provider_auth_ref and resolve account credential_ref from payload.account or X-Media2API-* headers.",
+        },
+        "accounts": account_rows,
+    }
 
 
 def run_provider_health_check_preserve_active(db: Session, provider: models.Provider) -> dict[str, Any]:
@@ -1377,6 +3304,20 @@ def credential_ref_info(db: Session, credential_ref: str) -> dict[str, Any]:
             "status": "available",
             "available": True,
         }
+    for prefix, ref_type in [
+        ("vault://", "vault"),
+        ("subscription://", "subscription"),
+        ("oauth://", "oauth_reference"),
+        ("cli://", "cli_credential_reference"),
+        ("websession://", "web_session_reference"),
+        ("agent://", "agent_provider_credential"),
+        ("mcp://", "mcp_config_reference"),
+        ("endpoint://", "self_hosted_endpoint"),
+        ("connector://", "connector_reference"),
+        ("tokenref://", "token_reference"),
+    ]:
+        if credential_ref.startswith(prefix):
+            return {"type": ref_type, "ref": credential_ref, "status": "external_reference", "available": True}
     if credential_ref.startswith("plain://") or credential_ref.startswith("bearer://"):
         return {"type": "inline", "ref": credential_ref.split("://", 1)[0] + "://***", "status": "inline", "available": True}
     return {"type": "unknown", "ref": credential_ref, "status": "unknown", "available": False}
@@ -1411,7 +3352,15 @@ def normalize_account_credential_ref(
         if not value:
             raise ValueError("ACCOUNT_CREDENTIAL_REF_REQUIRED")
         secret_id = credential_secret_id or f"secret_{account_id}"
-        kind = "bearer_token" if scheme == "bearer" else credential_kind
+        raw_kind = (credential_kind or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if raw_kind in {"", "custom", "session", "api_key", "bearer_token", "aggregator_api_key", "token", "token_reference"}:
+            kind = "agent_provider"
+        elif raw_kind in COOKIE_ACCOUNT_CREDENTIAL_KIND_ALIASES:
+            kind = "cookie"
+        elif raw_kind in AGENT_ACCOUNT_CREDENTIAL_KIND_ALIASES:
+            kind = "agent_provider"
+        else:
+            kind = raw_kind
         secret = db.get(models.CredentialSecret, secret_id)
         if secret:
             secret_service.validate(kind, "active")
@@ -1435,8 +3384,36 @@ def normalize_account_credential_ref(
                 status="active",
             )
         return f"secret://{secret_id}", serialize_secret(secret)
-    if credential_ref.startswith(("secret://", "env://", "public://")):
+    if credential_ref.startswith(DIRECT_ACCOUNT_REF_PREFIXES):
         return credential_ref, None
+    if credential_ref.startswith(LEGACY_ACCOUNT_REF_PREFIXES):
+        secret_id = credential_secret_id or f"secret_{account_id}"
+        kind = "cookie" if credential_ref.startswith("websession://") else "agent_provider"
+        legacy_metadata = dict(metadata or {})
+        legacy_metadata.update({"legacy_reference": True, "legacy_reference_prefix": credential_ref.split("://", 1)[0] + "://"})
+        secret = db.get(models.CredentialSecret, secret_id)
+        if secret:
+            secret_service.validate(kind, "active")
+            secret.name = f"{label} credential reference"
+            secret.kind = kind
+            secret.provider_id = provider_id
+            secret.account_id = account_id
+            secret.metadata_json = dumps(legacy_metadata)
+            secret.status = "active"
+            secret_service.update_value(secret, credential_ref)
+        else:
+            secret = secret_service.create(
+                db,
+                secret_id=secret_id,
+                name=f"{label} credential reference",
+                value=credential_ref,
+                kind=kind,
+                provider_id=provider_id,
+                account_id=account_id,
+                metadata=legacy_metadata,
+                status="active",
+            )
+        return f"secret://{secret_id}", serialize_secret(secret)
     raise ValueError("ACCOUNT_CREDENTIAL_REF_UNSUPPORTED")
 
 
@@ -2326,13 +4303,20 @@ def apply_config_import(db: Session, req: ConfigImportRequest) -> dict[str, Any]
             continue
         existing = db.get(models.Provider, item_id)
         incoming_config = item.get("base_config") if isinstance(item.get("base_config"), dict) else {}
-        existing_config = loads(existing.base_config_json, {}) if existing else {}
+        try:
+            validate_runtime_base_url_fields(item_id, incoming_config, field_name="base_config")
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+            record_config_error(summary, "providers", item_id, str(detail.get("error") or "PROVIDER_CONFIG_INVALID"))
+            continue
+        existing_config = provider_runtime_config(item_id, loads(existing.base_config_json, {})) if existing else {}
         safe_config = merge_redacted_config(existing_config, incoming_config)
+        safe_config = provider_runtime_config(item_id, safe_config if isinstance(safe_config, dict) else {})
         values = {
             "name": str(item.get("name") or item_id),
             "adapter_type": str(item.get("adapter_type") or "http_adapter"),
             "status": str(item.get("status") or "disabled"),
-            "base_config_json": dumps(safe_config if isinstance(safe_config, dict) else {}),
+            "base_config_json": dumps(safe_config),
             "notes": str(item.get("notes") or ""),
         }
         if existing:
@@ -2392,29 +4376,66 @@ def apply_config_import(db: Session, req: ConfigImportRequest) -> dict[str, Any]
                     continue
             label = str(item.get("label") or item_id)
             provider_id = str(item.get("provider_id") or "")
-            inline = inline_credential_parts(credential_ref)
-            if inline:
-                if req.dry_run:
+            if req.dry_run:
+                if inline_credential_parts(credential_ref) or credential_ref.startswith(LEGACY_ACCOUNT_REF_PREFIXES):
                     credential_ref = f"secret://secret_{item_id}"
-                else:
-                    try:
-                        credential_ref, _ = normalize_account_credential_ref(
-                            db,
-                            account_id=item_id,
-                            provider_id=provider_id,
-                            label=label,
-                            credential_ref=credential_ref,
-                        )
-                    except ValueError as exc:
-                        record_config_error(summary, "accounts", item_id, str(exc))
-                        continue
-            elif not credential_ref.startswith(("secret://", "env://", "public://")):
-                record_config_error(summary, "accounts", item_id, "ACCOUNT_CREDENTIAL_REF_UNSUPPORTED")
+                elif not credential_ref.startswith(DIRECT_ACCOUNT_REF_PREFIXES):
+                    record_config_error(summary, "accounts", item_id, "ACCOUNT_CREDENTIAL_REF_UNSUPPORTED")
+                    continue
+            else:
+                try:
+                    credential_ref, _ = normalize_account_credential_ref(
+                        db,
+                        account_id=item_id,
+                        provider_id=provider_id,
+                        label=label,
+                        credential_ref=credential_ref,
+                    )
+                except ValueError as exc:
+                    record_config_error(summary, "accounts", item_id, str(exc))
+                    continue
+            resource_type = ""
+            try:
+                resource_type = validate_provider_resource_type(
+                    provider_id,
+                    infer_account_resource_type(provider_id, "", str(item.get("resource_type") or "")),
+                    credential_kind=str(item.get("credential_kind") or "custom"),
+                )
+                validate_required_platform_inputs(
+                    provider_id,
+                    auth_method="cookie_secret" if resource_type == "web_cookie_provider" else "agent_provider_credential",
+                    resource_type=resource_type,
+                    resource_profile=item.get("resource_profile") if isinstance(item.get("resource_profile"), dict) else {},
+                    credential_ref=credential_ref,
+                    credential_secret_id=str(item.get("credential_secret_id") or ""),
+                    db=db,
+                )
+                validate_credential_ref_resource_type(
+                    provider_id,
+                    resource_type,
+                    str(item.get("credential_ref") or ""),
+                    credential_kind=str(item.get("credential_kind") or "custom"),
+                    db=db,
+                )
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+                record_config_error(summary, "accounts", item_id, str(detail.get("error") or "ACCOUNT_RESOURCE_TYPE_INVALID"))
                 continue
             values = {
                 "provider_id": provider_id,
                 "label": label,
+                "resource_type": resource_type,
                 "credential_ref": credential_ref,
+                "resource_profile_json": dumps(
+                    build_account_resource_profile(
+                        provider_id=provider_id,
+                        auth_method="cookie_secret" if resource_type == "web_cookie_provider" else "agent_provider_credential",
+                        resource_type=resource_type,
+                        credential_kind=str(item.get("credential_kind") or "custom"),
+                        provider_base_url=None,
+                        resource_profile=item.get("resource_profile") if isinstance(item.get("resource_profile"), dict) else {},
+                    )
+                ),
                 "supported_operations_json": dumps(item.get("supported_operations") or []),
                 "supported_provider_models_json": dumps(item.get("supported_provider_models") or []),
                 "quota_buckets_json": dumps(item.get("quota_buckets") or []),
@@ -5036,7 +7057,7 @@ def build_provider_onboarding_report(db: Session) -> dict[str, Any]:
                 {
                     "check": "create_account",
                     "detail": {
-                        "credential_ref_suggestion": str((template.default_config if template else {}).get("credential_ref") or (template.default_config if template else {}).get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY"),
+                        "credential_ref_suggestion": str((template.default_config if template else {}).get("credential_ref") or (template.default_config if template else {}).get("api_key_ref") or "agent://providers/template/acct_01"),
                         "activate_endpoint": f"/v1/admin/provider-templates/{provider_id}/activate",
                     },
                 }
@@ -5062,7 +7083,7 @@ def build_provider_onboarding_report(db: Session) -> dict[str, Any]:
                 "status": status,
                 "configuration_ready": configuration_ready,
                 "validation_ready": validation_ready,
-                "template": template_as_dict(template) if template else None,
+                "template": provider_template_payload(template) if template else None,
                 "provider": serialize_provider(provider) if provider else None,
                 "target": {
                     "models": template_models,
@@ -5156,6 +7177,30 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/production-go-live-plan"),
     ("GET", "/v1/admin/connector-conformance-report"),
     ("GET", "/v1/admin/external-connector-preflight"),
+    ("GET", "/v1/admin/connector-registry"),
+    ("POST", "/v1/admin/connector-registry/refresh"),
+    ("GET", "/v1/admin/connector-registry/{project_id}/blueprint"),
+    ("POST", "/v1/admin/connector-registry/{project_id}/blueprint/apply"),
+    ("GET", "/v1/admin/account-guides"),
+    ("GET", "/v1/admin/account-guides/{provider_id}"),
+    ("POST", "/v1/admin/account-onboarding/plan"),
+    ("GET", "/v1/admin/account-setup-workflows"),
+    ("GET", "/v1/admin/account-setup-workflows/{provider_id}"),
+    ("POST", "/v1/admin/account-setup-workflows/{provider_id}/run"),
+    ("POST", "/v1/admin/account-setup-quickstart"),
+    ("GET", "/v1/admin/authorized-resource-sessions"),
+    ("POST", "/v1/admin/authorized-resource-sessions"),
+    ("GET", "/v1/admin/authorized-resource-sessions/{session_id}"),
+    ("POST", "/v1/admin/authorized-resource-sessions/{session_id}/complete"),
+    ("POST", "/v1/admin/authorized-resource-sessions/{session_id}/callback"),
+    ("POST", "/v1/admin/account-subscriptions/preview"),
+    ("POST", "/v1/admin/account-subscriptions/import"),
+    ("GET", "/v1/admin/account-subscription-sources"),
+    ("POST", "/v1/admin/account-subscription-sources"),
+    ("GET", "/v1/admin/account-subscription-sources/{source_id}"),
+    ("PATCH", "/v1/admin/account-subscription-sources/{source_id}"),
+    ("POST", "/v1/admin/account-subscription-sources/{source_id}/sync"),
+    ("POST", "/v1/admin/account-subscription-sources/{source_id}/production-sync"),
     ("GET", "/v1/admin/external-connector-manifest-template"),
     ("POST", "/v1/admin/external-connector-manifest"),
     ("GET", "/v1/admin/system-requirements-report"),
@@ -5175,6 +7220,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/accounts/self-test-cooldown"),
     ("POST", "/v1/admin/account-leases/self-test-expiry"),
     ("POST", "/v1/admin/provider-contract-suite"),
+    ("GET", "/v1/admin/providers/{provider_id}/connector-runtime"),
     ("POST", "/v1/admin/provider-templates/{template_id}/external-acceptance"),
     ("POST", "/v1/admin/accounts/{account_id}/external-acceptance"),
     ("POST", "/v1/admin/account-acceptance-suite"),
@@ -5246,6 +7292,9 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
     open_alert_count = db.query(models.AlertEvent).filter(models.AlertEvent.status == "open").count()
     active_lease_count = db.query(models.AccountLease).filter(models.AccountLease.status == "active").count()
     external_mixed_media = build_external_mixed_media_provider_snapshot(db)
+    connector_project_count = db.query(models.OpenSourceConnectorProject).count()
+    oauth_session_count = db.query(models.ConnectorOAuthSession).count()
+    subscription_source_count = db.query(models.AccountSubscriptionSource).count()
 
     modules = [
         module_row(
@@ -5314,6 +7363,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/providers/{provider_id}/health-check"),
                 ("POST", "/v1/admin/providers/{provider_id}/contract-test"),
                 ("POST", "/v1/admin/provider-contract-suite"),
+                ("GET", "/v1/admin/providers/{provider_id}/connector-runtime"),
                 ("POST", "/v1/admin/providers/{provider_id}/sync-quotas"),
                 ("POST", "/v1/admin/providers/{provider_id}/sync-capabilities"),
                 ("GET", "/v1/admin/providers/{provider_id}/capabilities"),
@@ -5329,6 +7379,90 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
             },
             data_ready=bool(provider_ids),
             action_items=[] if external_mixed_media.get("ready") else [{"check": "external_mixed_media_provider", "detail": external_mixed_media}],
+        ),
+        module_row(
+            "ConnectorRegistry",
+            "Scan local open-source connector repositories, classify providers/auth/models, and generate executable connector project blueprints.",
+            [
+                ("GET", "/v1/admin/connector-registry"),
+                ("POST", "/v1/admin/connector-registry/refresh"),
+                ("GET", "/v1/admin/connector-registry/{project_id}/blueprint"),
+                ("POST", "/v1/admin/connector-registry/{project_id}/blueprint/apply"),
+                ("GET", "/v1/admin/account-guides"),
+                ("GET", "/v1/admin/account-guides/{provider_id}"),
+                ("POST", "/v1/admin/account-onboarding/plan"),
+            ],
+            {
+                "scanned_projects": connector_project_count,
+                "reference_auth_types": REFERENCE_AUTH_TYPES,
+                "blueprint_contract": "project -> provider manifest -> authorized resource import/session capture -> production preflight commands",
+            },
+            action_items=[] if connector_project_count else [{"check": "connector_registry_scan", "detail": {"message": "Run /v1/admin/connector-registry/refresh after cloning res-repo."}}],
+        ),
+        module_row(
+            "AccountSetupWorkflows",
+            "Provide media sub2api-style setup workflows that show current gaps and run guided steps for manifest, resource-list compatibility import, Web Cookie/Agent Provider session capture, preflight, and acceptance.",
+            [
+                ("GET", "/v1/admin/account-setup-workflows"),
+                ("GET", "/v1/admin/account-setup-workflows/{provider_id}"),
+                ("POST", "/v1/admin/account-setup-workflows/{provider_id}/run"),
+                ("POST", "/v1/admin/account-setup-quickstart"),
+            ],
+            {
+                "providers": len(TARGET_MODEL_TABLE),
+                "supported_steps": [
+                    "plan",
+                    "project_blueprint",
+                    "apply_blueprint",
+                    "apply_manifest",
+                    "start_authorized_session",
+                    "start_oauth",
+                    "create_subscription_source",
+                    "sync_subscription_source",
+                    "production_sync",
+                    "preflight",
+                    "account_acceptance",
+                ],
+                "quickstart_modes": ["auto", "manifest", "subscription", "authorized_session"],
+            },
+        ),
+        module_row(
+            "AuthorizedResourceSessions",
+            "Delegate Web Cookie or Agent Provider capture flows to authorized runners and convert completed sessions into account credential references.",
+            [
+                ("GET", "/v1/admin/authorized-resource-sessions"),
+                ("POST", "/v1/admin/authorized-resource-sessions"),
+                ("GET", "/v1/admin/authorized-resource-sessions/{session_id}"),
+                ("POST", "/v1/admin/authorized-resource-sessions/{session_id}/complete"),
+                ("POST", "/v1/admin/authorized-resource-sessions/{session_id}/callback"),
+            ],
+            {
+                "sessions": oauth_session_count,
+                "contract": "connector returns authorize_url/session_id and later posts credential_ref to complete or callback",
+            },
+        ),
+        module_row(
+            "AccountSubscriptions",
+            "Import and continuously sync connector/sub2api account resource lists from resource-list URLs, JSON arrays, JSONL, or accounts/resources/items payloads; imported rows still normalize to Web Cookie or Agent Provider resources.",
+            [
+                ("POST", "/v1/admin/account-subscriptions/preview"),
+                ("POST", "/v1/admin/account-subscriptions/import"),
+                ("GET", "/v1/admin/account-subscription-sources"),
+                ("POST", "/v1/admin/account-subscription-sources"),
+                ("GET", "/v1/admin/account-subscription-sources/{source_id}"),
+                ("PATCH", "/v1/admin/account-subscription-sources/{source_id}"),
+                ("POST", "/v1/admin/account-subscription-sources/{source_id}/sync"),
+                ("POST", "/v1/admin/account-subscription-sources/{source_id}/production-sync"),
+                ("POST", "/v1/admin/account-onboarding/bulk"),
+                ("POST", "/v1/admin/account-onboarding"),
+            ],
+            {
+                "accepted_sources": ["resource_list_url_compat", "content_json", "jsonl", "accounts_array"],
+                "credential_refs": list(DIRECT_ACCOUNT_REF_PREFIXES),
+                "legacy_refs": "accepted only through compatibility import and stored as secret://",
+                "reference_auth_types": REFERENCE_AUTH_TYPES,
+                "subscription_sources": subscription_source_count,
+            },
         ),
         module_row(
             "Accounts",
@@ -5552,13 +7686,13 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
 
     def default_credential_ref(template: Any) -> str:
         ref = str((template.default_config or {}).get("credential_ref") or (template.default_config or {}).get("api_key_ref") or "")
-        return ref or "env://MEDIA2API_CONNECTOR_KEY"
+        return ref or f"agent://providers/{template.id}/acct_01"
 
     def default_credential_env(template: Any) -> str:
         ref = default_credential_ref(template)
         if ref.startswith("env://"):
             return ref.replace("env://", "", 1)
-        return f"{template.id.upper()}_CONNECTOR_KEY"
+        return f"{template.id.upper()}_AGENT_PROVIDER_PROFILE"
 
     def command_payload(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -5578,7 +7712,7 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
         mapping_operations = sorted({operation for mapping in enabled_mappings for operation in loads(mapping.operations_json, [])})
         credential_ref = default_credential_ref(template)
         env_name = default_credential_env(template)
-        base_url = str((template.default_config or {}).get("base_url") or "<connector-base-url>")
+        base_url = template_default_provider_base_url(template_id)
         account_credentials = [credential_ref_info(db, account.credential_ref) for account in accounts]
         credential_available = any(item.get("available") for item in account_credentials) or bool(credential_ref_info(db, credential_ref).get("available"))
         provider_snapshot = provider_snapshots.get(template_id, {})
@@ -5597,7 +7731,6 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
         if covered and not provider_snapshot.get("ready"):
             candidate_action_items.append({"check": "run_external_acceptance", "detail": {"operations": covered, "endpoint": f"/v1/admin/provider-templates/{template_id}/external-acceptance"}})
         activate_payload = {
-            "base_url": base_url if base_url.startswith("http") else "<connector-base-url>",
             "credential_ref": credential_ref,
             "status": "active",
             "account_status": "active",
@@ -5609,6 +7742,8 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
             "contract_run_submit": False,
             "run_quota_sync": True,
         }
+        if base_url:
+            activate_payload["base_url"] = base_url
         acceptance_payload = {
             **activate_payload,
             "operations": covered or list(template.operations),
@@ -5627,6 +7762,7 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
             "template_operations": list(template.operations),
             "template_models": list(template.models),
             "default_base_url": base_url,
+            "runtime_base_url_policy": "Add base_url only when the matched project explicitly requires a runner endpoint.",
             "credential": {
                 "suggested_ref": credential_ref,
                 "suggested_env": env_name,
@@ -5652,7 +7788,7 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
                 "activate_live": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/provider-templates/{template_id}/activate -d '{command_payload({**activate_payload, 'dry_run': False})}'",
                 "external_acceptance_dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/provider-templates/{template_id}/external-acceptance -d '{command_payload({**acceptance_payload, 'dry_run': True})}'",
                 "external_acceptance_live": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" http://localhost:8080/v1/admin/provider-templates/{template_id}/external-acceptance -d '{command_payload({**acceptance_payload, 'dry_run': False})}'",
-                "scripted_acceptance": f".venv\\Scripts\\python.exe scripts\\external_provider_acceptance.py --base-url http://192.168.31.26:18082 --api-key dev-admin-key --template-id {template_id} --provider-base-url {base_url if base_url.startswith('http') else '<connector-base-url>'} --credential-env {env_name} --run-samples --max-samples {min(max(len(covered), 1), 4)}",
+                "scripted_acceptance": f".venv\\Scripts\\python.exe scripts\\external_provider_acceptance.py --base-url http://192.168.31.26:18082 --api-key dev-admin-key --template-id {template_id}{(' --provider-base-url ' + base_url) if base_url else ''} --credential-env {env_name} --run-samples --max-samples {min(max(len(covered), 1), 4)}",
             },
         }
 
@@ -5722,7 +7858,7 @@ def build_production_go_live_plan(db: Session) -> dict[str, Any]:
             "acceptance_audit": ".venv\\Scripts\\python.exe scripts\\acceptance_audit.py --base-url http://192.168.31.26:18082 --api-key dev-admin-key",
         },
         "operator_notes": [
-            "Provide an authorized third-party connector base_url and credential reference or secret value before running live acceptance.",
+            "Provide authorized Web Cookie/session or Agent Provider profile material before running live acceptance; add runner base_url only when the matched project requires it.",
             "Run dry-run activation first, then live activation, then external acceptance with run_samples=true.",
             "Production readiness requires at least one non-mock provider/account pool covering text_to_image, image_edit, text_to_video, and image_to_video.",
         ],
@@ -5798,7 +7934,7 @@ def build_connector_conformance_report(
                 }
             )
             continue
-        config = loads(provider.base_config_json, {}) if provider else dict(template.default_config if template else {})
+        config = provider_runtime_config(target_id, loads(provider.base_config_json, {})) if provider else provider_runtime_config(target_id, template.default_config if template else {})
         base_url = str(config.get("base_url") or "")
         if provider:
             snapshot = capability_service.snapshot(db, provider)
@@ -5897,15 +8033,13 @@ def build_connector_conformance_report(
             provider_action_items.append({"check": "install_template", "detail": {"endpoint": f"/v1/admin/provider-templates/{target_id}/install"}})
         elif provider_status != "active":
             provider_action_items.append({"check": "provider_status", "detail": {"status": provider_status, "endpoint": f"/v1/admin/provider-templates/{target_id}/activate"}})
-        if not base_url:
-            provider_action_items.append({"check": "base_url", "detail": {"status": "missing"}})
         if latest_health and latest_health.get("status") != "ok":
             provider_action_items.append({"check": "health", "detail": latest_health})
         if not latest_health and provider:
             provider_action_items.append({"check": "health", "detail": {"status": "untested", "endpoint": f"/v1/admin/providers/{target_id}/health-check"}})
         if not capability_last_sync_at and provider:
             provider_action_items.append({"check": "capability_sync", "detail": {"status": "not_synced", "endpoint": f"/v1/admin/providers/{target_id}/sync-capabilities"}})
-        provider_ready = provider_status == "active" and bool(base_url) and all(row["ready"] for row in operation_rows)
+        provider_ready = provider_status == "active" and all(row["ready"] for row in operation_rows)
         provider_rows.append(
             {
                 "provider_id": target_id,
@@ -6065,8 +8199,6 @@ def build_external_connector_preflight(
             provider_action_items.append({"check": "provider_install", "detail": {"status": "missing", "template_available": bool(template)}})
         elif provider.status != "active":
             provider_action_items.append({"check": "provider_status", "detail": {"status": provider.status, "expected": "active"}})
-        if not conformance_provider.get("base_url_configured"):
-            provider_action_items.append({"check": "base_url", "detail": {"status": "missing"}})
         for row in operation_rows:
             if not row.get("ready"):
                 provider_action_items.append(
@@ -6084,10 +8216,14 @@ def build_external_connector_preflight(
         elif not accounts:
             provider_action_items.append({"check": "account", "detail": {"status": "missing_for_provider"}})
 
-        activation_payload = {
-            "base_url": "https://connector.example.com",
+        install_payload = {
             "credential_secret_id": f"secret_{target_provider_id}",
-            "credential_kind": "bearer_token",
+            "status": "active",
+            "account_status": "active",
+        }
+        activation_payload = {
+            "credential_secret_id": f"secret_{target_provider_id}",
+            "credential_kind": "agent_provider",
             "account_id": account_id or f"acct_{target_provider_id}_default",
             "dry_run": False,
             "run_health_check": True,
@@ -6107,8 +8243,9 @@ def build_external_connector_preflight(
                 "conformance": conformance_provider,
                 "accounts": account_rows,
                 "action_items": provider_action_items,
+                "runtime_base_url_policy": "Only add base_url to these payloads when the matched open-source project explicitly requires a runner endpoint.",
                 "commands": {
-                    "install_template": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-templates/{target_provider_id}/install -d '{command_payload({'base_url': 'https://connector.example.com', 'credential_secret_id': f'secret_{target_provider_id}', 'status': 'active', 'account_status': 'active'})}'",
+                    "install_template": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-templates/{target_provider_id}/install -d '{command_payload(install_payload)}'",
                     "activate_template": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-templates/{target_provider_id}/activate -d '{command_payload(activation_payload)}'",
                     "sync_capabilities": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/providers/{target_provider_id}/sync-capabilities",
                     "health_check": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/providers/{target_provider_id}/health-check",
@@ -6134,14 +8271,21 @@ def build_external_connector_preflight(
         "providers": provider_results,
         "operator_notes": [
             "Preflight is read-only and does not call upstream connector endpoints.",
-            "Run sync_capabilities, health_check, contract_suite, then account_acceptance_suite after credentials and connector base_url are configured.",
+            "Run sync_capabilities, health_check, contract_suite, then account_acceptance_suite after Web Cookie/session or Agent Provider profile material is configured.",
         ],
     }
 
 
 def connector_manifest_env_ref(provider_id: str) -> str:
-    key = "".join(ch if ch.isalnum() else "_" for ch in provider_id).upper()
-    return f"env://MEDIA2API_{key}_CONNECTOR_TOKEN"
+    key = "".join(ch if ch.isalnum() else "_" for ch in provider_id).lower()
+    return f"agent://providers/{key}/acct_01"
+
+
+def connector_manifest_resource_ref(provider_id: str, resource_type: str | None) -> str:
+    key = "".join(ch if ch.isalnum() else "_" for ch in provider_id).lower()
+    if resource_type == "web_cookie_provider":
+        return f"secret://providers/{key}/cookie_01"
+    return f"agent://providers/{key}/acct_01"
 
 
 def connector_manifest_operations(template_operations: list[str], requested_operations: list[str] | None = None) -> list[str]:
@@ -6171,11 +8315,23 @@ def build_external_connector_manifest_template(db: Session, provider_id: str | N
         .all()
     )
     default_operations = connector_manifest_operations(template.operations)
+    guide = connector_registry_service.provider_guide(db, template.id)
+    auth_method = validate_provider_auth_method(template.id, str((guide.get("recommended_auth_methods") or ["agent_provider_credential"])[0]))
+    resource_type = validate_provider_resource_type(
+        template.id,
+        str(guide.get("resource_type") or ""),
+        auth_method=auth_method,
+        credential_kind=credential_kind_for_auth_method(auth_method),
+    )
+    credential_kind = normalize_account_secret_kind(resource_type, credential_kind_for_auth_method(auth_method))
+    resource_profile_template = platform_resource_profile_template(template.id)
+    credential_ref_example = connector_manifest_resource_ref(template.id, resource_type)
     default_manifest = {
         "provider_id": template.id,
-        "base_url": "https://connector.example.com",
-        "credential_ref": connector_manifest_env_ref(template.id),
-        "credential_kind": "bearer_token",
+        "credential_ref": credential_ref_example,
+        "credential_kind": credential_kind,
+        "resource_type": resource_type,
+        "resource_profile": resource_profile_template,
         "status": "active",
         "account_status": "active",
         "concurrency_limit": 1,
@@ -6193,8 +8349,10 @@ def build_external_connector_manifest_template(db: Session, provider_id: str | N
             {
                 "account_id": f"acct_{template.id}_default",
                 "account_label": f"{template.name} default",
-                "credential_ref": connector_manifest_env_ref(template.id),
-                "credential_kind": "bearer_token",
+                "resource_type": resource_type,
+                "resource_profile": resource_profile_template,
+                "credential_ref": credential_ref_example,
+                "credential_kind": credential_kind,
                 "concurrency_limit": 1,
                 "priority_offset": 0,
             }
@@ -6208,9 +8366,15 @@ def build_external_connector_manifest_template(db: Session, provider_id: str | N
         "object": "media2api.external_connector_manifest_template",
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "provider_id": template.id,
-        "template": template_as_dict(template),
+        "template": provider_template_payload(template),
         "supported_required_operations": default_operations,
         "missing_required_operations": sorted(set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS) - set(template.operations)),
+        "input_requirements": PLATFORM_INPUT_REQUIREMENTS.get(template.id, {}).get("user_inputs", []),
+        "dynamic_profile_fields": platform_dynamic_profile_inputs(template.id),
+        "resource_profile_template": resource_profile_template,
+        "accepted_auth_methods": provider_allowed_auth_methods(template.id),
+        "default_auth_method": auth_method,
+        "default_resource_type": resource_type,
         "default_manifest": default_manifest,
         "current_state": {
             "provider_installed": bool(provider),
@@ -6224,7 +8388,7 @@ def build_external_connector_manifest_template(db: Session, provider_id: str | N
             "preflight": f"curl -H \"Authorization: Bearer dev-admin-key\" {settings.public_base_url}/v1/admin/external-connector-preflight?provider_id={template.id}",
         },
         "operator_notes": [
-            "Use dry_run=true until connector base_url and authorized credential references are confirmed.",
+            "Use dry_run=true until Web Cookie/session or Agent Provider profile material is confirmed; runner base_url is only needed when the matched project requires it.",
             "credential_value can be supplied for a local install, but it is converted to a secret and never returned by this endpoint.",
             "Use accounts[] for account pools; each account keeps its own credential reference, concurrency limit, and priority offset.",
         ],
@@ -6246,6 +8410,7 @@ def build_external_connector_manifest(
     results: list[dict[str, Any]] = []
     action_items: list[dict[str, Any]] = []
     default_credential_ref = req.credential_ref or connector_manifest_env_ref(template.id)
+    requested_base_url = validate_provider_base_url_input(template.id, req.base_url) if req.base_url else template_default_provider_base_url(template.id)
     total_accounts = len(account_specs)
 
     for index, account_spec in enumerate(account_specs):
@@ -6256,6 +8421,10 @@ def build_external_connector_manifest(
             account_id = f"{account_id}_{index + 1}"
 
         credential_kind = account_spec.credential_kind or req.credential_kind
+        resource_type = account_spec.resource_type or req.resource_type
+        resource_profile = {**(req.resource_profile or {}), **(account_spec.resource_profile or {})}
+        validate_runtime_base_url_fields(template.id, resource_profile, field_name="resource_profile")
+        validate_platform_resource_profile_fields(template.id, resource_profile, field_name="resource_profile")
         credential_ref = account_spec.credential_ref or default_credential_ref
         credential_value = account_spec.credential_value if account_spec.credential_value is not None else req.credential_value
         if credential_value is not None:
@@ -6265,10 +8434,12 @@ def build_external_connector_manifest(
             redacted_credential_ref = redact_credential_ref(credential_ref)
 
         activate_req = TemplateActivateRequest(
-            base_url=req.base_url,
+            base_url=requested_base_url or None,
             credential_ref=credential_ref,
             credential_secret_id=account_spec.credential_secret_id or req.credential_secret_id,
             credential_kind=credential_kind,
+            resource_type=resource_type,
+            resource_profile=resource_profile,
             credential_value=credential_value,
             status=req.status,
             account_status=account_spec.account_status or req.account_status,
@@ -6286,6 +8457,9 @@ def build_external_connector_manifest(
             run_quota_sync=req.run_quota_sync,
         )
         activation = admin_activate_provider_template(template.id, activate_req, ctx, db)
+        activation_plan = activation.get("plan") if isinstance(activation.get("plan"), dict) else {}
+        normalized_result_kind = str(activation_plan.get("credential_kind") or credential_kind)
+        normalized_result_resource_type = str(activation_plan.get("resource_type") or resource_type or "")
         if not activation.get("ok"):
             action_items.append({"check": "activation", "detail": {"account_id": account_id, "status": activation.get("status"), "action_items": activation.get("action_items", [])}})
         results.append(
@@ -6294,7 +8468,8 @@ def build_external_connector_manifest(
                 "account_label": activate_req.account_label,
                 "credential_ref": redacted_credential_ref,
                 "credential_secret_id": activate_req.credential_secret_id or "",
-                "credential_kind": credential_kind,
+                "credential_kind": normalized_result_kind,
+                "resource_type": normalized_result_resource_type,
                 "credential_value_provided": credential_value is not None,
                 "concurrency_limit": activate_req.concurrency_limit,
                 "priority_offset": activate_req.priority_offset,
@@ -6315,12 +8490,13 @@ def build_external_connector_manifest(
         "dry_run": req.dry_run,
         "provider_id": template.id,
         "operations": operations,
-        "template": template_as_dict(template),
+        "template": provider_template_payload(template),
         "manifest": {
             "provider_id": template.id,
-            "base_url": req.base_url or str(template.default_config.get("base_url") or ""),
+            **({"base_url": requested_base_url} if requested_base_url else {}),
             "credential_ref": redact_credential_ref(default_credential_ref),
-            "credential_kind": req.credential_kind,
+            "credential_kind": results[0]["credential_kind"] if results else req.credential_kind,
+            "resource_type": results[0]["resource_type"] if results else req.resource_type or "",
             "credential_secret_id": req.credential_secret_id or "",
             "credential_value_provided": req.credential_value is not None,
             "accounts": [
@@ -6330,6 +8506,7 @@ def build_external_connector_manifest(
                     "credential_ref": item["credential_ref"],
                     "credential_secret_id": item["credential_secret_id"],
                     "credential_kind": item["credential_kind"],
+                    "resource_type": item["resource_type"],
                     "credential_value_provided": item["credential_value_provided"],
                     "concurrency_limit": item["concurrency_limit"],
                     "priority_offset": item["priority_offset"],
@@ -6345,6 +8522,1219 @@ def build_external_connector_manifest(
             "external_acceptance_dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/provider-templates/{template.id}/external-acceptance -d '{json.dumps({'dry_run': True, 'operations': operations, 'run_samples': False}, ensure_ascii=False, separators=(',', ':'))}'",
             "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': True, 'external_only': True, 'provider_ids': [template.id], 'operations': operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
         },
+    }
+
+
+def connector_project_slug(value: str, *, max_length: int) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
+    slug = "_".join(part for part in slug.split("_") if part)
+    return (slug or "project")[:max_length].rstrip("_") or "project"
+
+
+def connector_project_default_account_id(provider_id: str, project_id: str) -> str:
+    provider_slug = connector_project_slug(provider_id, max_length=18)
+    project_slug = connector_project_slug(project_id, max_length=42)
+    return f"acct_{provider_slug}_{project_slug}"[:64].rstrip("_")
+
+
+def connector_project_default_source_id(provider_id: str, project_id: str) -> str:
+    provider_slug = connector_project_slug(provider_id, max_length=20)
+    project_slug = connector_project_slug(project_id, max_length=64)
+    return f"subsrc_{provider_slug}_{project_slug}"[:96].rstrip("_")
+
+
+def connector_project_safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(payload)
+    if safe.get("credential_value"):
+        safe["credential_value"] = "[secret]"
+    if safe.get("content"):
+        safe["content"] = "[content]"
+    if safe.get("subscription_content"):
+        safe["subscription_content"] = "[content]"
+    if safe.get("subscription_url"):
+        safe["subscription_url"] = redact_subscription_url(str(safe["subscription_url"]))
+    if safe.get("credential_ref"):
+        safe["credential_ref"] = redact_credential_ref(str(safe["credential_ref"]))
+    return {key: value for key, value in safe.items() if value not in (None, "", [], {})}
+
+
+def connector_project_command_payload(payload: dict[str, Any]) -> str:
+    return json.dumps(connector_project_safe_payload(payload), ensure_ascii=False, separators=(",", ":"))
+
+
+def connector_project_first_auth_method(project_auth_types: list[str], guide: dict[str, Any], requested_auth_method: str | None = None) -> str:
+    candidates = []
+    if requested_auth_method:
+        requested = str(requested_auth_method).strip()
+        if requested not in set(REFERENCE_AUTH_TYPES):
+            raise HTTPException(status_code=400, detail={"error": "AUTH_METHOD_UNSUPPORTED", "allowed_auth_methods": REFERENCE_AUTH_TYPES})
+        candidates.append(requested)
+    candidates.extend(project_auth_types)
+    candidates.extend(guide.get("recommended_auth_methods") or [])
+    candidates.extend(["agent_provider_credential"])
+    for method in candidates:
+        if method in set(REFERENCE_AUTH_TYPES):
+            return method
+    return "agent_provider_credential"
+
+
+def build_connector_project_blueprint(
+    db: Session,
+    project_id: str,
+    req: ConnectorProjectBlueprintRequest,
+) -> dict[str, Any]:
+    project = db.get(models.OpenSourceConnectorProject, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail={"error": "CONNECTOR_PROJECT_NOT_FOUND"})
+    project_payload = connector_registry_service.serialize_project(project)
+    provider_candidates = [str(item) for item in project_payload.get("provider_ids", []) if str(item)]
+    provider_id = (req.provider_id or (provider_candidates[0] if provider_candidates else "")).strip()
+    if not provider_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "CONNECTOR_PROJECT_PROVIDER_REQUIRED",
+                "message": "The project scan did not infer a provider. Pass provider_id explicitly.",
+            },
+        )
+    guide = connector_registry_service.provider_guide(db, provider_id)
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    default_operations, default_models = provider_default_operations_and_models(provider_id)
+    project_operations = [str(item) for item in project_payload.get("operations", []) if str(item)]
+    project_models = [str(item) for item in project_payload.get("models", []) if str(item)]
+    project_auth_types = [str(item) for item in project_payload.get("auth_types", []) if str(item)]
+    project_evidence = project_payload.get("evidence") if isinstance(project_payload.get("evidence"), dict) else {}
+    project_classification = project_evidence.get("classification") if isinstance(project_evidence.get("classification"), dict) else {}
+    raw_auth_hints = [str(item) for item in project_classification.get("raw_auth_hints", []) if str(item)]
+    action_items: list[dict[str, Any]] = []
+
+    if provider_candidates and provider_id not in provider_candidates:
+        action_items.append(
+            {
+                "check": "provider_override",
+                "detail": {"selected_provider_id": provider_id, "inferred_provider_ids": provider_candidates},
+            }
+        )
+    if not template:
+        action_items.append(
+            {
+                "check": "provider_template",
+                "detail": {"provider_id": provider_id, "status": "missing", "message": "Create a provider template before applying this project."},
+            }
+        )
+        operations = req.operations or project_operations or default_operations
+    else:
+        requested_operations = req.operations or [operation for operation in project_operations if operation in template.operations]
+        operations = connector_manifest_operations(template.operations, requested_operations)
+        missing_project_operations = sorted(set(project_operations) - set(template.operations))
+        if missing_project_operations:
+            action_items.append(
+                {
+                    "check": "project_operation_coverage",
+                    "detail": {
+                        "provider_id": provider_id,
+                        "missing_from_template": missing_project_operations,
+                        "template_operations": template.operations,
+                    },
+                }
+            )
+
+    supported_provider_models = req.supported_provider_models or [model for model in project_models if model in default_models] or default_models
+    auth_method = connector_project_first_auth_method(project_auth_types, guide, req.auth_method)
+    auth_method = validate_provider_auth_method(provider_id, auth_method)
+    credential_kind = req.credential_kind or credential_kind_for_auth_method(auth_method)
+    resource_type = validate_provider_resource_type(provider_id, req.resource_type or str(guide.get("resource_type") or ""), auth_method=auth_method, credential_kind=credential_kind)
+    account_id = req.account_id or str((guide.get("payload_template") or {}).get("account_id") or "") or connector_project_default_account_id(provider_id, project_id)
+    account_label = req.account_label or f"{project.repo or project_id} {provider_id} account"
+    base_url = validate_provider_base_url_input(provider_id, req.base_url) if req.base_url else ""
+    credential_ref = req.credential_ref or (f"secret://{req.credential_secret_id}" if req.credential_secret_id else "")
+    if not credential_ref and not req.credential_value:
+        credential_ref = str((guide.get("payload_template") or {}).get("credential_ref") or connector_manifest_env_ref(provider_id))
+    if not credential_ref and req.credential_value:
+        credential_ref = connector_manifest_env_ref(provider_id)
+    validate_runtime_base_url_fields(provider_id, req.resource_profile or {}, field_name="resource_profile")
+    validate_platform_resource_profile_fields(provider_id, req.resource_profile or {}, field_name="resource_profile")
+    resource_profile = provider_runtime_config(provider_id, req.resource_profile or {})
+    missing_profile_inputs = missing_required_profile_inputs(provider_id, resource_profile)
+    if missing_profile_inputs:
+        action_items.append(
+            {
+                "check": "required_platform_profile_inputs",
+                "detail": {
+                    "status": "operator_input_required",
+                    "missing_input_fields": [
+                        {"name": item.get("name"), "label": item.get("label"), "evidence": item.get("evidence")}
+                        for item in missing_profile_inputs
+                    ],
+                    "resource_profile_template": platform_resource_profile_template(provider_id),
+                },
+            }
+        )
+
+    source_requested = bool(req.create_subscription_source or req.subscription_url or req.subscription_content or "subscription_url" in raw_auth_hints)
+    source_id = req.source_id or connector_project_default_source_id(provider_id, project_id)
+    source_has_input = bool(req.subscription_url or (req.subscription_content and req.persist_subscription_content))
+    if req.create_subscription_source and not source_has_input:
+        action_items.append(
+            {
+                "check": "subscription_source_input",
+                "detail": {
+                    "status": "operator_input_required",
+                    "message": "Provide a resource-list URL via subscription_url, or persisted content before creating a persistent resource-list source.",
+                },
+            }
+        )
+
+    manifest_payload = {
+        "provider_id": provider_id,
+        "base_url": base_url,
+        "resource_type": resource_type,
+        "resource_profile": resource_profile,
+        "credential_ref": credential_ref,
+        "credential_secret_id": req.credential_secret_id,
+        "credential_kind": credential_kind,
+        "credential_value": req.credential_value,
+        "status": req.status,
+        "account_status": req.account_status,
+        "account_id": account_id,
+        "account_label": account_label,
+        "concurrency_limit": max(1, req.concurrency_limit),
+        "priority_offset": req.priority_offset,
+        "enable_mappings": True,
+        "overwrite_config": True,
+        "dry_run": True,
+        "operations": operations,
+        "contract_operations": operations,
+        "contract_run_submit": req.contract_run_submit,
+        "run_health_check": req.run_health_check,
+        "run_contract_tests": req.run_contract_tests,
+        "run_quota_sync": req.run_quota_sync,
+        "include_preflight": req.include_preflight,
+    }
+    source_payload = {
+        "id": source_id,
+        "provider_id": provider_id,
+        "name": req.source_name or f"{project.repo or project_id} {provider_id} resource list source",
+        "auth_method": auth_method,
+        "subscription_url": req.subscription_url,
+        "content": req.subscription_content,
+        "persist_content": req.persist_subscription_content,
+        "provider_base_url": base_url,
+        "provider_config": {},
+        "supported_operations": operations or default_operations,
+        "supported_provider_models": supported_provider_models,
+        "quota_buckets": req.quota_buckets,
+        "concurrency_limit": max(1, req.concurrency_limit),
+        "region": req.region,
+        "plan": req.plan or resource_type or project.project_type,
+        "status": req.status,
+        "max_items": max(1, req.source_max_items),
+        "fetch_timeout_seconds": 15,
+        "sync_capabilities": req.sync_capabilities,
+        "run_health_check": req.run_health_check,
+        "sync_now": req.sync_source_now,
+    }
+    authorized_session_raw_hints = {"oauth_reference", "web_session_reference", "cli_credential_reference", "mcp_config_reference"}
+    authorized_session_payload = None
+    if authorized_session_raw_hints.intersection(raw_auth_hints):
+        authorized_session_payload = {
+            "provider_id": provider_id,
+            "account_id": account_id,
+            "label": account_label,
+            "provider_base_url": base_url,
+            "auth_method": auth_method,
+            "resource_type": resource_type,
+            "resource_profile": resource_profile,
+            "supported_operations": operations or default_operations,
+            "supported_provider_models": supported_provider_models,
+            "dry_run": False,
+        }
+    production_sync_payload = {
+        "dry_run": True,
+        "operations": operations or default_operations,
+        "sync_capabilities": True,
+        "run_health_check": True,
+        "run_quota_sync": True,
+        "include_preflight": True,
+        "run_acceptance": False,
+        "run_samples": False,
+        "max_samples": 1,
+        "max_accounts": 20,
+        "require_production_ready": False,
+        "contract_run_submit": False,
+    }
+    apply_request_payload = req.model_dump(exclude_none=True)
+    apply_request_payload.update(
+        {
+            "provider_id": provider_id,
+            "account_id": account_id,
+            "account_label": account_label,
+            "auth_method": auth_method,
+            "credential_ref": credential_ref,
+            "credential_kind": credential_kind,
+            "base_url": base_url,
+            "resource_type": resource_type,
+            "resource_profile": resource_profile,
+            "operations": operations,
+            "dry_run": False,
+        }
+    )
+    dry_run_request_payload = dict(apply_request_payload)
+    dry_run_request_payload["dry_run"] = True
+    base = settings.public_base_url
+    project_route = f"{base}/v1/admin/connector-registry/{project_id}/blueprint"
+    apply_route = f"{project_route}/apply"
+    source_route = f"{base}/v1/admin/account-subscription-sources"
+    commands = {
+        "get_blueprint": f"curl -H \"Authorization: Bearer dev-admin-key\" {project_route}?provider_id={provider_id}",
+        "dry_run_apply_blueprint": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {apply_route} -d '{connector_project_command_payload(dry_run_request_payload)}'",
+        "apply_blueprint": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {apply_route} -d '{connector_project_command_payload(apply_request_payload)}'",
+        "apply_manifest_only": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/external-connector-manifest -d '{connector_project_command_payload({**manifest_payload, 'dry_run': False})}'",
+        "preflight": f"curl -H \"Authorization: Bearer dev-admin-key\" {base}/v1/admin/external-connector-preflight?provider_id={provider_id}",
+        "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': True, 'external_only': True, 'provider_ids': [provider_id], 'account_ids': [account_id], 'operations': operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
+    }
+    if source_requested:
+        commands["create_subscription_source"] = f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {source_route} -d '{connector_project_command_payload(source_payload)}'"
+        commands["production_sync_subscription_source"] = f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {source_route}/{source_id}/production-sync -d '{json.dumps(production_sync_payload, ensure_ascii=False, separators=(',', ':'))}'"
+    if authorized_session_payload:
+        commands["start_authorized_resource_session"] = f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/authorized-resource-sessions -d '{connector_project_command_payload(authorized_session_payload)}'"
+
+    status = "ready_to_apply" if template and not action_items else "action_required"
+    return {
+        "object": "media2api.connector_project_blueprint",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": status,
+        "ok": bool(template),
+        "project": project_payload,
+        "provider_id": provider_id,
+        "provider_override": provider_id not in provider_candidates if provider_candidates else False,
+        "resource_type": resource_type or guide.get("resource_type") or project.project_type,
+        "auth_method": auth_method,
+        "credential_kind": credential_kind,
+        "operations": operations,
+        "supported_provider_models": supported_provider_models,
+        "input_requirements": PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []),
+        "dynamic_profile_fields": platform_dynamic_profile_inputs(provider_id),
+        "resource_profile_template": platform_resource_profile_template(provider_id),
+        "risk_gates": [
+            {"gate": "license_review", "status": "required" if not project.license or project.license == "GPL" else "informational", "license": project.license or "unknown"},
+            {"gate": "connector_conformance", "status": "required", "message": "Run preflight and account acceptance before enabling production traffic."},
+            {"gate": "web_session_safety", "status": "required" if project.risk_level == "high_risk_unofficial" else "informational", "risk_level": project.risk_level},
+        ],
+        "external_connector_manifest": {
+            "available": bool(template),
+            "payload": connector_project_safe_payload(manifest_payload),
+        },
+        "account_subscription_source": {
+            "requested": source_requested,
+            "has_input": source_has_input,
+            "payload": connector_project_safe_payload(source_payload) if source_requested else None,
+        },
+        "authorized_resource_session": {
+            "recommended": bool(authorized_session_payload),
+            "payload": connector_project_safe_payload(authorized_session_payload or {}) if authorized_session_payload else None,
+        },
+        "oauth_session": {
+            "compatibility_alias": True,
+            "recommended": bool(authorized_session_payload),
+            "payload": connector_project_safe_payload(authorized_session_payload or {}) if authorized_session_payload else None,
+        },
+        "production_sync": {
+            "source_id": source_id,
+            "payload": production_sync_payload,
+        },
+        "commands": commands,
+        "action_items": action_items,
+        "operator_notes": [
+            "This blueprint never executes code from res-repo. It only installs media2api provider/account metadata and optional resource-list compatibility sources.",
+            "Use credential_ref values returned by a Web Cookie/session helper or Agent Provider runner. Do not paste passwords, verification codes, or unofficial login automation into this platform.",
+            "Run preflight, connector contract tests, quota sync, and account acceptance before sending production traffic.",
+        ],
+    }
+
+
+def apply_connector_project_blueprint(
+    db: Session,
+    ctx: AuthContext,
+    project_id: str,
+    req: ConnectorProjectBlueprintRequest,
+) -> dict[str, Any]:
+    blueprint = build_connector_project_blueprint(db, project_id, req)
+    if req.dry_run:
+        return {
+            "object": "media2api.connector_project_blueprint_apply",
+            "status": "planned",
+            "ok": True,
+            "dry_run": True,
+            "blueprint": blueprint,
+            "applied": {},
+            "action_items": blueprint.get("action_items", []),
+        }
+
+    if req.apply_manifest and not blueprint.get("ok"):
+        raise HTTPException(status_code=400, detail={"error": "CONNECTOR_PROJECT_BLUEPRINT_NOT_APPLICABLE", "action_items": blueprint.get("action_items", [])})
+
+    applied: dict[str, Any] = {}
+    action_items: list[dict[str, Any]] = list(blueprint.get("action_items", []))
+    if req.apply_manifest:
+        manifest_payload = dict((blueprint.get("external_connector_manifest") or {}).get("payload") or {})
+        if req.credential_ref:
+            manifest_payload["credential_ref"] = req.credential_ref
+        if req.credential_value:
+            manifest_payload["credential_value"] = req.credential_value
+        manifest_payload["dry_run"] = False
+        applied["manifest"] = build_external_connector_manifest(db, ctx, ExternalConnectorManifestRequest(**manifest_payload))
+
+    source_info = blueprint.get("account_subscription_source") or {}
+    source_payload = dict(source_info.get("payload") or {})
+    if req.subscription_url:
+        source_payload["subscription_url"] = req.subscription_url
+    if req.subscription_content:
+        source_payload["content"] = req.subscription_content
+        source_payload["persist_content"] = req.persist_subscription_content
+    source_id = str(source_payload.get("id") or "")
+    source_requested = bool(req.create_subscription_source or req.subscription_url or req.subscription_content)
+    if source_requested:
+        if not source_info.get("has_input"):
+            action_items.append({"check": "subscription_source_apply", "detail": {"status": "skipped", "reason": "SUBSCRIPTION_SOURCE_INPUT_REQUIRED"}})
+        else:
+            applied["subscription_source"] = upsert_account_subscription_source(db, AccountSubscriptionSourceRequest(**source_payload))
+            if req.run_production_sync and source_id:
+                applied["production_sync"] = production_sync_account_subscription_source(
+                    db,
+                    source_id,
+                    AccountSubscriptionSourceProductionSyncRequest(
+                        dry_run=req.production_sync_dry_run,
+                        operations=blueprint.get("operations") or [],
+                        sync_capabilities=req.sync_capabilities or True,
+                        run_health_check=req.run_health_check or True,
+                        run_quota_sync=req.run_quota_sync or True,
+                        include_preflight=req.include_preflight,
+                        run_acceptance=req.run_acceptance,
+                        run_samples=req.run_samples,
+                        max_samples=max(1, req.max_samples),
+                        require_production_ready=False,
+                        contract_run_submit=req.contract_run_submit,
+                    ),
+                    ctx,
+                )
+
+    project = db.get(models.OpenSourceConnectorProject, project_id)
+    if project and project.status == "discovered":
+        project.status = "adapter_designing"
+        db.commit()
+    manifest_result = applied.get("manifest") if isinstance(applied.get("manifest"), dict) else {}
+    manifest_actions = manifest_result.get("action_items", []) if isinstance(manifest_result, dict) else []
+    ok = not action_items and not manifest_actions
+    return {
+        "object": "media2api.connector_project_blueprint_apply",
+        "status": "applied" if ok else "action_required",
+        "ok": ok,
+        "dry_run": False,
+        "project_id": project_id,
+        "provider_id": blueprint.get("provider_id"),
+        "blueprint": blueprint,
+        "applied": applied,
+        "action_items": action_items + manifest_actions,
+        "next_steps": [
+            "Confirm the Web Cookie/session or Agent Provider profile is registered for the selected provider.",
+            "Confirm runner/base_url only if the corresponding project requires an external service endpoint.",
+            "Run preflight and account acceptance for the selected provider/account.",
+            "If using a resource-list compatibility source, run production-sync first as dry_run=true, then enable live sync.",
+        ],
+    }
+
+
+def account_setup_workflow_payload(provider_id: str, req: AccountSetupWorkflowRunRequest | None = None) -> dict[str, Any]:
+    req = req or AccountSetupWorkflowRunRequest()
+    return {
+        "provider_id": provider_id,
+        "project_id": req.project_id,
+        "base_url": req.base_url,
+        "account_id": req.account_id,
+        "account_label": req.account_label,
+        "resource_type": req.resource_type,
+        "resource_profile": req.resource_profile,
+        "auth_method": req.auth_method,
+        "credential_ref": req.credential_ref,
+        "credential_secret_id": req.credential_secret_id,
+        "credential_kind": req.credential_kind,
+        "credential_value": req.credential_value,
+        "subscription_url": req.subscription_url,
+        "subscription_content": req.subscription_content,
+        "persist_subscription_content": req.persist_subscription_content,
+        "create_subscription_source": req.create_subscription_source,
+        "source_id": req.source_id,
+        "source_name": req.source_name,
+        "operations": req.operations,
+        "supported_provider_models": req.supported_provider_models,
+        "concurrency_limit": req.concurrency_limit,
+        "sync_capabilities": req.sync_capabilities,
+        "run_health_check": req.run_health_check,
+        "run_contract_tests": req.run_contract_tests,
+        "run_quota_sync": req.run_quota_sync,
+        "include_preflight": req.include_preflight,
+        "run_acceptance": req.run_acceptance,
+        "run_samples": req.run_samples,
+        "max_samples": req.max_samples,
+        "dry_run": req.dry_run,
+    }
+
+
+def account_setup_workflow_command_payload(payload: dict[str, Any]) -> str:
+    return connector_project_command_payload(payload)
+
+
+def build_account_setup_workflow(
+    db: Session,
+    provider_id: str,
+    req: AccountSetupWorkflowRunRequest | None = None,
+) -> dict[str, Any]:
+    req = req or AccountSetupWorkflowRunRequest()
+    provider_id = (provider_id or "").strip()
+    if not provider_id:
+        raise HTTPException(status_code=400, detail={"error": "PROVIDER_ID_REQUIRED"})
+    if provider_id not in PROVIDER_TEMPLATES and not db.get(models.Provider, provider_id):
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND", "provider_id": provider_id})
+
+    guide = connector_registry_service.provider_guide(db, provider_id)
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    provider = db.get(models.Provider, provider_id)
+    default_operations, default_models = provider_default_operations_and_models(provider_id)
+    operations = req.operations or default_operations
+    supported_provider_models = req.supported_provider_models or default_models
+    accounts = (
+        db.query(models.AccountResource)
+        .filter(models.AccountResource.provider_id == provider_id)
+        .order_by(models.AccountResource.status.desc(), models.AccountResource.id)
+        .all()
+    )
+    subscription_sources = (
+        db.query(models.AccountSubscriptionSource)
+        .filter(models.AccountSubscriptionSource.provider_id == provider_id)
+        .order_by(models.AccountSubscriptionSource.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    oauth_sessions = (
+        db.query(models.ConnectorOAuthSession)
+        .filter(models.ConnectorOAuthSession.provider_id == provider_id)
+        .order_by(models.ConnectorOAuthSession.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    related_projects = connector_registry_service.list_projects(db, provider_id=provider_id, limit=20)
+    active_accounts = [account for account in accounts if account.status == "active"]
+    available_accounts = [account for account in active_accounts if account_credential_available(db, account)]
+    provider_config = provider_runtime_config(provider_id, loads(provider.base_config_json, {})) if provider else {}
+    configured_base_url = permitted_provider_base_url(provider_id, str(provider_config.get("base_url") or ""))
+    requested_base_url = validate_provider_base_url_input(provider_id, req.base_url) if req.base_url else permitted_provider_base_url(provider_id, configured_base_url)
+    requested_auth_method = connector_project_first_auth_method([], guide, req.auth_method)
+    requested_auth_method = validate_provider_auth_method(provider_id, requested_auth_method)
+    requested_credential_kind = req.credential_kind or credential_kind_for_auth_method(requested_auth_method)
+    requested_resource_type = validate_provider_resource_type(
+        provider_id,
+        req.resource_type or str(guide.get("resource_type") or ""),
+        auth_method=requested_auth_method,
+        credential_kind=requested_credential_kind,
+    )
+    requested_account_id = req.account_id or str((guide.get("payload_template") or {}).get("account_id") or f"acct_{provider_id}_01")
+    requested_account_label = req.account_label or f"{provider_id} production account 01"
+    requested_credential_ref = req.credential_ref or (f"secret://{req.credential_secret_id}" if req.credential_secret_id else str(guide.get("credential_ref_example") or connector_manifest_env_ref(provider_id)))
+    validate_runtime_base_url_fields(provider_id, req.resource_profile or {}, field_name="resource_profile")
+    validate_platform_resource_profile_fields(provider_id, req.resource_profile or {}, field_name="resource_profile")
+    requested_resource_profile = provider_runtime_config(provider_id, req.resource_profile or {})
+    source_id = req.source_id or connector_project_default_source_id(provider_id, req.project_id or provider_id)
+
+    preflight = build_external_connector_preflight(db, provider_id=provider_id, operations=operations) if req.include_preflight else None
+    preflight_summary = preflight.get("summary") if isinstance(preflight, dict) else {}
+    project_blueprint = None
+    if req.project_id:
+        try:
+            project_blueprint = build_connector_project_blueprint(
+                db,
+                req.project_id,
+                ConnectorProjectBlueprintRequest(
+                    provider_id=provider_id,
+                    base_url=requested_base_url,
+                    account_id=requested_account_id,
+                    account_label=requested_account_label,
+                    auth_method=requested_auth_method,
+                    credential_ref=requested_credential_ref,
+                    credential_secret_id=req.credential_secret_id,
+                    credential_kind=requested_credential_kind,
+                    subscription_url=req.subscription_url,
+                    subscription_content=req.subscription_content,
+                    persist_subscription_content=req.persist_subscription_content,
+                    create_subscription_source=req.create_subscription_source,
+                    operations=operations,
+                    supported_provider_models=supported_provider_models,
+                    concurrency_limit=req.concurrency_limit,
+                    dry_run=True,
+                    sync_capabilities=req.sync_capabilities,
+                    run_health_check=req.run_health_check,
+                    run_contract_tests=req.run_contract_tests,
+                    run_quota_sync=req.run_quota_sync,
+                    include_preflight=req.include_preflight,
+                ),
+            )
+        except HTTPException as exc:
+            project_blueprint = {"status": "action_required", "error": exc.detail}
+
+    account_rows = []
+    for account in accounts:
+        account_rows.append(
+            {
+                "account": serialize_account(account),
+                "credential": credential_ref_info(db, account.credential_ref),
+                "credential_effective_available": account_credential_available(db, account),
+                "supported_operations": loads(account.supported_operations_json, []),
+                "supported_provider_models": loads(account.supported_provider_models_json, []),
+            }
+        )
+
+    preflight_ready = (not req.include_preflight) or bool(preflight and preflight.get("status") == "ready")
+    checks = [
+        {"id": "provider_template", "ok": bool(template), "label": "Provider template exists"},
+        {"id": "provider_installed", "ok": bool(provider), "label": "Provider installed"},
+        {"id": "provider_active", "ok": bool(provider and provider.status == "active"), "label": "Provider active"},
+        {"id": "runner_base_url_optional", "ok": True, "label": "Runner base_url configured only when the matched project requires it"},
+        {"id": "authorized_account", "ok": bool(available_accounts), "label": "At least one active account has an available credential reference"},
+        {"id": "resource_list_source", "ok": bool(subscription_sources), "label": "Persistent resource-list source configured"},
+        {"id": "related_project", "ok": bool(related_projects), "label": "Open-source connector project discovered"},
+        {
+            "id": "preflight",
+            "ok": preflight_ready,
+            "label": "External connector preflight ready" if req.include_preflight else "External connector preflight skipped",
+        },
+    ]
+    action_items: list[dict[str, Any]] = []
+    if not template:
+        action_items.append({"check": "provider_template", "step": "manual_provider_template", "detail": {"provider_id": provider_id}})
+    if not provider:
+        action_items.append({"check": "provider_install", "step": "apply_manifest", "detail": {"provider_id": provider_id}})
+    if not available_accounts:
+        step = "create_subscription_source" if requested_auth_method == "subscription_url" else "apply_manifest"
+        action_items.append({"check": "authorized_account", "step": step, "detail": {"auth_method": requested_auth_method}})
+    if req.create_subscription_source and not (req.subscription_url or (req.subscription_content and req.persist_subscription_content)):
+        action_items.append({"check": "resource_list_source_input", "step": "create_subscription_source", "detail": {"message": "Provide a resource-list URL via subscription_url or persisted content."}})
+    missing_profile_inputs = missing_required_profile_inputs(provider_id, requested_resource_profile)
+    if missing_profile_inputs:
+        action_items.append(
+            {
+                "check": "required_platform_profile_inputs",
+                "step": "fill_resource_profile",
+                "detail": {
+                    "missing_input_fields": [
+                        {"name": item.get("name"), "label": item.get("label"), "evidence": item.get("evidence")}
+                        for item in missing_profile_inputs
+                    ],
+                    "resource_profile_template": platform_resource_profile_template(provider_id),
+                },
+            }
+        )
+    if preflight and preflight.get("status") != "ready":
+        action_items.append({"check": "preflight", "step": "preflight", "detail": preflight_summary})
+
+    next_action = action_items[0] if action_items else {"check": "production_ready", "step": "account_acceptance", "detail": {"message": "Run live acceptance before enabling production traffic."}}
+    base = settings.public_base_url
+    workflow_payload = {
+        "project_id": req.project_id,
+        "base_url": requested_base_url,
+        "account_id": requested_account_id,
+        "account_label": requested_account_label,
+        "resource_type": requested_resource_type,
+        "resource_profile": requested_resource_profile,
+        "auth_method": requested_auth_method,
+        "credential_ref": requested_credential_ref,
+        "credential_secret_id": req.credential_secret_id,
+        "credential_kind": requested_credential_kind,
+        "subscription_url": req.subscription_url,
+        "create_subscription_source": req.create_subscription_source,
+        "source_id": source_id,
+        "source_name": req.source_name or f"{provider_id} resource list source",
+        "operations": operations,
+        "supported_provider_models": supported_provider_models,
+        "concurrency_limit": req.concurrency_limit,
+        "sync_capabilities": req.sync_capabilities,
+        "run_health_check": req.run_health_check,
+        "run_contract_tests": req.run_contract_tests,
+        "run_quota_sync": req.run_quota_sync,
+        "include_preflight": req.include_preflight,
+        "dry_run": req.dry_run,
+    }
+    commands = {
+        "get_workflow": f"curl -H \"Authorization: Bearer dev-admin-key\" {base}/v1/admin/account-setup-workflows/{provider_id}",
+        "plan": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'plan', 'dry_run': True})}'",
+        "apply_manifest_dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'apply_manifest', 'dry_run': True})}'",
+        "apply_manifest": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'apply_manifest', 'dry_run': False})}'",
+        "start_authorized_session": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'start_authorized_session', 'dry_run': False})}'",
+        "start_oauth_compat": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'start_oauth', 'dry_run': False})}'",
+        "create_subscription_source": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'create_subscription_source', 'dry_run': False})}'",
+        "preflight": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'preflight', 'dry_run': True})}'",
+        "account_acceptance": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'account_acceptance', 'dry_run': True, 'run_samples': True})}'",
+    }
+    if req.project_id:
+        commands["project_blueprint"] = f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'project_blueprint', 'dry_run': True})}'"
+        commands["apply_blueprint"] = f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base}/v1/admin/account-setup-workflows/{provider_id}/run -d '{account_setup_workflow_command_payload({**workflow_payload, 'step': 'apply_blueprint', 'dry_run': False})}'"
+
+    status = "ready" if bool(provider and provider.status == "active" and available_accounts and preflight_ready) else "action_required"
+    return {
+        "object": "media2api.account_setup_workflow",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "status": status,
+        "guide": guide,
+        "summary": {
+            "provider_installed": bool(provider),
+            "provider_status": provider.status if provider else "missing",
+            "base_url": requested_base_url,
+            "configured_base_url": configured_base_url,
+            "resource_type": requested_resource_type,
+            "input_requirements": PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", []),
+            "dynamic_profile_fields": platform_dynamic_profile_inputs(provider_id),
+            "resource_profile_template": platform_resource_profile_template(provider_id),
+            "resource_profile": redact_resource_profile(requested_resource_profile),
+            "accounts": len(accounts),
+            "active_accounts": len(active_accounts),
+            "available_accounts": len(available_accounts),
+            "subscription_sources": len(subscription_sources),
+            "oauth_sessions": len(oauth_sessions),
+            "related_projects": len(related_projects),
+            "operations": operations,
+            "supported_provider_models": supported_provider_models,
+            "preflight_status": preflight.get("status") if isinstance(preflight, dict) else "skipped",
+        },
+        "checks": checks,
+        "next_action": next_action,
+        "action_items": action_items,
+        "accounts": account_rows,
+        "subscription_sources": [serialize_account_subscription_source(source) for source in subscription_sources],
+        "oauth_sessions": [oauth_session_service.serialize(session) for session in oauth_sessions],
+        "related_projects": related_projects,
+        "project_blueprint": project_blueprint,
+        "preflight": preflight,
+        "payload_template": connector_project_safe_payload(workflow_payload),
+        "commands": commands,
+        "operator_path": [
+            "Refresh connector registry and choose a related project if one exists.",
+            "Confirm authorized Web Cookie/session or Agent Provider profile material; confirm runner base_url only when the matched project requires it.",
+            "Run project_blueprint or apply_manifest with dry_run=true first.",
+            "Use the authorized-session step or resource-list compatibility source only when the matched project actually needs that account material.",
+            "Run preflight, then account_acceptance with live samples only after quotas and assets are understood.",
+        ],
+    }
+
+
+def run_account_setup_workflow_step(
+    db: Session,
+    ctx: AuthContext,
+    provider_id: str,
+    req: AccountSetupWorkflowRunRequest,
+) -> dict[str, Any]:
+    provider_id = (provider_id or "").strip()
+    step = normalize_account_setup_step(req.step)
+    workflow = build_account_setup_workflow(db, provider_id, req)
+    if step == "plan":
+        return workflow
+    operations = req.operations or (workflow.get("summary") or {}).get("operations") or []
+    models_ = req.supported_provider_models or (workflow.get("summary") or {}).get("supported_provider_models") or []
+    base_url = validate_provider_base_url_input(provider_id, req.base_url) if req.base_url else permitted_provider_base_url(provider_id, str((workflow.get("summary") or {}).get("base_url") or ""))
+    account_id = req.account_id or str((workflow.get("payload_template") or {}).get("account_id") or "")
+    account_label = req.account_label or str((workflow.get("payload_template") or {}).get("account_label") or f"{provider_id} production account 01")
+    auth_method = req.auth_method or str((workflow.get("payload_template") or {}).get("auth_method") or "agent_provider_credential")
+    auth_method = validate_provider_auth_method(provider_id, auth_method)
+    credential_ref = req.credential_ref or str((workflow.get("payload_template") or {}).get("credential_ref") or connector_manifest_env_ref(provider_id))
+    credential_kind = req.credential_kind or credential_kind_for_auth_method(auth_method)
+    resource_type = validate_provider_resource_type(
+        provider_id,
+        req.resource_type or str((workflow.get("payload_template") or {}).get("resource_type") or ""),
+        auth_method=auth_method,
+        credential_kind=credential_kind,
+    )
+
+    if step == "project_blueprint":
+        if not req.project_id:
+            raise HTTPException(status_code=400, detail={"error": "PROJECT_ID_REQUIRED"})
+        return build_connector_project_blueprint(
+            db,
+            req.project_id,
+            ConnectorProjectBlueprintRequest(**{**account_setup_workflow_payload(provider_id, req), "provider_id": provider_id, "dry_run": True}),
+        )
+
+    if step == "apply_blueprint":
+        if not req.project_id:
+            raise HTTPException(status_code=400, detail={"error": "PROJECT_ID_REQUIRED"})
+        return apply_connector_project_blueprint(
+            db,
+            ctx,
+            req.project_id,
+            ConnectorProjectBlueprintRequest(**{**account_setup_workflow_payload(provider_id, req), "provider_id": provider_id}),
+        )
+
+    if step == "apply_manifest":
+        manifest_req = ExternalConnectorManifestRequest(
+            provider_id=provider_id,
+            base_url=base_url,
+            resource_type=resource_type,
+            resource_profile=provider_runtime_config(provider_id, req.resource_profile or {}),
+            credential_ref=credential_ref,
+            credential_secret_id=req.credential_secret_id,
+            credential_kind=credential_kind,
+            credential_value=req.credential_value,
+            account_id=account_id or None,
+            account_label=account_label,
+            concurrency_limit=max(1, req.concurrency_limit),
+            operations=operations,
+            contract_operations=operations,
+            dry_run=req.dry_run,
+            run_health_check=req.run_health_check,
+            run_contract_tests=req.run_contract_tests,
+            run_quota_sync=req.run_quota_sync,
+            include_preflight=req.include_preflight,
+        )
+        return build_external_connector_manifest(db, ctx, manifest_req)
+
+    if step == "start_authorized_session":
+        payload = {
+            "provider_id": provider_id,
+            "account_id": account_id or None,
+            "label": account_label,
+            "provider_base_url": base_url,
+            "allow_provider_config_base_url": provider_runtime_base_url_allowed(provider_id),
+            "auth_method": auth_method,
+            "resource_type": resource_type,
+            "resource_profile": req.resource_profile,
+            "supported_operations": operations,
+            "supported_provider_models": models_,
+            "dry_run": req.dry_run,
+        }
+        start_req = ConnectorOAuthStartRequest(**payload)
+        return validate_started_authorized_resource_session(db, start_req, oauth_session_service.start_session(db, payload))
+
+    if step == "create_subscription_source":
+        source_req = AccountSubscriptionSourceRequest(
+            id=req.source_id,
+            provider_id=provider_id,
+            name=req.source_name or f"{provider_id} resource list source",
+            auth_method=auth_method,
+            subscription_url=req.subscription_url,
+            content=req.subscription_content,
+            persist_content=req.persist_subscription_content,
+            provider_base_url=base_url,
+            supported_operations=operations,
+            supported_provider_models=models_,
+            concurrency_limit=max(1, req.concurrency_limit),
+            sync_capabilities=req.sync_capabilities,
+            run_health_check=req.run_health_check,
+            sync_now=False,
+        )
+        if req.dry_run:
+            return {
+                "object": "media2api.account_setup_workflow_step",
+                "status": "planned",
+                "step": step,
+                "source": connector_project_safe_payload(source_req.model_dump(exclude_none=True)),
+                "workflow": workflow,
+            }
+        created = upsert_account_subscription_source(db, source_req)
+        return {
+            "object": "media2api.account_setup_workflow_step",
+            "status": "created",
+            "step": step,
+            "source": created.get("source"),
+            "result": created,
+            "workflow": build_account_setup_workflow(db, provider_id, AccountSetupWorkflowRunRequest(include_preflight=req.include_preflight)),
+        }
+
+    if step == "sync_subscription_source":
+        if not req.source_id:
+            raise HTTPException(status_code=400, detail={"error": "SOURCE_ID_REQUIRED"})
+        return sync_account_subscription_source(
+            db,
+            req.source_id,
+            AccountSubscriptionSourceSyncRequest(content=req.subscription_content, dry_run=req.dry_run, sync_capabilities=req.sync_capabilities, run_health_check=req.run_health_check),
+        )
+
+    if step == "production_sync":
+        if not req.source_id:
+            raise HTTPException(status_code=400, detail={"error": "SOURCE_ID_REQUIRED"})
+        return production_sync_account_subscription_source(
+            db,
+            req.source_id,
+            AccountSubscriptionSourceProductionSyncRequest(
+                content=req.subscription_content,
+                dry_run=req.dry_run,
+                operations=operations,
+                sync_capabilities=req.sync_capabilities,
+                run_health_check=req.run_health_check,
+                run_quota_sync=req.run_quota_sync,
+                include_preflight=req.include_preflight,
+                run_acceptance=req.run_acceptance,
+                run_samples=req.run_samples,
+                max_samples=max(1, req.max_samples),
+            ),
+            ctx,
+        )
+
+    if step == "preflight":
+        return build_external_connector_preflight(db, provider_id=provider_id, account_id=account_id or None, operations=operations)
+
+    if step == "account_acceptance":
+        return admin_account_acceptance_suite(
+            AccountAcceptanceSuiteRequest(
+                dry_run=req.dry_run,
+                account_ids=[account_id] if account_id else [],
+                provider_ids=[provider_id],
+                active_only=True,
+                external_only=True,
+                operations=operations,
+                run_health_check=req.run_health_check,
+                run_contract_tests=req.run_contract_tests,
+                run_quota_sync=req.run_quota_sync,
+                run_samples=req.run_samples,
+                max_samples=max(1, req.max_samples),
+                require_production_ready=False,
+            ),
+            ctx,
+            db,
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "error": "ACCOUNT_SETUP_WORKFLOW_STEP_UNSUPPORTED",
+            "allowed_steps": [
+                "plan",
+                "project_blueprint",
+                "apply_blueprint",
+                "apply_manifest",
+                "start_authorized_session",
+                "start_oauth",
+                "create_subscription_source",
+                "sync_subscription_source",
+                "production_sync",
+                "preflight",
+                "account_acceptance",
+            ],
+        },
+    )
+
+
+def account_setup_quickstart_mode(req: AccountSetupQuickstartRequest, auth_method: str) -> str:
+    mode = normalize_account_setup_mode(req.mode)
+    allowed_modes = {"auto", "manifest", "subscription", "authorized_session"}
+    if mode not in allowed_modes:
+        raise HTTPException(status_code=400, detail={"error": "ACCOUNT_SETUP_QUICKSTART_MODE_UNSUPPORTED", "allowed_modes": sorted(allowed_modes)})
+    if mode != "auto":
+        return mode
+    if req.subscription_url or req.subscription_content or req.accounts or req.create_subscription_source:
+        return "subscription"
+    return "manifest"
+
+
+def account_setup_quickstart_request_payload(req: AccountSetupQuickstartRequest) -> dict[str, Any]:
+    return connector_project_safe_payload(req.model_dump(exclude_none=True))
+
+
+def run_account_setup_quickstart(
+    db: Session,
+    ctx: AuthContext,
+    req: AccountSetupQuickstartRequest,
+) -> dict[str, Any]:
+    provider_id = (req.provider_id or "").strip()
+    if not provider_id:
+        raise HTTPException(status_code=400, detail={"error": "PROVIDER_ID_REQUIRED"})
+    if provider_id not in PROVIDER_TEMPLATES and not db.get(models.Provider, provider_id):
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND", "provider_id": provider_id})
+
+    guide = connector_registry_service.provider_guide(db, provider_id)
+    default_operations, default_models = provider_default_operations_and_models(provider_id)
+    operations = req.operations or default_operations
+    supported_provider_models = req.supported_provider_models or default_models
+    auth_method = req.auth_method or str((guide.get("recommended_auth_methods") or ["agent_provider_credential"])[0])
+    auth_method = validate_provider_auth_method(provider_id, auth_method)
+    credential_kind = req.credential_kind or credential_kind_for_auth_method(auth_method)
+    resource_type = validate_provider_resource_type(
+        provider_id,
+        req.resource_type or str(guide.get("resource_type") or ""),
+        auth_method=auth_method,
+        credential_kind=credential_kind,
+    )
+    mode = account_setup_quickstart_mode(req, auth_method)
+    account_id = req.account_id or str((guide.get("payload_template") or {}).get("account_id") or f"acct_{provider_id}_01")
+    account_label = req.account_label or f"{provider_id} production account 01"
+    provider = db.get(models.Provider, provider_id)
+    provider_config = provider_runtime_config(provider_id, loads(provider.base_config_json, {})) if provider else {}
+    configured_base_url = permitted_provider_base_url(provider_id, str(provider_config.get("base_url") or ""))
+    base_url = validate_provider_base_url_input(provider_id, req.base_url) if req.base_url else permitted_provider_base_url(provider_id, configured_base_url)
+    credential_ref = req.credential_ref or (f"secret://{req.credential_secret_id}" if req.credential_secret_id else str(guide.get("credential_ref_example") or connector_manifest_env_ref(provider_id)))
+    source_id = req.source_id or connector_project_default_source_id(provider_id, req.project_id or provider_id)
+
+    steps: list[dict[str, Any]] = []
+    action_items: list[dict[str, Any]] = []
+    account_ids: list[str] = []
+    workflow_req = AccountSetupWorkflowRunRequest(
+        project_id=req.project_id,
+        base_url=base_url,
+        account_id=account_id,
+        account_label=account_label,
+        resource_type=resource_type,
+        resource_profile=req.resource_profile,
+        auth_method=auth_method,
+        credential_ref=credential_ref,
+        credential_secret_id=req.credential_secret_id,
+        credential_kind=credential_kind,
+        credential_value=req.credential_value,
+        subscription_url=req.subscription_url,
+        subscription_content=req.subscription_content,
+        persist_subscription_content=req.persist_subscription_content,
+        create_subscription_source=req.create_subscription_source,
+        source_id=source_id,
+        source_name=req.source_name or f"{provider_id} subscription source",
+        operations=operations,
+        supported_provider_models=supported_provider_models,
+        concurrency_limit=max(1, req.concurrency_limit),
+        sync_capabilities=req.sync_capabilities,
+        run_health_check=req.run_health_check,
+        run_contract_tests=req.run_contract_tests,
+        run_quota_sync=req.run_quota_sync,
+        include_preflight=req.run_preflight,
+        run_acceptance=req.run_acceptance,
+        run_samples=req.run_samples,
+        max_samples=max(1, req.max_samples),
+        dry_run=req.dry_run,
+    )
+    workflow = build_account_setup_workflow(db, provider_id, AccountSetupWorkflowRunRequest(**{**workflow_req.model_dump(), "include_preflight": False}))
+    steps.append({"step": "plan", "status": workflow.get("status"), "result": workflow})
+
+    should_apply_manifest = bool(req.apply_manifest and mode in {"manifest", "subscription"} and (provider_id in PROVIDER_TEMPLATES))
+    if should_apply_manifest:
+        manifest_step = "apply_blueprint" if req.project_id else "apply_manifest"
+        try:
+            manifest_result = run_account_setup_workflow_step(
+                db,
+                ctx,
+                provider_id,
+                AccountSetupWorkflowRunRequest(**{**workflow_req.model_dump(), "step": manifest_step, "include_preflight": False}),
+            )
+            steps.append({"step": manifest_step, "status": manifest_result.get("status"), "ok": manifest_result.get("ok"), "result": manifest_result})
+            for item in manifest_result.get("accounts", []) or []:
+                if isinstance(item, dict) and item.get("account_id"):
+                    account_ids.append(str(item["account_id"]))
+            if manifest_result.get("ok") is False:
+                action_items.append({"check": manifest_step, "detail": manifest_result.get("action_items", [])})
+        except HTTPException as exc:
+            raise exc
+        except Exception as exc:
+            action_items.append({"check": manifest_step, "detail": {"error": type(exc).__name__, "message": str(exc)}})
+
+    subscription_result: dict[str, Any] | None = None
+    source_result: dict[str, Any] | None = None
+    production_sync: dict[str, Any] | None = None
+    if mode == "subscription":
+        import_req = AccountSubscriptionImportRequest(
+            provider_id=provider_id,
+            auth_method=auth_method,
+            subscription_url=req.subscription_url,
+            content=req.subscription_content,
+            accounts=req.accounts,
+            resource_type=resource_type,
+            resource_profile=req.resource_profile,
+            provider_base_url=base_url,
+            supported_operations=operations,
+            supported_provider_models=supported_provider_models,
+            quota_buckets=req.quota_buckets,
+            concurrency_limit=max(1, req.concurrency_limit),
+            region=req.region,
+            plan=req.plan,
+            status=req.status,
+            upsert=True,
+            auto_create_mappings=req.auto_create_mappings,
+            sync_capabilities=req.sync_capabilities and not req.dry_run,
+            run_health_check=req.run_health_check and not req.dry_run,
+            max_items=max(1, min(req.max_accounts, 500)),
+        )
+        if req.create_subscription_source:
+            if not (req.subscription_url or (req.subscription_content and req.persist_subscription_content)):
+                action_items.append({"check": "resource_list_source_input", "detail": {"message": "Provide a resource-list URL via subscription_url, or persisted content."}})
+                source_result = {"object": "media2api.account_subscription_source_quickstart", "status": "action_required"}
+            elif req.dry_run:
+                source_payload = AccountSubscriptionSourceRequest(
+                    id=source_id,
+                    provider_id=provider_id,
+                    name=req.source_name or f"{provider_id} resource list source",
+                    auth_method=auth_method,
+                    subscription_url=req.subscription_url,
+                    content=req.subscription_content,
+                    persist_content=req.persist_subscription_content,
+                    provider_base_url=base_url,
+                    supported_operations=operations,
+                    supported_provider_models=supported_provider_models,
+                    quota_buckets=req.quota_buckets,
+                    concurrency_limit=max(1, req.concurrency_limit),
+                    region=req.region,
+                    plan=req.plan,
+                    sync_capabilities=req.sync_capabilities,
+                    run_health_check=req.run_health_check,
+                )
+                source_result = {
+                    "object": "media2api.account_subscription_source_quickstart",
+                    "status": "planned",
+                    "source": connector_project_safe_payload(source_payload.model_dump(exclude_none=True)),
+                }
+            else:
+                source_result = upsert_account_subscription_source(
+                    db,
+                    AccountSubscriptionSourceRequest(
+                        id=source_id,
+                        provider_id=provider_id,
+                        name=req.source_name or f"{provider_id} resource list source",
+                        auth_method=auth_method,
+                        subscription_url=req.subscription_url,
+                        content=req.subscription_content,
+                        persist_content=req.persist_subscription_content,
+                        provider_base_url=base_url,
+                        supported_operations=operations,
+                        supported_provider_models=supported_provider_models,
+                        quota_buckets=req.quota_buckets,
+                        concurrency_limit=max(1, req.concurrency_limit),
+                        region=req.region,
+                        plan=req.plan,
+                        sync_capabilities=req.sync_capabilities,
+                        run_health_check=req.run_health_check,
+                    ),
+                )
+        steps.append({"step": "create_subscription_source" if req.create_subscription_source else "skip_subscription_source", "status": (source_result or {}).get("status", "skipped"), "result": source_result})
+
+        if req.dry_run:
+            subscription_result = build_account_subscription_import_plan(db, import_req)
+            steps.append({"step": "subscription_preview", "status": "planned", "result": sanitize_import_plan(subscription_result)})
+            account_ids.extend(account_ids_from_subscription_result({"preview": subscription_result}))
+        else:
+            plan = build_account_subscription_import_plan(db, import_req)
+            subscription_result = apply_account_subscription_import_plan(db, plan)
+            steps.append({"step": "subscription_import", "status": "passed" if not subscription_result.get("failed") else "action_required", "result": subscription_result})
+            account_ids.extend(account_ids_from_subscription_result({"import": subscription_result}))
+            if subscription_result.get("failed"):
+                action_items.append({"check": "subscription_import", "detail": subscription_result.get("errors", [])})
+            if req.create_subscription_source and source_result and req.run_quota_sync:
+                production_sync = production_sync_account_subscription_source(
+                    db,
+                    source_id,
+                    AccountSubscriptionSourceProductionSyncRequest(
+                        content=req.subscription_content,
+                        dry_run=False,
+                        operations=operations,
+                        sync_capabilities=req.sync_capabilities,
+                        run_health_check=req.run_health_check,
+                        run_quota_sync=req.run_quota_sync,
+                        include_preflight=req.run_preflight,
+                        run_acceptance=req.run_acceptance,
+                        run_samples=req.run_samples,
+                        max_samples=max(1, req.max_samples),
+                        max_accounts=max(1, req.max_accounts),
+                        contract_run_submit=req.contract_run_submit,
+                    ),
+                    ctx,
+                )
+                steps.append({"step": "production_sync", "status": production_sync.get("status"), "ok": production_sync.get("ok"), "result": production_sync})
+                if not production_sync.get("ok"):
+                    action_items.append({"check": "production_sync", "detail": production_sync.get("action_items", [])})
+
+    oauth_result: dict[str, Any] | None = None
+    if mode == "authorized_session":
+        payload = {
+            "provider_id": provider_id,
+            "account_id": account_id,
+            "label": account_label,
+            "provider_base_url": base_url,
+            "allow_provider_config_base_url": provider_runtime_base_url_allowed(provider_id),
+            "auth_method": auth_method,
+            "resource_type": resource_type,
+            "resource_profile": req.resource_profile,
+            "supported_operations": operations,
+            "supported_provider_models": supported_provider_models,
+            "metadata": {"source": "account_setup_quickstart"},
+            "dry_run": req.dry_run,
+        }
+        start_req = ConnectorOAuthStartRequest(**payload)
+        oauth_result = validate_started_authorized_resource_session(db, start_req, oauth_session_service.start_session(db, payload))
+        steps.append({"step": "start_authorized_session", "status": oauth_result.get("status"), "result": oauth_result})
+        if not req.dry_run:
+            if oauth_result.get("status") == "failed":
+                action_items.append({"check": "authorization_session_validation", "detail": {"session_id": oauth_result.get("id"), "error_code": oauth_result.get("error_code"), "message": oauth_result.get("error_message")}})
+            else:
+                action_items.append({"check": "authorization_completion", "detail": {"session_id": oauth_result.get("id"), "message": "Complete the authorization resource session, then call /v1/admin/authorized-resource-sessions/{session_id}/complete or callback."}})
+
+    if not account_ids and account_id:
+        account_ids.append(account_id)
+    account_ids = list(dict.fromkeys(account_ids))
+
+    preflight = None
+    if req.run_preflight and mode != "authorized_session":
+        preflight = build_external_connector_preflight(db, provider_id=provider_id, account_id=account_id if account_id else None, operations=operations)
+        steps.append({"step": "preflight", "status": preflight.get("status"), "result": preflight})
+        missing = (preflight.get("summary") or {}).get("aggregate_missing_operations") or []
+        if missing:
+            action_items.append({"check": "preflight", "detail": preflight.get("summary")})
+
+    acceptance = None
+    if not req.dry_run and req.run_acceptance and mode != "authorized_session":
+        acceptance = admin_account_acceptance_suite(
+            AccountAcceptanceSuiteRequest(
+                dry_run=False,
+                account_ids=account_ids[: max(1, min(req.max_accounts, 100))],
+                provider_ids=[provider_id],
+                active_only=True,
+                external_only=True,
+                operations=operations,
+                run_health_check=req.run_health_check,
+                run_contract_tests=req.run_contract_tests,
+                contract_run_submit=req.contract_run_submit,
+                run_quota_sync=req.run_quota_sync,
+                run_samples=req.run_samples,
+                max_samples=max(1, req.max_samples),
+                max_accounts=max(1, req.max_accounts),
+                require_production_ready=False,
+            ),
+            ctx,
+            db,
+        )
+        steps.append({"step": "account_acceptance", "status": acceptance.get("status"), "ok": acceptance.get("ok"), "result": acceptance})
+        if not acceptance.get("ok"):
+            action_items.append({"check": "account_acceptance", "detail": acceptance.get("action_items", [])})
+
+    status = "planned" if req.dry_run else "action_required" if action_items else "passed"
+    next_action = action_items[0] if action_items else {"check": "ready_for_acceptance" if not req.run_acceptance else "ready", "detail": {"message": "Run live sample acceptance before routing production traffic." if not req.run_acceptance else "Quickstart finished."}}
+    command_payload = account_setup_quickstart_request_payload(req)
+    return {
+        "object": "media2api.account_setup_quickstart",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": status,
+        "ok": not action_items,
+        "dry_run": req.dry_run,
+        "mode": mode,
+        "provider_id": provider_id,
+        "account_ids": account_ids,
+        "operations": operations,
+        "supported_provider_models": supported_provider_models,
+        "steps": steps,
+        "preflight": preflight,
+        "acceptance": acceptance,
+        "action_items": action_items,
+        "next_action": next_action,
+        "payload": command_payload,
+        "commands": {
+            "dry_run": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/account-setup-quickstart -d '{json.dumps({**command_payload, 'dry_run': True}, ensure_ascii=False, separators=(',', ':'))}'",
+            "apply": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/account-setup-quickstart -d '{json.dumps({**command_payload, 'dry_run': False}, ensure_ascii=False, separators=(',', ':'))}'",
+        },
+        "operator_path": [
+            "Use mode=auto unless you need to force manifest, subscription, or authorized_session.",
+            "Start with dry_run=true to see the exact plan and detected gaps.",
+            "Rerun with dry_run=false only after Web Cookie/session or Agent Provider profile material is confirmed.",
+            "If mode=authorized_session, complete the returned authorization resource session before running preflight or account acceptance.",
+        ],
     }
 
 
@@ -6832,7 +10222,7 @@ def build_system_requirements_report(db: Session) -> dict[str, Any]:
             "template_route": "/v1/admin/external-connector-manifest-template",
             "manifest_route": "/v1/admin/external-connector-manifest",
             "default_provider": "jimeng",
-            "supported_credentials": ["env://...", "secret://...", "public://...", "plain://... converted to secret", "bearer://... converted to secret"],
+            "supported_credentials": ["secret://...", "agent://...", "plain://... converted to secret"],
             "supports_account_pool": True,
         },
         [("GET", "/v1/admin/external-connector-manifest-template"), ("POST", "/v1/admin/external-connector-manifest")],
@@ -7258,6 +10648,8 @@ def build_delivery_package(db: Session) -> dict[str, Any]:
     connector_conformance = build_connector_conformance_report(db)
     connector_preflight = build_external_connector_preflight(db)
     connector_manifest_template = build_external_connector_manifest_template(db, provider_id="jimeng")
+    connector_registry_projects = connector_registry_service.list_projects(db, limit=20)
+    subscription_source_count = db.query(models.AccountSubscriptionSource).count()
     final_acceptance_matrix = build_final_acceptance_matrix(db)
     runtime_counts = runtime.runtime_counts(db)
     redis_status = governance_service.redis_status()
@@ -7301,6 +10693,22 @@ def build_delivery_package(db: Session) -> dict[str, Any]:
         {"name": "production_go_live_plan", "url": f"{base_url}/v1/admin/production-go-live-plan"},
         {"name": "connector_conformance", "url": f"{base_url}/v1/admin/connector-conformance-report"},
         {"name": "external_connector_preflight", "url": f"{base_url}/v1/admin/external-connector-preflight"},
+        {"name": "connector_runtime", "url": f"{base_url}/v1/admin/providers/{{provider_id}}/connector-runtime"},
+        {"name": "connector_registry", "url": f"{base_url}/v1/admin/connector-registry"},
+        {"name": "connector_project_blueprint", "url": f"{base_url}/v1/admin/connector-registry/{{project_id}}/blueprint"},
+        {"name": "connector_project_blueprint_apply", "url": f"{base_url}/v1/admin/connector-registry/{{project_id}}/blueprint/apply"},
+        {"name": "account_guides", "url": f"{base_url}/v1/admin/account-guides"},
+        {"name": "account_onboarding_plan", "url": f"{base_url}/v1/admin/account-onboarding/plan"},
+        {"name": "account_setup_workflows", "url": f"{base_url}/v1/admin/account-setup-workflows"},
+        {"name": "account_setup_workflow", "url": f"{base_url}/v1/admin/account-setup-workflows/{{provider_id}}"},
+        {"name": "account_setup_workflow_run", "url": f"{base_url}/v1/admin/account-setup-workflows/{{provider_id}}/run"},
+        {"name": "account_setup_quickstart", "url": f"{base_url}/v1/admin/account-setup-quickstart"},
+        {"name": "authorized_resource_sessions", "url": f"{base_url}/v1/admin/authorized-resource-sessions"},
+        {"name": "oauth_sessions_compat", "url": f"{base_url}/v1/admin/oauth-sessions"},
+        {"name": "account_subscription_preview", "url": f"{base_url}/v1/admin/account-subscriptions/preview"},
+        {"name": "account_subscription_import", "url": f"{base_url}/v1/admin/account-subscriptions/import"},
+        {"name": "account_subscription_sources", "url": f"{base_url}/v1/admin/account-subscription-sources"},
+        {"name": "account_subscription_source_production_sync", "url": f"{base_url}/v1/admin/account-subscription-sources/{{source_id}}/production-sync"},
         {"name": "external_connector_manifest_template", "url": f"{base_url}/v1/admin/external-connector-manifest-template?provider_id=jimeng"},
         {"name": "system_requirements", "url": f"{base_url}/v1/admin/system-requirements-report"},
         {"name": "final_acceptance_matrix", "url": f"{base_url}/v1/admin/final-acceptance-matrix"},
@@ -7385,6 +10793,33 @@ def build_delivery_package(db: Session) -> dict[str, Any]:
             "required_operations": connector_preflight.get("required_operations"),
             "provider_ids": [item.get("provider_id") for item in connector_preflight.get("providers", [])],
         },
+        "connector_registry": {
+            "summary": {
+                "projects": len(connector_registry_projects),
+                "sample_project_ids": [item.get("id") for item in connector_registry_projects[:12]],
+            },
+            "refresh_route": f"{base_url}/v1/admin/connector-registry/refresh",
+            "blueprint_route": f"{base_url}/v1/admin/connector-registry/{{project_id}}/blueprint",
+            "blueprint_apply_route": f"{base_url}/v1/admin/connector-registry/{{project_id}}/blueprint/apply",
+            "account_setup_workflows_route": f"{base_url}/v1/admin/account-setup-workflows",
+            "account_setup_workflow_route": f"{base_url}/v1/admin/account-setup-workflows/{{provider_id}}",
+            "account_setup_workflow_run_route": f"{base_url}/v1/admin/account-setup-workflows/{{provider_id}}/run",
+            "account_setup_quickstart_route": f"{base_url}/v1/admin/account-setup-quickstart",
+            "guides_route": f"{base_url}/v1/admin/account-guides",
+            "plan_route": f"{base_url}/v1/admin/account-onboarding/plan",
+            "subscription_preview_route": f"{base_url}/v1/admin/account-subscriptions/preview",
+            "subscription_import_route": f"{base_url}/v1/admin/account-subscriptions/import",
+            "subscription_sources_route": f"{base_url}/v1/admin/account-subscription-sources",
+            "subscription_source_production_sync_route": f"{base_url}/v1/admin/account-subscription-sources/{{source_id}}/production-sync",
+            "subscription_source_count": subscription_source_count,
+        },
+        "authorized_resource_sessions": {
+            "start_route": f"{base_url}/v1/admin/authorized-resource-sessions",
+            "complete_route": f"{base_url}/v1/admin/authorized-resource-sessions/{{session_id}}/complete",
+            "callback_route": f"{base_url}/v1/admin/authorized-resource-sessions/{{session_id}}/callback",
+            "compat_start_route": f"{base_url}/v1/admin/oauth-sessions",
+            "contract": "Delegates login to connector and stores only credential_ref in account resources.",
+        },
         "external_connector_manifest": {
             "template_route": f"{base_url}/v1/admin/external-connector-manifest-template?provider_id=jimeng",
             "apply_route": f"{base_url}/v1/admin/external-connector-manifest",
@@ -7417,6 +10852,23 @@ def build_delivery_package(db: Session) -> dict[str, Any]:
             "remote_acceptance": f".venv\\Scripts\\python.exe scripts\\acceptance_audit.py --base-url {base_url} --api-key dev-admin-key",
             "sdk_example": f".venv\\Scripts\\python.exe examples\\media2api_sdk.py --base-url {base_url} --api-key dev-admin-key --download-dir var\\remote-example-downloads",
             "external_connector_manifest_template": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/external-connector-manifest-template?provider_id=jimeng",
+            "connector_runtime_gemini": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/providers/gemini/connector-runtime",
+            "connector_registry_refresh": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/connector-registry/refresh -d '{{}}'",
+            "connector_project_blueprint": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/connector-registry/{{project_id}}/blueprint?provider_id=gemini",
+            "connector_project_blueprint_apply": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/connector-registry/{{project_id}}/blueprint/apply -d '{{\"provider_id\":\"gemini\",\"credential_ref\":\"agent://providers/gemini/acct_01\",\"auth_method\":\"agent_provider_credential\",\"resource_type\":\"agent_provider\",\"dry_run\":true}}'",
+            "account_setup_workflows": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/account-setup-workflows",
+            "gemini_account_setup_workflow": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/account-setup-workflows/gemini",
+            "gemini_account_setup_run_manifest": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-setup-workflows/gemini/run -d '{{\"step\":\"apply_manifest\",\"credential_ref\":\"agent://providers/gemini/acct_01\",\"auth_method\":\"agent_provider_credential\",\"resource_type\":\"agent_provider\",\"dry_run\":true}}'",
+            "gemini_account_setup_quickstart": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-setup-quickstart -d '{{\"provider_id\":\"gemini\",\"mode\":\"auto\",\"apply_manifest\":true,\"credential_ref\":\"agent://providers/gemini/acct_01\",\"auth_method\":\"agent_provider_credential\",\"resource_type\":\"agent_provider\",\"run_preflight\":true,\"dry_run\":true}}'",
+            "gemini_account_guide": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/account-guides/gemini",
+            "gemini_onboarding_plan": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-onboarding/plan -d '{{\"provider_id\":\"gemini\",\"auth_method\":\"agent_provider_credential\",\"credential_ref\":\"agent://providers/gemini/acct_01\",\"resource_type\":\"agent_provider\"}}'",
+            "start_gemini_authorized_resource_session": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/authorized-resource-sessions -d '{{\"provider_id\":\"gemini\",\"auth_method\":\"agent_provider_credential\",\"resource_type\":\"agent_provider\"}}'",
+            "connector_authorized_resource_callback": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/authorized-resource-sessions/{{session_id}}/callback -d '{{\"status\":\"completed\",\"credential_ref\":\"agent://providers/gemini/acct_01\",\"account\":{{\"label\":\"Gemini Agent account\",\"auth_method\":\"agent_provider_credential\",\"resource_type\":\"agent_provider\",\"supported_operations\":[\"text_to_image\",\"text_to_video\"],\"supported_provider_models\":[\"nano-banana-pro\",\"veo-3.1\"]}}}}'",
+            "preview_gemini_resource_import": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-subscriptions/preview -d '{{\"provider_id\":\"gemini\",\"auth_method\":\"agent_provider_credential\",\"content\":\"{{\\\"accounts\\\":[{{\\\"account_id\\\":\\\"gemini_01\\\",\\\"credential_ref\\\":\\\"agent://providers/gemini/acct_01\\\",\\\"resource_type\\\":\\\"agent_provider\\\"}}]}}\"}}'",
+            "import_gemini_resource_accounts": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-subscriptions/import -d '{{\"provider_id\":\"gemini\",\"auth_method\":\"agent_provider_credential\",\"content\":\"{{\\\"accounts\\\":[{{\\\"account_id\\\":\\\"gemini_01\\\",\\\"credential_ref\\\":\\\"agent://providers/gemini/acct_01\\\",\\\"resource_type\\\":\\\"agent_provider\\\"}}]}}\"}}'",
+            "create_gemini_resource_source": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-subscription-sources -d '{{\"provider_id\":\"gemini\",\"name\":\"Gemini agent resource list\",\"auth_method\":\"agent_provider_credential\",\"content\":\"{{\\\"accounts\\\":[{{\\\"account_id\\\":\\\"gemini_01\\\",\\\"credential_ref\\\":\\\"agent://providers/gemini/acct_01\\\",\\\"resource_type\\\":\\\"agent_provider\\\"}}]}}\",\"persist_content\":true}}'",
+            "sync_gemini_resource_list_source": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-subscription-sources/{{source_id}}/sync -d '{{\"dry_run\":false}}'",
+            "production_sync_gemini_resource_list_source": f"curl -X POST -H \"Authorization: Bearer dev-admin-key\" -H \"Content-Type: application/json\" {base_url}/v1/admin/account-subscription-sources/{{source_id}}/production-sync -d '{{\"dry_run\":true,\"run_quota_sync\":true,\"include_preflight\":true,\"run_acceptance\":false}}'",
             "system_requirements": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/system-requirements-report",
             "final_acceptance_matrix": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/final-acceptance-matrix",
             "delivery_package": f"curl -H \"Authorization: Bearer dev-admin-key\" {base_url}/v1/admin/delivery-package",
@@ -7425,7 +10877,7 @@ def build_delivery_package(db: Session) -> dict[str, Any]:
             {
                 "id": "configure_external_connector_account",
                 "required_for": "production_ready",
-                "detail": "Install or activate a non-mock provider template such as jimeng/gemini/qwen, configure authorized connector base_url and credential_ref, run capability sync, health check, contract tests, and external account acceptance.",
+                "detail": "Install or activate a non-mock provider template such as jimeng/gemini/qwen, configure authorized Web Cookie/session or Agent Provider profile material, add runner base_url only when the matched project requires it, then run capability sync, health check, contract tests, and external account acceptance.",
             }
         ] if external_blockers else [],
     }
@@ -7896,6 +11348,490 @@ def admin_external_connector_preflight(
 ) -> dict[str, Any]:
     requested_operations = parse_csv_param(operations)
     return build_external_connector_preflight(db, provider_id=provider_id, account_id=account_id, operations=requested_operations or None)
+
+
+@app.get("/v1/admin/connector-registry")
+def admin_connector_registry(
+    provider_id: str | None = None,
+    project_type: str | None = None,
+    status: str | None = None,
+    risk_level: str | None = None,
+    limit: int = 500,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    rows = connector_registry_service.list_projects(
+        db,
+        provider_id=provider_id,
+        project_type=project_type,
+        status=status,
+        risk_level=risk_level,
+        limit=limit,
+    )
+    return {
+        "object": "media2api.connector_registry",
+        "summary": {
+            "items": len(rows),
+            "provider_id": provider_id or "",
+            "project_type": project_type or "",
+            "status": status or "",
+            "risk_level": risk_level or "",
+        },
+        "data": rows,
+    }
+
+
+@app.post("/v1/admin/connector-registry/refresh")
+def admin_connector_registry_refresh(
+    req: ConnectorRegistryRefreshRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return connector_registry_service.refresh_from_local_repos(db, res_repo_path=req.res_repo_path)
+
+
+@app.get("/v1/admin/account-guides")
+def admin_account_guides(
+    provider_id: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return {"object": "media2api.account_onboarding_guides", "data": connector_registry_service.provider_guides(db, provider_id=provider_id)}
+
+
+@app.get("/v1/admin/account-guides/{provider_id}")
+def admin_account_guide(
+    provider_id: str,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not db.get(models.Provider, provider_id) and provider_id not in PROVIDER_TEMPLATES:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    return connector_registry_service.provider_guide(db, provider_id)
+
+
+@app.get("/v1/admin/platform-input-requirements")
+def admin_platform_input_requirements(
+    provider_id: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    rows = platform_input_conformance_report(provider_id)["data"]
+    return {
+        "object": "media2api.platform_input_requirements",
+        "policy": "Fields mirror the corresponding open-source project/resource style. connector/base_url is requested only when that project actually exposes or requires a runner/service endpoint.",
+        "data": rows,
+    }
+
+
+@app.get("/v1/admin/platform-input-conformance")
+def admin_platform_input_conformance(
+    provider_id: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    return platform_input_conformance_report(provider_id)
+
+
+@app.post("/v1/admin/account-onboarding/plan")
+def admin_account_onboarding_plan(
+    req: AccountOnboardingPlanRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    auth_method = None
+    if req.auth_method:
+        auth_method = validate_provider_auth_method(req.provider_id, req.auth_method)
+    if req.resource_type:
+        validate_provider_resource_type(
+            req.provider_id,
+            req.resource_type,
+            auth_method=auth_method,
+            credential_kind=req.credential_kind,
+        )
+    if req.provider_base_url is not None:
+        req.provider_base_url = validate_provider_base_url_input(req.provider_id, req.provider_base_url)
+    validate_runtime_base_url_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    validate_platform_resource_profile_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    try:
+        return connector_registry_service.onboarding_plan(db, req.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
+@app.get("/v1/admin/account-setup-workflows")
+def admin_account_setup_workflows(
+    provider_id: str | None = None,
+    include_preflight: bool = False,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    provider_ids = [provider_id] if provider_id else [row[0] for row in TARGET_MODEL_TABLE]
+    rows = [
+        build_account_setup_workflow(
+            db,
+            item,
+            AccountSetupWorkflowRunRequest(include_preflight=include_preflight),
+        )
+        for item in provider_ids[: min(max(1, limit), 100)]
+    ]
+    return {
+        "object": "media2api.account_setup_workflows",
+        "summary": {
+            "providers": len(rows),
+            "ready": sum(1 for row in rows if row.get("status") == "ready"),
+            "action_required": sum(1 for row in rows if row.get("status") != "ready"),
+            "include_preflight": include_preflight,
+        },
+        "data": rows,
+    }
+
+
+@app.get("/v1/admin/account-setup-workflows/{provider_id}")
+def admin_account_setup_workflow(
+    provider_id: str,
+    include_preflight: bool = True,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return build_account_setup_workflow(db, provider_id, AccountSetupWorkflowRunRequest(include_preflight=include_preflight))
+
+
+@app.post("/v1/admin/account-setup-workflows/{provider_id}/run")
+def admin_run_account_setup_workflow(
+    provider_id: str,
+    req: AccountSetupWorkflowRunRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return run_account_setup_workflow_step(db, ctx, provider_id, req)
+
+
+@app.post("/v1/admin/account-setup-quickstart")
+def admin_account_setup_quickstart(
+    req: AccountSetupQuickstartRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return run_account_setup_quickstart(db, ctx, req)
+
+
+@app.get("/v1/admin/connector-registry/{project_id}/blueprint")
+def admin_connector_project_blueprint(
+    project_id: str,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+    credential_ref: str | None = None,
+    auth_method: str | None = None,
+    account_id: str | None = None,
+    subscription_url: str | None = None,
+    create_subscription_source: bool = False,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    req = ConnectorProjectBlueprintRequest(
+        provider_id=provider_id,
+        base_url=base_url,
+        credential_ref=credential_ref,
+        auth_method=auth_method,
+        account_id=account_id,
+        subscription_url=subscription_url,
+        create_subscription_source=create_subscription_source,
+        dry_run=True,
+    )
+    return build_connector_project_blueprint(db, project_id, req)
+
+
+@app.post("/v1/admin/connector-registry/{project_id}/blueprint/apply")
+def admin_apply_connector_project_blueprint(
+    project_id: str,
+    req: ConnectorProjectBlueprintRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return apply_connector_project_blueprint(db, ctx, project_id, req)
+
+
+@app.get("/v1/admin/authorized-resource-sessions")
+@app.get("/v1/admin/oauth-sessions")
+def admin_authorized_resource_sessions(
+    provider_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return {
+        "object": "media2api.authorized_resource_sessions",
+        "compat_object": "media2api.connector_oauth_sessions",
+        "data": oauth_session_service.list_sessions(db, provider_id=provider_id, status=status, limit=limit),
+    }
+
+
+@app.post("/v1/admin/authorized-resource-sessions")
+@app.post("/v1/admin/oauth-sessions")
+def admin_start_authorized_resource_session(
+    req: ConnectorOAuthStartRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    req.auth_method = validate_provider_auth_method(req.provider_id, req.auth_method)
+    if req.resource_type:
+        validate_provider_resource_type(req.provider_id, req.resource_type, auth_method=req.auth_method)
+    validate_runtime_base_url_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    validate_runtime_base_url_fields(req.provider_id, req.metadata, field_name="metadata")
+    validate_platform_resource_profile_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    payload = req.model_dump(exclude_none=True)
+    payload["allow_provider_config_base_url"] = provider_runtime_base_url_allowed(req.provider_id)
+    if req.provider_base_url is not None:
+        payload["provider_base_url"] = validate_provider_base_url_input(req.provider_id, req.provider_base_url)
+    try:
+        session_payload = oauth_session_service.start_session(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    return validate_started_authorized_resource_session(db, req, session_payload)
+
+
+@app.get("/v1/admin/authorized-resource-sessions/{session_id}")
+@app.get("/v1/admin/oauth-sessions/{session_id}")
+def admin_get_authorized_resource_session(
+    session_id: str,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = db.get(models.ConnectorOAuthSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail={"error": "AUTHORIZED_RESOURCE_SESSION_NOT_FOUND", "compat_error": "OAUTH_SESSION_NOT_FOUND"})
+    return oauth_session_service.serialize(session)
+
+
+@app.post("/v1/admin/authorized-resource-sessions/{session_id}/complete")
+@app.post("/v1/admin/oauth-sessions/{session_id}/complete")
+def admin_complete_authorized_resource_session(
+    session_id: str,
+    req: ConnectorOAuthCompleteRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = db.get(models.ConnectorOAuthSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail={"error": "AUTHORIZED_RESOURCE_SESSION_NOT_FOUND", "compat_error": "OAUTH_SESSION_NOT_FOUND"})
+    if req.provider_base_url is not None:
+        req.provider_base_url = validate_provider_base_url_input(session.provider_id, req.provider_base_url)
+    validate_runtime_base_url_fields(session.provider_id, req.resource_profile, field_name="resource_profile")
+    validate_runtime_base_url_fields(session.provider_id, req.connector_response, field_name="connector_response")
+    validate_platform_resource_profile_fields(session.provider_id, req.resource_profile, field_name="resource_profile")
+    response_provider_base_url = first_response_provider_base_url(req.connector_response)
+    if response_provider_base_url:
+        validate_provider_base_url_input(session.provider_id, response_provider_base_url, field_name="connector_response.base_url")
+    response_resource_type = first_response_resource_type(req.connector_response)
+    response_resource_profile = first_response_resource_profile(session.provider_id, req.connector_response)
+    validate_platform_resource_profile_fields(session.provider_id, response_resource_profile, field_name="connector_response.resource_profile")
+    response_credential_value = normalize_credential_material(req.credential_value) or first_response_credential_value(session.provider_id, req.connector_response)
+    session_request_profile = {}
+    session_metadata = loads(session.metadata_json, {})
+    if isinstance(session_metadata, dict):
+        request_metadata = session_metadata.get("request")
+        if isinstance(request_metadata, dict) and isinstance(request_metadata.get("resource_profile"), dict):
+            session_request_profile = request_metadata["resource_profile"]
+    requested_resource_profile = merge_resource_profiles(
+        session_request_profile,
+        response_resource_profile,
+        req.resource_profile or {},
+    )
+    requested_auth_method = validate_provider_auth_method(session.provider_id, req.auth_method or session.auth_method)
+    requested_resource_type = validate_provider_resource_type(
+        session.provider_id,
+        req.resource_type or response_resource_type or infer_account_resource_type(session.provider_id, requested_auth_method),
+        auth_method=requested_auth_method,
+        credential_kind=credential_kind_for_auth_method(requested_auth_method),
+    )
+    response_credential_ref = str(req.credential_ref or "").strip() or first_response_credential_ref(req.connector_response)
+    if response_credential_ref:
+        validate_credential_ref_resource_type(
+            session.provider_id,
+            requested_resource_type,
+            response_credential_ref,
+            credential_kind=credential_kind_for_auth_method(requested_auth_method),
+            db=db,
+        )
+    if response_credential_ref:
+        validate_required_platform_inputs(
+            session.provider_id,
+            auth_method=requested_auth_method,
+            resource_type=requested_resource_type,
+            resource_profile=requested_resource_profile,
+            credential_ref=response_credential_ref,
+            db=db,
+        )
+    elif response_credential_value:
+        validate_required_platform_inputs(
+            session.provider_id,
+            auth_method=requested_auth_method,
+            resource_type=requested_resource_type,
+            resource_profile=requested_resource_profile,
+            credential_value=response_credential_value,
+            db=db,
+        )
+    if session.connector_base_url and not provider_runtime_base_url_allowed(session.provider_id):
+        session.connector_base_url = ""
+        db.commit()
+    try:
+        session_payload = oauth_session_service.complete_session(db, session_id, req.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    completion_credential_value = str(session_payload.pop("_credential_value", "") or "").strip() or response_credential_value
+    onboarding: dict[str, Any] | None = None
+    completion_metadata = session_payload.get("metadata") if isinstance(session_payload.get("metadata"), dict) else {}
+    completion_profile = {}
+    completion = completion_metadata.get("completion") if isinstance(completion_metadata, dict) else {}
+    if isinstance(completion, dict) and isinstance(completion.get("resource_profile"), dict):
+        completion_profile = completion["resource_profile"]
+    final_resource_profile = merge_resource_profiles(
+        session_request_profile,
+        completion_profile,
+        response_resource_profile,
+        req.resource_profile or {},
+    )
+    if session_payload.get("status") == "completed" and completion_credential_value and not session_payload.get("credential_ref"):
+        final_auth_method = validate_provider_auth_method(str(session_payload["provider_id"]), req.auth_method or str(session_payload.get("auth_method") or requested_auth_method))
+        final_resource_type = validate_provider_resource_type(
+            str(session_payload["provider_id"]),
+            req.resource_type or response_resource_type or requested_resource_type or infer_account_resource_type(str(session_payload["provider_id"]), final_auth_method),
+            auth_method=final_auth_method,
+            credential_kind=credential_kind_for_auth_method(final_auth_method),
+        )
+        try:
+            validate_required_platform_inputs(
+                str(session_payload["provider_id"]),
+                auth_method=final_auth_method,
+                resource_type=final_resource_type,
+                resource_profile=final_resource_profile,
+                credential_value=completion_credential_value,
+                db=db,
+            )
+        except HTTPException as exc:
+            failed_session = db.get(models.ConnectorOAuthSession, session_id)
+            if failed_session:
+                detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+                failed_session.status = "failed"
+                failed_session.credential_ref = ""
+                failed_session.error_code = str(detail.get("error") or "PROVIDER_REQUIRED_INPUT_MISSING")
+                failed_session.error_message = str(detail.get("message") or failed_session.error_code)
+                db.commit()
+            raise
+        materialized_ref = materialize_authorized_session_credential_value(
+            db,
+            session_id=session_id,
+            provider_id=str(session_payload["provider_id"]),
+            account_id=req.account_id or str(session_payload.get("account_id") or "") or f"acct_{session_payload['provider_id']}_{session_id[-8:]}",
+            label=req.account_label or req.label or str(session_payload.get("account_label") or session_payload.get("label") or f"{session_payload['provider_id']} authorized resource account"),
+            auth_method=final_auth_method,
+            resource_type=final_resource_type,
+            credential_value=completion_credential_value,
+            credential_secret_id=req.credential_secret_id,
+            resource_profile=final_resource_profile,
+        )
+        session_payload = oauth_session_service.serialize(db.get(models.ConnectorOAuthSession, session_id))
+        session_payload["credential_ref"] = materialized_ref
+    if req.create_account and session_payload.get("status") == "completed" and session_payload.get("credential_ref"):
+        default_operations, default_models = provider_default_operations_and_models(str(session_payload["provider_id"]))
+        auth_method = req.auth_method or str(session_payload.get("auth_method") or "agent_provider_credential")
+        auth_method = validate_provider_auth_method(str(session_payload["provider_id"]), auth_method)
+        resource_type = validate_provider_resource_type(
+            str(session_payload["provider_id"]),
+            req.resource_type or response_resource_type or requested_resource_type or infer_account_resource_type(str(session_payload["provider_id"]), auth_method),
+            auth_method=auth_method,
+            credential_kind=credential_kind_for_auth_method(auth_method),
+        )
+        try:
+            validate_required_platform_inputs(
+                str(session_payload["provider_id"]),
+                auth_method=auth_method,
+                resource_type=resource_type,
+                resource_profile=final_resource_profile,
+                credential_ref=str(session_payload["credential_ref"]),
+                credential_value=completion_credential_value,
+                db=db,
+            )
+        except HTTPException as exc:
+            session.status = "failed"
+            detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+            session.error_code = str(detail.get("error") or "PROVIDER_REQUIRED_INPUT_MISSING")
+            session.error_message = str(detail.get("message") or session.error_code)
+            db.commit()
+            raise
+        supported_operations = req.supported_operations or session_payload.get("supported_operations") or session_payload.get("requested_operations") or default_operations
+        supported_provider_models = req.supported_provider_models or session_payload.get("supported_provider_models") or session_payload.get("requested_provider_models") or default_models
+        requested_provider_base_url = validate_provider_base_url_input(str(session_payload["provider_id"]), req.provider_base_url) if req.provider_base_url is not None else permitted_provider_base_url(str(session_payload["provider_id"]), str(session_payload.get("provider_base_url") or session_payload.get("connector_base_url") or ""))
+        onboarding_req = AccountOnboardingRequest(
+            provider_id=str(session_payload["provider_id"]),
+            account_id=req.account_id or str(session_payload.get("account_id") or "") or None,
+            label=req.account_label or req.label or str(session_payload.get("account_label") or session_payload.get("label") or f"{session_payload['provider_id']} authorized resource account"),
+            resource_type=resource_type,
+            resource_profile=final_resource_profile,
+            provider_base_url=requested_provider_base_url or None,
+            auth_method=auth_method,
+            credential_ref=str(session_payload["credential_ref"]),
+            credential_kind=credential_kind_for_auth_method(auth_method),
+            supported_operations=supported_operations,
+            supported_provider_models=supported_provider_models,
+            quota_buckets=req.quota_buckets or session_payload.get("quota_buckets") or [],
+            concurrency_limit=max(1, int(session_payload.get("concurrency_limit") or req.concurrency_limit or 1)),
+            region=req.region or str(session_payload.get("region") or ""),
+            plan=req.plan or str(session_payload.get("plan") or "") or "delegated_oauth",
+            status="active",
+            sync_capabilities=req.sync_capabilities,
+            run_health_check=req.run_health_check,
+        )
+        onboarding = apply_account_onboarding(db, onboarding_req)
+    return {
+        "object": "media2api.authorized_resource_session_completion",
+        "compat_object": "media2api.connector_oauth_completion",
+        "session": session_payload,
+        "onboarding": onboarding,
+        "next_steps": [
+            "If authorize_url is present, complete login in the connector-controlled window first.",
+            "After completion, confirm the account is active and run account external acceptance.",
+        ],
+    }
+
+
+@app.post("/v1/admin/authorized-resource-sessions/{session_id}/callback")
+@app.post("/v1/admin/oauth-sessions/{session_id}/callback")
+async def admin_authorized_resource_session_callback(
+    session_id: str,
+    request: Request,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"error": "CALLBACK_JSON_REQUIRED"}) from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail={"error": "CALLBACK_JSON_OBJECT_REQUIRED"})
+    account = body.get("account") if isinstance(body.get("account"), dict) else {}
+    req = ConnectorOAuthCompleteRequest(
+        credential_ref=body.get("credential_ref") if isinstance(body.get("credential_ref"), str) else None,
+        connector_response=body,
+        status=str(body.get("status") or "") or None,
+        account_id=str(body.get("account_id") or account.get("account_id") or account.get("id") or "") or None,
+        account_label=str(body.get("account_label") or body.get("label") or account.get("label") or account.get("name") or "") or None,
+        auth_method=str(body.get("auth_method") or account.get("auth_method") or "") or None,
+        resource_type=str(body.get("resource_type") or body.get("resourceType") or account.get("resource_type") or account.get("resourceType") or "") or None,
+        create_account=bool(body.get("create_account", True)),
+        label=str(body.get("label") or account.get("label") or "") or None,
+        provider_base_url=str(body.get("provider_base_url") or body.get("connector_base_url") or account.get("provider_base_url") or "") or None,
+        supported_operations=body.get("supported_operations") if isinstance(body.get("supported_operations"), list) else account.get("supported_operations") if isinstance(account.get("supported_operations"), list) else [],
+        supported_provider_models=body.get("supported_provider_models") if isinstance(body.get("supported_provider_models"), list) else account.get("supported_provider_models") if isinstance(account.get("supported_provider_models"), list) else [],
+        quota_buckets=body.get("quota_buckets") if isinstance(body.get("quota_buckets"), list) else account.get("quota_buckets") if isinstance(account.get("quota_buckets"), list) else [],
+        concurrency_limit=int(body.get("concurrency_limit") or account.get("concurrency_limit") or 1),
+        region=str(body.get("region") or account.get("region") or ""),
+        plan=str(body.get("plan") or account.get("plan") or ""),
+        sync_capabilities=bool(body.get("sync_capabilities", False)),
+        run_health_check=bool(body.get("run_health_check", False)),
+    )
+    return admin_complete_authorized_resource_session(session_id, req, ctx, db)
 
 
 @app.get("/v1/admin/external-connector-manifest-template")
@@ -8398,7 +12334,7 @@ def admin_login_html(error: str = "") -> str:
       <form class="shell" method="post" action="/admin/login">
         <div class="mark">M2</div>
         <h1>media2api 管理后台</h1>
-        <p>使用管理员账号和密码登录，统一管理真实平台、OAuth 会话、保存鉴权、账号池、模型、任务和交付。</p>
+        <p>使用管理员账号和密码登录，统一管理真实平台、授权资源、保存鉴权、账号池、模型、任务和交付。</p>
         {error_html}
         <label for="username">账号</label>
         <input id="username" name="username" autocomplete="username" value="admin" />
@@ -8424,6 +12360,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     models_rows = db.query(models.LogicalModel).order_by(models.LogicalModel.id.asc()).limit(10).all()
     mappings = db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.provider_id != "mock").order_by(models.ProviderModelMapping.priority.asc()).limit(20).all()
     secrets = db.query(models.CredentialSecret).order_by(models.CredentialSecret.updated_at.desc()).limit(8).all()
+    oauth_sessions = db.query(models.ConnectorOAuthSession).order_by(models.ConnectorOAuthSession.updated_at.desc()).limit(8).all()
+    subscription_sources = db.query(models.AccountSubscriptionSource).order_by(models.AccountSubscriptionSource.updated_at.desc()).limit(10).all()
     jobs = (
         db.query(models.MediaJob)
         .filter(or_(models.MediaJob.provider_id != "mock", models.MediaJob.provider_id.is_(None)))
@@ -8440,180 +12378,227 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .all()
     )
     webhooks = db.query(models.WebhookDelivery).order_by(models.WebhookDelivery.created_at.desc()).limit(8).all()
+    connector_projects = (
+        db.query(models.OpenSourceConnectorProject)
+        .order_by(models.OpenSourceConnectorProject.updated_at.desc(), models.OpenSourceConnectorProject.id.asc())
+        .limit(12)
+        .all()
+    )
+    connector_project_count = db.query(models.OpenSourceConnectorProject).count()
     api_key_count = db.query(models.ApiKey).count()
     active_key_count = db.query(models.ApiKey).filter(models.ApiKey.status == "active").count()
     provider_options = "".join(f'<option value="{admin_escape(item.id)}">{admin_escape(item.name)} ({admin_escape(item.id)})</option>' for item in providers)
-    provider_hint_text = {
-        "gemini": "Gemini / Veo / Nano Banana：填写 Gemini/Veo 反代连接器 Base URL，授权材料只接受连接器返回的 token_reference、subscription_url、vault:// 或 secret:// 引用。",
-        "kling": "可灵：填写可灵账号池连接器 Base URL，授权材料来自连接器后台的账号引用或订阅地址。",
-        "jimeng": "即梦 / Seedream / Seedance：填写即梦反代连接器 Base URL，授权材料使用连接器生成的账号引用。",
-        "qwen": "千问 / Qwen：填写 Qwen 反代或第三方聚合连接器 Base URL，授权材料使用连接器 token_reference 或订阅地址。",
-        "grok": "Grok Imagine：填写 Grok 反代连接器 Base URL，授权材料使用连接器保存后的 token_reference。",
-        "pollinations": "Pollinations：填写第三方聚合连接器 Base URL，授权材料使用聚合连接器的 token_reference 或订阅地址。",
-        "openai_image": "OpenAI 图像模型：只通过第三方图像聚合/ChatGPT-Codex 账号池连接器接入，授权材料使用连接器账号引用。",
+    auth_method_labels = {
+        "cookie_secret": "Web Cookie 加密托管",
+        "agent_provider_credential": "Agent Provider 凭据",
     }
+    auth_method_options = "".join(
+        f'<option value="{admin_escape(method)}">{admin_escape(auth_method_labels.get(method, method))}</option>'
+        for method in REFERENCE_AUTH_TYPES
+    )
+    provider_hint_text = {
+        "gemini": "Gemini / Veo / Nano Banana：按 geminicli2api/CLIProxyAPI 类项目填写 Agent profile 或 credential cache；只有使用外部 wrapper 时才填写 runtime/base_url。",
+        "kling": "可灵：按 kling-api/mcp-kling/ComfyUI-KLingAI-API 类项目填写 Access Key + Secret Key 或 MCP/Agent config；不要求 Web cookie/JWT。",
+        "jimeng": "即梦 / Seedream / Seedance：按 ComfyUI-Jimeng-API/seedance-api 填写 Ark/API key/ref 或 Agent profile；不要求 Web cookie 或通用 base_url。",
+        "qwen": "千问 / Qwen：填写 Qwen Code Agent profile/credential cache；使用 CliRelay/CLIProxyAPI 时才填写 runtime/base_url。",
+        "grok": "Grok Imagine：填写 Grok Web/Build cookie/session 或 agent profile；执行器地址不是资源本体。",
+        "pollinations": "Pollinations：非首期核心，作为 fallback/Agent 后端时填写 Agent Provider 引用或项目要求的执行端配置。",
+        "openai_image": "OpenAI 图像模型：首选 ChatGPT Web cookie/session 或 Codex Agent profile；使用 chatgpt2api/codex-proxy 时才填写执行器地址。",
+        "midjourney": "Midjourney：按 midjourney-proxy 字段填写 Discord session、guild、channel；gen2api 账号资源不要求通用 proxy/base_url。",
+        "runway": "Runway：按 n8n-nodes-useapi/useapi 或授权 helper 结果填写托管 credential/ref 或 Agent profile；不在主账号表单收集密码、cookie 或通用 base_url。",
+        "seedream_proxy": "Seedream / Seedance：按 ComfyUI-Jimeng-API/seedance-api 填写 API key/ref 或 Agent profile；不要求 Web cookie 或通用 base_url。",
+    }
+    provider_guides_for_ui = {item.id: connector_registry_service.provider_guide(db, item.id) for item in providers}
     provider_hint_payload = {
         item.id: {
             "models": provider_default_operations_and_models(item.id)[1],
             "operations": provider_default_operations_and_models(item.id)[0],
-            "auth_methods": ["token_reference", "subscription_url", "secret_json"],
-            "help": provider_hint_text.get(item.id, f"{item.name}：填写该平台的反代连接器 Base URL，并粘贴连接器后台生成的 token_reference、subscription_url、vault:// 或 secret:// 账号引用。"),
+            "auth_methods": provider_guides_for_ui.get(item.id, {}).get("recommended_auth_methods", ["agent_provider_credential"]),
+            "resource_type": provider_guides_for_ui.get(item.id, {}).get("resource_type", ""),
+            "base_url_example": provider_guides_for_ui.get(item.id, {}).get("base_url_example", ""),
+            "credential_ref_example": provider_guides_for_ui.get(item.id, {}).get("credential_ref_example", ""),
+            "help": provider_hint_text.get(item.id, f"{item.name}：选择 Web Cookie/session 或 Agent Provider profile；执行器地址只在对应开源项目明确要求服务地址时填写。"),
         }
         for item in providers
     }
     provider_oauth_guides = {
         "gemini": {
-            "title": "Gemini / Veo / Nano Banana 反代连接器",
-            "credential_type": "反代连接器 token_reference / subscription_url",
+            "title": "Gemini / Veo / Nano Banana Agent Provider",
+            "credential_type": "Agent Provider profile / credential reference",
             "primary_url": "",
             "console_url": "",
-            "where": "进入你部署的 Gemini/Veo 反代连接器后台，打开账号订阅或账号池页面，新增或选择一个 Gemini/Veo 账号，复制该连接器输出的 token_reference、subscription_url、vault://providers/gemini/acct_01 或 secret://gemini/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/gemini/acct_01","subscription_url":"https://your-connector.example/sub/gemini/acct_01"}',
-            "connector": "连接器 Base URL 填 Gemini/Veo 反代服务地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "选择 Gemini CLI / Antigravity / Agent Provider profile，或复制对应 helper 输出的 agent:// 或 secret:// 引用；CLI/OAuth/MCP cache 只作为 Agent Provider 内部材料。",
+            "paste": '{"credential_ref":"agent://providers/gemini/acct_01","resource_type":"agent_provider"}',
+            "connector": "Gemini 主线填写 CLI/Agent profile；执行器地址仅在 geminicli2api/CLIProxyAPI 等 wrapper 要求服务地址时填写。",
         },
         "qwen": {
-            "title": "Qwen / 千问反代连接器",
-            "credential_type": "反代连接器 token_reference / subscription_url",
+            "title": "Qwen / 千问 Agent Provider",
+            "credential_type": "Qwen Code Agent profile / credential reference",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Qwen 反代或第三方聚合连接器后台，在账号池里添加千问账号或上游资源，复制连接器生成的 token_reference、subscription_url 或 vault://providers/qwen/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/qwen/acct_01","subscription_url":"https://your-connector.example/sub/qwen/acct_01"}',
-            "connector": "连接器 Base URL 填 Qwen 反代服务地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "选择 Qwen Code Agent profile、CLI credential cache，或复制对应 helper 输出的 agent:// 或 secret:// 引用；CLI/OAuth/MCP cache 只作为 Agent Provider 内部材料。",
+            "paste": '{"credential_ref":"agent://providers/qwen/acct_01","resource_type":"agent_provider"}',
+            "connector": "Qwen 主线填写 Qwen Code/Agent profile；执行器地址仅在 CliRelay/CLIProxyAPI 等 wrapper 要求服务地址时填写。",
         },
         "openai_image": {
-            "title": "OpenAI 图像第三方反代 / Agent 连接器",
-            "credential_type": "ChatGPT/Codex/第三方聚合连接器 token_reference",
+            "title": "OpenAI 图像 Web Cookie / Codex Agent",
+            "credential_type": "ChatGPT Web Cookie 或 Codex Agent profile",
             "primary_url": "",
             "console_url": "",
-            "where": "进入你的 ChatGPT/Codex 图像账号池连接器或第三方图像聚合连接器后台，选择已授权账号，复制连接器输出的 token_reference、subscription_url 或 vault://providers/openai_image/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/openai_image/acct_01","quota_source":"codex_agent"}',
-            "connector": "连接器 Base URL 填图像反代服务地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "导入本人已授权的 ChatGPT cookie/header/cookie jar，或选择 Codex Agent profile；执行器地址仅在 chatgpt2api/codex-proxy 要求时填写。",
+            "paste": '{"credential_ref":"secret://providers/openai_image/cookie_01","resource_type":"web_cookie_provider"}',
+            "connector": "OpenAI 图像主线填写 ChatGPT Web cookie/session 或 Codex Agent profile；执行器地址仅在 chatgpt2api/codex-proxy 要求时填写。",
         },
         "kling": {
-            "title": "可灵账号池反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "可灵 Access Key / MCP Agent",
+            "credential_type": "Kling Access Key + Secret Key 或 MCP config",
             "primary_url": "",
             "console_url": "",
-            "where": "进入可灵反代连接器后台，打开账号池或订阅页，选择可灵账号并复制 token_reference、subscription_url 或 vault://providers/kling/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/kling/acct_01","account":"acct_kling_01"}',
-            "connector": "连接器 Base URL 填可灵反代服务地址；额度消耗可灵网页账号或第三方反代账户额度。",
+            "where": "登记 KLING_ACCESS_KEY + KLING_SECRET_KEY，或登记 MCP/Agent config；当前主账号表单不要求 Kling Web cookie/JWT。",
+            "paste": '{"credential_ref":"agent://providers/kling/acct_01","resource_type":"agent_provider"}',
+            "connector": "Kling 主线填写 Access Key/Secret Key 或 MCP/Agent config；执行器地址仅在 MCP-to-HTTP 或 runner 明确要求时填写。",
         },
         "jimeng": {
-            "title": "即梦 / Seedream / Seedance 账号池反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "即梦 / Seedream / Seedance Agent Provider",
+            "credential_type": "Ark/API key/ref 或 Jimeng Agent profile",
             "primary_url": "",
             "console_url": "",
-            "where": "进入即梦/Seedream 反代连接器后台，完成账号授权后复制连接器生成的账号引用，例如 vault://providers/jimeng/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/jimeng/acct_01","account":"acct_jimeng_01"}',
-            "connector": "连接器 Base URL 填即梦反代服务地址；额度消耗网页账号或第三方反代账户额度。",
+            "where": "按 ComfyUI-Jimeng-API 的 api_keys.json/Ark API key 模式，登记托管 API key/ref 或 Jimeng Agent profile。",
+            "paste": '{"credential_ref":"agent://providers/jimeng/acct_01","resource_type":"agent_provider"}',
+            "connector": "Jimeng/Seedream 主线填写 API key/ref 或 Agent profile；当前不要求 Web cookie 或通用 base_url。",
         },
         "grok": {
-            "title": "Grok Imagine 账号池反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "Grok Imagine Web Cookie / Agent",
+            "credential_type": "Grok Web/Build cookie/session 或 Agent profile",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Grok 反代连接器后台，选择 Grok Imagine 账号并复制 token_reference、subscription_url 或 vault://providers/grok/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/grok/acct_01","account":"acct_grok_01"}',
-            "connector": "连接器 Base URL 填 Grok 反代服务地址；系统只保存账号引用并绑定账号池。",
+            "where": "导入本人已授权的 Grok Web/Build cookie/session，或登记 Grok Agent/MCP profile。",
+            "paste": '{"credential_ref":"secret://providers/grok/session_01","resource_type":"web_cookie_provider"}',
+            "connector": "Grok 主线填写 Web/Build cookie/session 或 Agent profile；执行器地址仅在外部 runner 要求时填写。",
         },
         "pollinations": {
-            "title": "Pollinations 第三方聚合连接器",
-            "credential_type": "聚合连接器 token_reference / subscription_url",
+            "title": "Pollinations fallback / Agent 后端",
+            "credential_type": "托管 token/ref/endpoint",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Pollinations 聚合连接器后台，复制账号订阅地址或 token_reference，例如 vault://providers/pollinations/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/pollinations/acct_01","subscription_url":"https://your-connector.example/sub/pollinations/acct_01"}',
-            "connector": "连接器 Base URL 填 Pollinations 聚合反代服务地址；不在本平台保存官方或上游明文 key。",
+            "where": "非首期核心；作为 fallback 或 Agent 后端时，按项目实际要求登记托管 token/ref/endpoint。",
+            "paste": '{"credential_ref":"agent://providers/pollinations/acct_01","resource_type":"agent_provider"}',
+            "connector": "Pollinations 非首期核心；作为 fallback/agent 后端时按其实际 token/ref/endpoint 要求填写。",
         },
         "openrouter_image": {
-            "title": "OpenRouter 第三方聚合反代连接器",
-            "credential_type": "聚合连接器 token_reference / subscription_url",
+            "title": "OpenRouter fallback / Agent 后端",
+            "credential_type": "托管 token/ref/endpoint",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 OpenRouter 图像聚合反代连接器后台，选择已配置的上游资源，复制 token_reference、subscription_url 或 vault://providers/openrouter_image/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/openrouter_image/acct_01","quota_source":"third_party_aggregator"}',
-            "connector": "连接器 Base URL 填 OpenRouter 聚合反代服务地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "非首期核心；作为 fallback 或 Agent 后端时，按项目实际要求登记托管 token/ref/endpoint。",
+            "paste": '{"credential_ref":"agent://providers/openrouter_image/acct_01","resource_type":"agent_provider"}',
+            "connector": "OpenRouter 非首期核心；作为 fallback/agent 后端时按其 API key/ref/endpoint 要求填写。",
         },
         "fal_replicate": {
-            "title": "fal / Replicate 第三方聚合反代连接器",
-            "credential_type": "聚合连接器 token_reference / subscription_url",
+            "title": "fal / Replicate fallback / Agent 后端",
+            "credential_type": "托管 token/ref/endpoint",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 fal/Replicate 聚合反代连接器后台，选择上游账号资源后复制 token_reference、subscription_url 或 vault://providers/fal_replicate/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/fal_replicate/acct_01","upstream":"connector_pool"}',
-            "connector": "连接器 Base URL 填 fal_replicate 聚合反代地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "非首期核心；作为 fallback 或 Agent 后端时，按项目实际要求登记托管 token/ref/endpoint。",
+            "paste": '{"credential_ref":"agent://providers/fal_replicate/acct_01","resource_type":"agent_provider"}',
+            "connector": "fal/Replicate 非首期核心；作为 fallback/agent 后端时按其 API key/ref/endpoint 要求填写。",
         },
         "flux_stability": {
-            "title": "Flux / Stable Image 反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "Flux / Stable Image Agent 后端",
+            "credential_type": "Agent/self-hosted runner config",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Flux/Stability 图像反代连接器后台，选择自建算力、第三方聚合账号或账号池资源，复制 token_reference、subscription_url 或 vault://providers/flux_stability/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/flux_stability/acct_01","quota_source":"third_party_proxy"}',
-            "connector": "连接器 Base URL 填 Flux/Stability 反代服务地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "非首期核心；作为 Agent 后端或自托管 runner 时，登记 endpoint/MCP/agent config。",
+            "paste": '{"credential_ref":"agent://providers/flux_stability/acct_01","resource_type":"agent_provider"}',
+            "connector": "Flux/Stability 可作为 Agent 后端/fallback；endpoint 只在自托管服务实际存在时填写。",
         },
         "luma": {
-            "title": "Luma 账号池反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "Luma MCP / Agent Provider",
+            "credential_type": "MCP config 或 Agent credential",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Luma 反代连接器后台，在账号池页面复制 token_reference、subscription_url 或 vault://providers/luma/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/luma/acct_01","account":"acct_luma_01"}',
-            "connector": "连接器 Base URL 填 Luma 反代服务地址。",
+            "where": "登记 Luma MCP config 或 Agent Provider credential；服务地址只在 MCP-to-HTTP 或 runner 要求时填写。",
+            "paste": '{"credential_ref":"agent://providers/luma/acct_01","resource_type":"agent_provider"}',
+            "connector": "Luma 主线填写 MCP/Agent config；服务地址只在 MCP-to-HTTP 或 runner 要求时填写。",
         },
         "runway": {
-            "title": "Runway 账号池反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "Runway UseAPI / Agent Provider",
+            "credential_type": "UseAPI credential/ref 或 Runway authorized Agent profile",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Runway 反代连接器后台，选择网页账号池或第三方代理资源，复制 token_reference、subscription_url 或 vault://providers/runway/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/runway/acct_01","mode":"connector_pool"}',
-            "connector": "连接器 Base URL 填 Runway 反代服务地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "按 n8n-nodes-useapi/useapi 或授权 helper 的结果登记托管 credential/ref；主账号表单不收集 Runway 密码或 cookie。",
+            "paste": '{"credential_ref":"agent://providers/runway/acct_01","resource_type":"agent_provider"}',
+            "connector": "Runway 主线填写 UseAPI credential/ref 或 Agent profile；执行层服务地址只在对应项目明确要求时填写。",
         },
         "midjourney": {
-            "title": "Midjourney 任务通道反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "Midjourney 任务通道 Web Session",
+            "credential_type": "Discord/Midjourney session + guild/channel",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Midjourney 任务通道连接器后台，绑定账号或频道资源后复制 token_reference、subscription_url 或 vault://providers/midjourney/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/midjourney/acct_01","account":"acct_midjourney_01"}',
-            "connector": "连接器 Base URL 填 Midjourney 任务通道反代地址。",
+            "where": "按 midjourney-proxy 类项目字段登记 Discord/Midjourney session、guild_id、channel_id。",
+            "paste": '{"credential_ref":"secret://providers/midjourney/session_01","resource_type":"web_cookie_provider","resource_profile":{"guild_id":"...","channel_id":"..."}}',
+            "connector": "Midjourney 主线按 midjourney-proxy 字段填写 Discord session、guild、channel；proxy 服务地址属于具体执行器部署，不作为账号字段暴露。",
         },
         "seedream_proxy": {
-            "title": "Seedream Proxy 反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "Seedream / Seedance Agent Provider",
+            "credential_type": "Seedream/Seedance API key/ref 或 Agent profile",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 Seedream Proxy 后台完成账号资源绑定，复制 token_reference、subscription_url 或 vault://providers/seedream_proxy/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/seedream_proxy/acct_01","account":"acct_seedream_01"}',
-            "connector": "连接器 Base URL 填 Seedream Proxy 地址。",
+            "where": "按 ComfyUI-Jimeng-API/seedance-api 的要求登记 API key/ref 或 Agent profile；主账号表单不要求 Web cookie。",
+            "paste": '{"credential_ref":"agent://providers/seedream_proxy/acct_01","resource_type":"agent_provider"}',
+            "connector": "Seedream/Seedance 主线填写 API key/ref 或 Agent profile；执行层地址只在对应项目明确要求时填写。",
         },
         "amux_qwen": {
-            "title": "AMux Qwen 第三方反代连接器",
-            "credential_type": "连接器 token_reference / subscription_url",
+            "title": "AMux Qwen Agent Provider",
+            "credential_type": "Qwen/AMux Agent Provider credential",
             "primary_url": "",
             "console_url": "",
-            "where": "进入 AMux Qwen 反代连接器后台，选择 Qwen 账号资源或聚合资源，复制 token_reference、subscription_url 或 vault://providers/amux_qwen/acct_01。",
-            "paste": '{"credential_ref":"vault://providers/amux_qwen/acct_01","quota_source":"third_party_proxy"}',
-            "connector": "连接器 Base URL 填 AMux Qwen 反代服务地址；系统只接收连接器账号引用或订阅地址。",
+            "where": "登记 Qwen/AMux Agent Provider profile 或对应托管 credential ref。",
+            "paste": '{"credential_ref":"agent://providers/amux_qwen/acct_01","resource_type":"agent_provider"}',
+            "connector": "AMux/Qwen 主线归入 Agent Provider；服务地址只在对应 wrapper 要求时填写。",
         },
     }
     def connector_oauth_guide(provider: models.Provider) -> dict[str, str]:
         title = f"{provider.name} ({provider.id})"
         return {
             "title": title,
-            "credential_type": f"{provider.id} 连接器 token_reference / subscription_url",
+            "credential_type": f"{provider.id} Web Cookie 或 Agent Provider 凭据",
             "primary_url": "",
             "console_url": "",
-            "where": f"当前选择的是 {title}。打开你部署的 {provider.id} 反代连接器后台，在账号订阅或账号池页面添加/选择账号，复制连接器返回的 token_reference、subscription_url、vault://providers/{provider.id}/acct_01 或 secret://{provider.id}/acct_01。",
-            "paste": f'{{"credential_ref":"vault://providers/{provider.id}/acct_01","subscription_url":"https://your-connector.example/sub/{provider.id}/acct_01"}}',
-            "connector": f"连接器 Base URL 填 {provider.id} 反代适配器服务地址；授权材料只填写该连接器生成的账号引用或订阅地址。",
+            "where": f"当前选择的是 {title}。按该项目实际要求登记 Web Cookie/session 或 Agent Provider profile；执行器地址只在项目明确要求时填写。",
+            "paste": f'{{"credential_ref":"secret://providers/{provider.id}/cookie_01","resource_type":"web_cookie_provider"}}',
+            "connector": f"按 {provider.id} 对应项目实际字段填写；base_url 只在该项目确实要求执行器/服务地址时填写。",
         }
     for provider_id, guide in provider_oauth_guides.items():
         if provider_id in provider_hint_payload:
             provider_hint_payload[provider_id]["oauth"] = guide
     for provider in providers:
         provider_hint_payload[provider.id].setdefault("oauth", connector_oauth_guide(provider))
+    for provider in providers:
+        guide = provider_guides_for_ui.get(provider.id, {})
+        requirements = guide.get("input_requirements", [])
+        actions = guide.get("user_actions", [])
+        basis = guide.get("opensource_basis", [])
+        provider_hint_payload[provider.id]["input_requirements"] = requirements
+        provider_hint_payload[provider.id]["user_actions"] = actions
+        provider_hint_payload[provider.id]["accepted_resource_types"] = guide.get("accepted_resource_types", [])
+        provider_hint_payload[provider.id]["oauth"] = {
+            "title": guide.get("title") or f"{provider.name} ({provider.id})",
+            "credential_type": " / ".join(guide.get("recommended_auth_methods", [])) or "cookie_secret / agent_provider_credential",
+            "primary_url": "",
+            "console_url": "",
+            "where": "；".join(actions) or "按该平台对应开源项目的字段要求导入 Web Cookie/session 或 Agent Provider profile。",
+            "paste": dumps({
+                "provider_id": provider.id,
+                "resource_type": guide.get("resource_type"),
+                "auth_method": (guide.get("recommended_auth_methods") or ["cookie_secret"])[0],
+                "credential_ref": guide.get("credential_ref_example"),
+                "resource_profile": {"input_requirements": requirements, "opensource_basis": basis},
+            }),
+            "connector": "base_url 只在对应开源项目/执行器实际要求服务地址时填写；Web Cookie 和 Agent Provider 本身不强制要求用户填写 base_url。",
+            "input_requirements": requirements,
+            "opensource_basis": basis,
+        }
     def pill(value: Any) -> str:
         raw_value = "" if value is None else str(value)
         status_map = {
@@ -8652,10 +12637,41 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     model_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.display_name)}</td><td>{admin_escape(item.operations_json)}</td><td>{admin_escape(item.billing_class)}</td><td>{pill('enabled' if item.enabled else 'disabled')}</td></tr>" for item in models_rows)
     mapping_rows = "".join(f"<tr><td>{admin_escape(item.logical_model)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.provider_model)}</td><td>{admin_escape(item.operations_json)}</td><td>{admin_escape(item.priority)}</td><td>{pill('enabled' if item.enabled else 'disabled')}</td></tr>" for item in mappings)
     secret_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.kind)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.account_id)}</td><td>{admin_escape(item.preview)}</td><td>{pill(item.status)}</td></tr>" for item in secrets)
+    oauth_session_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.account_id)}</td><td>{admin_escape(item.status)}</td><td>{admin_escape(item.credential_ref)}</td></tr>" for item in oauth_sessions)
+    if not oauth_session_rows:
+        oauth_session_rows = '<tr><td colspan="5">暂无授权会话。只有对应执行器要求 OAuth/device login 时才需要发起会话。</td></tr>'
+    subscription_source_rows = "".join(
+        "<tr>"
+        f"<td>{admin_escape(item.id)}</td>"
+        f"<td>{admin_escape(item.provider_id)}</td>"
+        f"<td>{admin_escape(item.name)}</td>"
+        f"<td>{admin_escape(item.auth_method)}</td>"
+        f"<td>{pill(item.status)}</td>"
+        f"<td>{admin_escape(item.last_sync_status or '-')}</td>"
+        f"<td>{admin_escape(item.last_sync_at.isoformat() + 'Z' if item.last_sync_at else '-')}</td>"
+        "</tr>"
+        for item in subscription_sources
+    )
+    if not subscription_source_rows:
+        subscription_source_rows = '<tr><td colspan="7">暂无资源清单源。填写资源清单 URL 后点击“创建资源清单源”。</td></tr>'
     job_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.operation)}</td><td>{admin_escape(item.logical_model)}</td><td>{admin_escape(item.provider_id or '-')}</td><td>{pill(item.status)}</td></tr>" for item in jobs)
     asset_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.kind)}</td><td>{admin_escape(item.mime_type)}</td><td>{admin_escape(item.purpose)}</td><td>{admin_escape(item.size_bytes)}</td></tr>" for item in assets)
     alert_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.severity)}</td><td>{admin_escape(item.title)}</td><td>{pill(item.status)}</td></tr>" for item in alerts)
     webhook_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.job_id)}</td><td>{admin_escape(item.target_url[:46])}</td><td>{pill(item.status)}</td></tr>" for item in webhooks)
+    connector_project_rows = "".join(
+        "<tr>"
+        f"<td>{admin_escape(item.id)}</td>"
+        f"<td>{admin_escape(item.project_type)}</td>"
+        f"<td>{admin_escape(', '.join(loads(item.provider_ids_json, [])))}</td>"
+        f"<td>{admin_escape(', '.join(loads(item.operations_json, [])))}</td>"
+        f"<td>{admin_escape(', '.join(loads(item.auth_types_json, [])))}</td>"
+        f"<td>{admin_escape(item.risk_level)}</td>"
+        f"<td><button class=\"op connector-project-blueprint\" type=\"button\" data-project-id=\"{admin_escape(item.id)}\">蓝图</button></td>"
+        "</tr>"
+        for item in connector_projects
+    )
+    if not connector_project_rows:
+        connector_project_rows = '<tr><td colspan="7">尚未扫描 res-repo。点击“刷新开源连接器清单”后会显示已拉取仓库的分类结果。</td></tr>'
     visible_checks = [item for item in readiness.get("checks", []) if "mock" not in dumps(item).lower()]
     check_rows = "".join(f"<tr><td>{admin_escape(item.get('name'))}</td><td>{pill('ready' if item.get('ok') else 'blocked')}</td><td>{admin_escape(item.get('detail'))}</td></tr>" for item in visible_checks)
 
@@ -8667,6 +12683,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("生产上线计划", "GET", "/v1/admin/production-go-live-plan"),
         ("连接器一致性", "GET", "/v1/admin/connector-conformance-report"),
         ("外部连接器预检", "GET", "/v1/admin/external-connector-preflight"),
+        ("开源连接器清单", "GET", "/v1/admin/connector-registry"),
+        ("刷新开源连接器清单", "POST", "/v1/admin/connector-registry/refresh"),
+        ("账号添加指南", "GET", "/v1/admin/account-guides"),
+        ("生成接入计划", "POST", "/v1/admin/account-onboarding/plan"),
+        ("一键准备账号", "POST", "/v1/admin/account-setup-quickstart"),
         ("连接器清单模板", "GET", "/v1/admin/external-connector-manifest-template?provider_id=jimeng"),
         ("系统要求报告", "GET", "/v1/admin/system-requirements-report"),
         ("最终验收矩阵", "GET", "/v1/admin/final-acceptance-matrix"),
@@ -8694,7 +12715,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     tabs = [
         ("overview", "总览"),
         ("users", "用户与鉴权"),
-        ("oauth", "OAuth 会话"),
+        ("oauth", "授权资源"),
+        ("connectors", "开源连接器"),
         ("models", "模型"),
         ("providers", "平台"),
         ("accounts", "账号池"),
@@ -8734,6 +12756,20 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .logout {{ border:1px solid var(--line); border-radius:13px; height:38px; padding:0 14px; background:rgba(255,255,255,.05); color:white; cursor:pointer; }}
         .tab {{ display:none; }}
         .tab.active {{ display:block; }}
+        .subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; }}
+        .subnav-item {{ border:1px solid #d4d8e1; background:#fff; border-radius:8px; padding:8px 12px; cursor:pointer; }}
+        .subnav-item.active {{ background:#111827; color:#fff; border-color:#111827; }}
+        .subtab {{ display:none; }}
+        .subtab.active {{ display:block; }}
+        .session-subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 14px; }}
+        .session-subnav-button {{ border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.06); color:#f8fafc; border-radius:8px; padding:8px 12px; cursor:pointer; }}
+        .session-subnav-button.active {{ background:#e5e7eb; color:#08090b; border-color:#e5e7eb; font-weight:800; }}
+        .session-subtab {{ display:none; }}
+        .session-subtab.active {{ display:block; }}
+        .field-hidden {{ display:none !important; }}
+        .disabled-surface {{ opacity:.58; }}
+        .disabled-surface input, .disabled-surface textarea, .disabled-surface button {{ cursor:not-allowed; }}
+        .guide-grid.compact {{ grid-template-columns:180px 1fr; margin-top:6px; }}
         .grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
         .metric,.panel {{ border:1px solid var(--line); border-radius:20px; background:linear-gradient(145deg, rgba(34,36,43,.68), rgba(8,9,12,.72)); box-shadow:14px 14px 36px rgba(0,0,0,.42), -9px -9px 24px rgba(255,255,255,.025); backdrop-filter:blur(18px); }}
         .metric {{ min-height:118px; padding:18px; }}
@@ -8801,9 +12837,16 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           </section>
 
           <section id="tab-oauth" class="tab">
-            <div class="panel">
-              <h2>OAuth / 凭据获取位置速查</h2>
-              <p class="note">先选平台。这里会明确告诉你：该平台要进入哪个反代连接器后台、复制哪类订阅地址或账号引用、最终粘贴到本系统的什么位置。</p>
+            <div class="subnav">
+              <button class="subnav-item active" type="button" data-subtab="oauth-guide-pane">对照指南</button>
+              <button class="subnav-item" type="button" data-subtab="oauth-cookie-pane">Web Cookie</button>
+              <button class="subnav-item" type="button" data-subtab="oauth-agent-pane">Agent Provider</button>
+              <button class="subnav-item" type="button" data-subtab="oauth-session-pane">授权会话</button>
+              <button class="subnav-item" type="button" data-subtab="oauth-bulk-pane">批量导入</button>
+            </div>
+            <div class="panel subtab active" id="oauth-guide-pane">
+              <h2>平台字段对照</h2>
+              <p class="note">先选平台。这里按本地 res-repo 里的对应开源项目说明用户实际要填什么；base_url 只在对应项目确实要求执行器/服务地址时出现。</p>
               <div class="formline">
                 <div><label>平台</label><select id="oauth-guide-provider">{provider_options}</select></div>
                 <div><label>推荐凭据类型</label><input id="oauth-guide-type" readonly /></div>
@@ -8811,8 +12854,117 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               </div>
               <div class="guide-card" id="oauth-provider-guide"></div>
             </div>
-            <div class="panel"><h2>OAuth 会话</h2><p class="note">这里是账号鉴权控制台：选择平台，粘贴真实连接器或密钥库返回的授权材料，系统会保存凭据、创建账号、绑定能力，并可立即同步能力和健康检查。</p><div class="ops"><button class="primary" type="button" id="open-account-wizard">添加平台账号</button><button class="op" type="button" id="open-oauth-guide">查看获取教程</button></div><table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table></div>
-            <div class="panel"><h2>批量导入账号</h2><p class="note">每行一个 JSON 对象，字段支持 account_id、label、credential_value、credential_ref、subscription_url、concurrency_limit、region、plan。系统会逐行执行真实账号接入流程。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>鉴权方式</label><select id="bulk-auth-method"><option value="token_reference">连接器引用</option><option value="subscription_url">订阅地址</option><option value="secret_json">托管 JSON</option></select></div><button class="primary" type="button" id="bulk-import">批量导入</button></div><label style="margin-top:10px">账号 JSONL</label><textarea id="bulk-jsonl" placeholder="每行粘贴一个真实账号 JSON"></textarea></div>
+            <div class="panel subtab" id="oauth-cookie-pane">
+              <h2>Web Cookie Provider</h2>
+              <p class="note" id="cookie-provider-note">用于 ChatGPT Web、Grok Web、Midjourney Discord 等对应开源项目明确要求网页会话的资源。明文只用于本次提交，保存后转为 encrypted secret/ref。</p>
+              <div class="formline">
+                <div><label>账号 ID</label><input id="cookie-account-id" placeholder="留空自动生成" /></div>
+                <div><label>账号标签</label><input id="cookie-account-label" placeholder="ChatGPT cookie 01" /></div>
+                <div class="field-hidden"><label>可选执行器地址</label><input id="cookie-runner-url" placeholder="仅对应项目要求 base_url 时填写" /></div>
+                <button class="primary" type="button" id="save-web-cookie-provider">保存 Web Cookie</button>
+              </div>
+              <div class="formline" style="margin-top:10px">
+                <div><label>Cookie 域 / 平台域</label><input id="cookie-domain-scope" placeholder="chatgpt.com / discord.com" /></div>
+                <div><label>过期时间</label><input id="cookie-expires-at" placeholder="2026-07-01T00:00:00Z" /></div>
+                <div><label>并发</label><input id="cookie-concurrency" value="1" /></div>
+              </div>
+              <div id="cookie-provider-fields" class="formline field-hidden" style="margin-top:10px"></div>
+              <label id="cookie-secret-label" style="margin-top:10px">Cookie header / JSON cookie jar / session token</label>
+              <textarea id="cookie-secret-value" placeholder="粘贴本人已授权的 cookie/session；保存后不会明文展示"></textarea>
+              <p class="note" id="cookie-secret-hint"></p>
+            </div>
+            <div class="panel subtab" id="oauth-agent-pane">
+              <h2>Agent Provider</h2>
+              <p class="note" id="agent-provider-note">用于 Gemini CLI、Codex CLI、Qwen Code、Antigravity、Jimeng/Seedream API key/ref、Kling Access Key/MCP、Runway UseAPI/ref、MCP 等 agent/runtime 资源。</p>
+              <div class="formline">
+                <div><label>账号 ID</label><input id="agent-account-id" placeholder="留空自动生成" /></div>
+                <div><label>账号标签</label><input id="agent-account-label" placeholder="Gemini agent 01" /></div>
+                <div class="field-hidden"><label>Runtime endpoint</label><input id="agent-runtime-endpoint" placeholder="仅 CLIProxyAPI/CliRelay 等要求服务地址时填写" /></div>
+                <button class="primary" type="button" id="save-agent-provider">保存 Agent Provider</button>
+              </div>
+              <div class="formline" style="margin-top:10px">
+                <div><label>工作目录策略</label><input id="agent-workspace-policy" placeholder="isolated / readonly / custom" /></div>
+                <div><label>网络策略</label><input id="agent-network-policy" placeholder="provider_allowlist" /></div>
+                <div><label>并发</label><input id="agent-concurrency" value="1" /></div>
+              </div>
+              <div id="agent-provider-fields" class="formline field-hidden" style="margin-top:10px"></div>
+              <label id="agent-secret-label" style="margin-top:10px">Agent profile / CLI credential / MCP config JSON</label>
+              <textarea id="agent-secret-value" placeholder='{{"profile":"default","credential_cache":"...","runtime":"gemini-cli"}}'></textarea>
+              <p class="note" id="agent-secret-hint"></p>
+            </div>
+            <div class="panel subtab" id="oauth-session-pane">
+              <h2>授权会话</h2>
+              <p class="note">仅用于确实需要授权资源会话的执行器，例如 Web session assist、device login 或 Agent Provider profile capture；旧 oauth-sessions 路径仅为兼容命名。</p>
+              <div class="session-subnav" id="authorized-session-subnav">
+                <button class="session-subnav-button active" type="button" data-session-subtab="authorized-session-start-pane">发起会话</button>
+                <button class="session-subnav-button" type="button" data-session-subtab="authorized-session-complete-pane">完成/回调</button>
+                <button class="session-subnav-button" type="button" data-session-subtab="authorized-session-history-pane">会话记录</button>
+              </div>
+              <div class="session-subtab active" id="authorized-session-start-pane">
+                <div id="oauth-session-start-provider-fields" class="formline field-hidden" style="margin-top:10px"></div>
+                <div class="formline">
+                  <div class="field-hidden"><label>执行器 Base URL</label><input id="oauth-base-url" placeholder="仅对应项目要求服务地址时填写" /></div>
+                  <div><label>账号 ID</label><input id="oauth-account-id" placeholder="留空自动生成" /></div>
+                  <div><label>鉴权方式</label><select id="oauth-auth-method">{auth_method_options}</select></div>
+                  <button class="primary" type="button" id="start-connector-oauth">发起授权会话</button>
+                </div>
+                <p class="note">只在对应开源项目实际提供授权助手、Web session assist 或 Agent profile capture 时使用；其他平台直接走 Web Cookie 或 Agent Provider 表单。</p>
+              </div>
+              <div class="session-subtab" id="authorized-session-complete-pane">
+                <div class="formline">
+                  <div><label>Session ID</label><input id="oauth-session-id" placeholder="发起后自动填入" /></div>
+                  <div><label>手动 Credential Ref</label><input id="oauth-credential-ref" placeholder="可选，secret:// 或 agent://..." /></div>
+                  <div><label>平台字段材料</label><input id="oauth-credential-value" type="password" placeholder='可选，如 {{"apiKey":"..."}} 或 {{"LUMA_API_KEY":"..."}}' /></div>
+                  <button class="op" type="button" id="open-oauth-guide">查看获取教程</button>
+                  <button class="primary" type="button" id="complete-connector-oauth">完成并添加账号</button>
+                </div>
+                <div id="oauth-session-provider-fields" class="formline field-hidden" style="margin-top:10px"></div>
+                <label style="margin-top:10px">Connector 完成 JSON</label>
+                <textarea id="oauth-connector-response" placeholder='{{"status":"completed","credential_value":{{"apiKey":"useapi-key"}},"account":{{"label":"Runway Agent account","auth_method":"agent_provider_credential","resource_type":"agent_provider","supported_operations":["text_to_video"],"supported_provider_models":["runway-gen4"]}}}}'></textarea>
+              </div>
+              <div class="session-subtab" id="authorized-session-history-pane">
+                <div class="formline">
+                  <div><label>添加账号</label><input value="Web Cookie / Agent Provider 主路径" readonly /></div>
+                  <div><label>兼容路径</label><input value="/v1/admin/oauth-sessions" readonly /></div>
+                  <button class="primary" type="button" id="open-account-wizard">添加平台账号</button>
+                </div>
+                <table style="margin-top:14px"><thead><tr><th>会话</th><th>平台</th><th>账号</th><th>状态</th><th>凭据引用</th></tr></thead><tbody>{oauth_session_rows}</tbody></table>
+                <table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table>
+              </div>
+            </div>
+            <div class="panel subtab" id="oauth-bulk-pane"><h2>批量导入账号</h2><p class="note">支持 connector/sub2api/CLIProxy/AIClient2API 风格 JSON；会自动识别 cookie/session/agent profile/guild/channel/runner base_url 等字段，并统一生成 Web Cookie 或 Agent Provider 资源画像。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>资源类型</label><select id="bulk-auth-method">{auth_method_options}</select></div><button class="primary" type="button" id="bulk-import">批量导入 JSONL</button></div><div class="formline" style="margin-top:10px"><div><label>资源清单 URL</label><input id="bulk-subscription-url" placeholder="https://resource-list.example/accounts.json" /></div><div class="field-hidden"><label>可选执行器 Base URL</label><input id="bulk-base-url" placeholder="仅对应项目要求时填写" /></div><button class="op" type="button" id="bulk-preview-subscription">预览资源清单</button></div><div class="formline" style="margin-top:10px"><div><label>默认区域/套餐</label><input id="bulk-region-plan" placeholder="global/pro" /></div><div><label>导入上限</label><input id="bulk-max-items" value="200" /></div><div><label>自动映射</label><select id="bulk-auto-mappings"><option value="true">开启</option><option value="false">关闭</option></select></div><button class="primary" type="button" id="bulk-import-subscription">导入资源账号</button></div><div class="formline" style="margin-top:10px"><div><label>资源清单源名称</label><input id="bulk-source-name" placeholder="Gemini resource list pool" /></div><div><label>资源清单源 ID</label><input id="bulk-source-id" placeholder="创建后返回，或粘贴已有 source_id" /></div><button class="op" type="button" id="bulk-create-source">创建资源清单源</button></div><div class="formline" style="margin-top:10px"><div><label>同步模式</label><select id="bulk-source-sync-mode"><option value="preview">预览同步</option><option value="sync">正式同步</option></select></div><div><label>保存本地内容</label><select id="bulk-source-persist"><option value="false">不保存粘贴内容</option><option value="true">保存粘贴内容</option></select></div><button class="primary" type="button" id="bulk-sync-source">同步资源清单源</button></div><div class="formline" style="margin-top:10px"><div><label>生产检查</label><select id="bulk-production-run-acceptance"><option value="false">只做预检和额度</option><option value="true">运行账号验收</option></select></div><div><label>真实样本</label><select id="bulk-production-run-samples"><option value="false">不跑样本</option><option value="true">跑 1 条样本</option></select></div><button class="op" type="button" id="bulk-production-source">生产化预检</button></div><label style="margin-top:10px">账号 JSON / JSONL</label><textarea id="bulk-jsonl" placeholder='{{"accounts":{{"gpt_cookie_01":{{"auth":{{"type":"cookie_secret","cookie_header":"..."}},"resource_profile":{{"domain":"chatgpt.com"}},"models":[{{"id":"gpt-image-2","operations":["t2i","edit"]}}]}}}}}}'></textarea><table style="margin-top:14px"><thead><tr><th>源 ID</th><th>平台</th><th>名称</th><th>资源</th><th>状态</th><th>同步</th><th>时间</th></tr></thead><tbody>{subscription_source_rows}</tbody></table></div>
+          </section>
+
+          <section id="tab-connectors" class="tab">
+            <div class="panel">
+              <h2>开源连接器</h2>
+              <p class="note">已登记 {connector_project_count} 个本地开源项目。这里用于把 res-repo 里的 sub2api、web-to-api、MCP、聚合器和自托管连接器转成可执行的账号接入计划。</p>
+              <div class="formline">
+                <div><label>平台</label><select id="connector-provider">{provider_options}</select></div>
+                <div><label>鉴权方式</label><select id="connector-auth-method">{auth_method_options}</select></div>
+                <div><label>项目 ID</label><input id="connector-project-id" placeholder="点击表格中的蓝图按钮自动填入" /></div>
+                <button class="primary" type="button" id="refresh-connector-registry">刷新开源连接器清单</button>
+                <button class="op" type="button" id="load-connector-guide">查看平台指南</button>
+                <button class="op" type="button" id="load-connector-runtime">查看反代运行时</button>
+                <button class="op" type="button" id="build-onboarding-plan">生成接入计划</button>
+              </div>
+              <div class="formline" style="margin-top:10px">
+                <div class="field-hidden"><label>可选执行器 Base URL</label><input id="connector-base-url" placeholder="仅对应项目要求服务地址时填写" /></div>
+                <div><label id="connector-credential-label">Credential Ref</label><input id="connector-credential-ref" placeholder="agent://providers/gemini/acct_01" /><p class="note" id="connector-credential-hint"></p></div>
+                <div><label>资源清单 URL</label><input id="connector-subscription-url" placeholder="https://resource-list.example/accounts.json" /></div>
+                <button class="primary" type="button" id="build-project-blueprint">生成项目蓝图</button>
+                <button class="op" type="button" id="apply-project-blueprint">应用项目蓝图</button>
+              </div>
+              <div id="connector-provider-fields" class="formline field-hidden" style="margin-top:10px"></div>
+              <div class="formline" style="margin-top:10px">
+                <div><label>工作流步骤</label><select id="connector-workflow-step"><option value="plan">查看计划</option><option value="project_blueprint">生成项目蓝图</option><option value="apply_blueprint">应用项目蓝图</option><option value="apply_manifest">安装 Manifest</option><option value="start_authorized_session">发起授权资源会话</option><option value="create_subscription_source">创建资源清单源</option><option value="preflight">生产预检</option><option value="account_acceptance">账号验收</option></select></div>
+                <div><label>Dry-run</label><select id="connector-workflow-dry-run"><option value="true">是</option><option value="false">否</option></select></div>
+                <button class="primary" type="button" id="load-account-setup-workflow">查看接入工作流</button>
+                <button class="op" type="button" id="run-account-setup-workflow">运行工作流步骤</button>
+                <button class="primary" type="button" id="run-account-quickstart">一键准备账号</button>
+              </div>
+              <table style="margin-top:14px"><thead><tr><th>仓库</th><th>类型</th><th>平台</th><th>操作</th><th>鉴权</th><th>风险</th><th>蓝图</th></tr></thead><tbody>{connector_project_rows}</tbody></table>
+            </div>
           </section>
 
           <section id="tab-models" class="tab"><div class="panel"><h2>模型</h2><table><thead><tr><th>ID</th><th>名称</th><th>操作</th><th>计费类</th><th>启用</th></tr></thead><tbody>{model_rows}</tbody></table></div><div class="panel"><h2>模型映射</h2><table><thead><tr><th>逻辑模型</th><th>平台</th><th>平台模型</th><th>操作</th><th>优先级</th><th>启用</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></section>
@@ -8833,14 +12985,15 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <p class="note">按步骤接入真实账号：选择平台，选择鉴权方式，填写账号信息，粘贴授权材料，保存后系统会创建凭据和账号，并按需同步能力与健康检查。</p>
           <p class="note" id="wizard-provider-help"></p>
           <div class="guide-card" id="wizard-oauth-guide-card"></div>
+          <div id="wizard-provider-fields" class="formline field-hidden" style="margin-top:10px"></div>
           <div class="formline">
             <div><label>平台</label><select id="wizard-provider">{provider_options}</select></div>
-            <div><label>鉴权方式</label><select id="wizard-auth-method"><option value="token_reference">连接器引用</option><option value="subscription_url">订阅地址</option><option value="secret_json">托管 JSON</option></select></div>
+            <div><label>鉴权方式</label><select id="wizard-auth-method">{auth_method_options}</select></div>
             <div><label>账号 ID</label><input id="wizard-account-id" placeholder="留空自动生成" /></div>
           </div>
           <div class="two">
-            <div><label style="margin-top:10px">连接器 Base URL</label><input id="wizard-base-url" placeholder="填写真实连接器地址" /></div>
-            <div><label style="margin-top:10px">平台配置 JSON</label><textarea id="wizard-provider-config" placeholder="可选，填写真实连接器配置 JSON"></textarea></div>
+            <div class="field-hidden"><label style="margin-top:10px">可选执行器 Base URL</label><input id="wizard-base-url" placeholder="仅对应项目要求服务地址时填写" /></div>
+            <div><label style="margin-top:10px">资源画像 JSON</label><textarea id="wizard-provider-config" placeholder="可选，填写 cookie 域、agent runtime、guild/channel 等资源配置 JSON"></textarea></div>
           </div>
           <div class="formline" style="margin-top:10px">
             <div><label>账号备注</label><input id="wizard-label" placeholder="填写真实账号备注" /></div>
@@ -8851,8 +13004,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div><label style="margin-top:10px">支持操作</label><textarea id="wizard-operations" placeholder="选择平台后自动带出，可按需修改 JSON 数组"></textarea></div>
             <div><label style="margin-top:10px">支持平台模型</label><textarea id="wizard-models" placeholder="选择平台后自动带出，可按需修改 JSON 数组"></textarea></div>
           </div>
-          <label style="margin-top:10px">授权材料</label>
-          <textarea id="wizard-credential" placeholder="粘贴反代连接器返回的 token_reference、subscription_url、vault://、secret:// 或托管 JSON"></textarea>
+          <label id="wizard-credential-label" style="margin-top:10px">授权材料</label>
+          <textarea id="wizard-credential" placeholder="粘贴 Web cookie/session、Agent profile，或对应项目返回的 credential_ref / secret:// / agent:// 托管 JSON"></textarea>
+          <p class="note" id="wizard-credential-hint"></p>
           <div class="formline" style="margin-top:10px">
             <label><input id="wizard-sync" type="checkbox" checked /> 保存后同步能力</label>
             <label><input id="wizard-health" type="checkbox" checked /> 保存后健康检查</label>
@@ -8864,25 +13018,25 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
       </div>
       <div class="modal-backdrop" id="oauth-guide">
         <div class="modal">
-          <h2>如何获取密钥 JSON / 令牌引用</h2>
+          <h2>如何导入 Web Cookie / Agent Provider</h2>
           <div class="guide-card">
             <div class="guide-grid">
-              <b>Gemini / Veo</b><span>进入你部署的 Gemini/Veo 反代连接器后台，在账号订阅页复制 <code>token_reference</code>、<code>subscription_url</code>、<code>vault://...</code> 或 <code>secret://...</code>。</span>
-              <b>Qwen / 千问</b><span>进入你部署的 Qwen 反代或第三方聚合连接器后台，复制该连接器生成的账号引用或订阅地址。</span>
-              <b>OpenAI 图像</b><span>进入 ChatGPT/Codex 图像账号池连接器或第三方图像聚合连接器后台，复制连接器账号引用。</span>
-              <b>可灵 / 即梦 / Grok</b><span>进入对应账号池反代连接器后台授权账号，再粘贴连接器返回的 <code>token_reference</code>、<code>subscription_url</code>、<code>vault://...</code> 或 <code>secret://...</code>。</span>
-              <b>粘贴位置</b><span>回到“添加平台账号”，把真实凭据 JSON 或引用粘贴到“授权材料”，把你的连接器地址填到“连接器 Base URL”。</span>
+              <b>ChatGPT / Grok / Midjourney</b><span>仅当对应开源项目要求网页会话时导入本人已授权的 Web cookie/session；系统保存为 encrypted secret/ref。</span>
+              <b>Gemini / Qwen / Codex</b><span>登记 Agent profile、credential cache、MCP/agent runtime 引用；入库后统一为 Agent Provider。</span>
+              <b>Midjourney</b><span>按 midjourney-proxy 实际字段填写 Discord session、guild id、channel id；不额外要求通用 proxy/base_url。</span>
+              <b>base_url</b><span>只在对应开源项目明确要求执行器/服务地址时填写，不作为所有平台的通用必填项。</span>
+              <b>粘贴位置</b><span>Web Cookie 填到“Web Cookie”；Agent profile 填到“Agent Provider”；确有授权助手时才进入“授权会话”。</span>
             </div>
           </div>
           <ol class="steps">
-            <li>先确定平台：例如 Gemini、可灵、即梦、Qwen、Grok、Pollinations，确认你已经拥有该平台账号或授权的第三方连接器账号。</li>
-            <li>在对应的真实连接器服务里完成 OAuth 登录或账号授权。连接器应返回一个可保存的引用，而不是把明文浏览器会话散落在页面里。</li>
-            <li>如果连接器接入密钥库，把密钥写入 Vault、环境变量或内部 Secret 服务，然后复制引用：例如 <code>vault://providers/gemini/acct_01</code>、<code>env://GEMINI_ACCOUNT_01</code>、<code>secret://gemini/acct_01</code>。</li>
-            <li>如果连接器返回结构化授权结果，把它整理成 JSON，例如 <code>{{"credential_ref":"vault://providers/gemini/acct_01","expires_at":"2026-07-01T00:00:00Z"}}</code>。</li>
-            <li>回到本页填写“平台”和“账号”，把引用或 JSON 粘贴到“密钥 JSON / 令牌引用”，点击“保存凭据”。</li>
+            <li>先确定平台对应的开源项目实际要求：cookie/session、guild/channel、Agent profile、credential cache、MCP config 或服务地址。</li>
+            <li>按该项目要求只填写相同字段；不额外强迫用户填写反常识的 base_url。</li>
+            <li>明文 cookie、session、profile 只在提交瞬间出现，入库后转成 <code>secret://...</code> 或 <code>agent://...</code> 引用。</li>
+            <li>如果执行器返回结构化授权结果，把它整理成 JSON，例如 <code>{{"credential_ref":"agent://providers/gemini/acct_01","expires_at":"2026-07-01T00:00:00Z"}}</code>。</li>
+            <li>保存后运行账号验收，确认对应图片/视频模型真的可用。</li>
             <li>到“账号池”模块创建或更新账号，让账号的 <code>credential_ref</code> 指向刚保存的引用，然后运行“同步 Gemini 能力”“真实平台外部验收”或“账号验收套件”。</li>
           </ol>
-          <p class="note">建议只保存你有权使用的账号授权引用；不要把明文密码、未托管 cookie 或一次性验证码长期写入这里。</p>
+          <p class="note">只导入你有权使用的账号材料；不要沉淀账号密码、验证码处理、风控规避或批量账号获取流程。</p>
           <button class="primary" type="button" id="close-oauth-guide">知道了</button>
         </div>
       </div>
@@ -8895,17 +13049,22 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         function guideHtml(providerId) {{
           const hint = providerHints[providerId] || {{}};
           const guide = hint.oauth || {{}};
+          const requirements = Array.isArray(guide.input_requirements || hint.input_requirements) ? (guide.input_requirements || hint.input_requirements) : [];
+          const reqRows = requirements.length
+            ? requirements.map(item => `<b>${{escapeHtml(item.label || item.name)}}</b><span>${{item.required ? '必填' : '可选'}} · ${{escapeHtml(item.auth_method || '')}}${{item.when ? ' · ' + escapeHtml(item.when) : ''}}${{item.evidence ? ' · 证据：' + escapeHtml(item.evidence) : ''}}</span>`).join('')
+            : '<b>字段</b><span>按该平台开源项目实际字段导入 cookie/session 或 agent profile。</span>';
           const links = [
-            guide.primary_url ? `<a href="${{escapeHtml(guide.primary_url)}}" target="_blank" rel="noreferrer">打开获取入口</a>` : '使用该平台连接器后台',
+            guide.primary_url ? `<a href="${{escapeHtml(guide.primary_url)}}" target="_blank" rel="noreferrer">打开获取入口</a>` : '按平台资源指南导入',
             guide.console_url ? `<a href="${{escapeHtml(guide.console_url)}}" target="_blank" rel="noreferrer">连接器说明</a>` : '',
           ].filter(Boolean).join(' · ');
           return `
             <div class="guide-grid">
               <b>平台</b><span>${{escapeHtml(guide.title || providerId)}}</span>
-              <b>要拿什么</b><span>${{escapeHtml(guide.credential_type || 'token_reference / secret 引用')}}</span>
+              <b>要拿什么</b><span>${{escapeHtml(guide.credential_type || 'Web Cookie / Agent Provider')}}</span>
               <b>去哪里拿</b><span>${{links}}</span>
               <b>具体步骤</b><span>${{escapeHtml(guide.where || '')}}</span>
-              <b>填到哪里</b><span>打开“添加平台账号”，把下面示例里的真实字段填入“授权材料”；连接器地址填入“连接器 Base URL”。</span>
+              <b>需要填写</b><span><div class="guide-grid compact">${{reqRows}}</div></span>
+              <b>填到哪里</b><span>打开“添加平台账号”：Web Cookie 写入授权材料并加密成 secret；Agent Provider 写入 profile/runtime；base_url 只在执行器实际要求时填写。</span>
               <b>连接器建议</b><span>${{escapeHtml(guide.connector || '')}}</span>
             </div>
             <pre class="guide-json">${{escapeHtml(guide.paste || '')}}</pre>
@@ -8920,13 +13079,29 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (quickCard) quickCard.innerHTML = guideHtml(provider);
           if (wizardCard) wizardCard.innerHTML = guideHtml(provider);
           const typeInput = document.getElementById('oauth-guide-type');
-          if (typeInput) typeInput.value = guide.credential_type || 'token_reference / secret 引用';
+          if (typeInput) typeInput.value = guide.credential_type || 'Web Cookie / Agent Provider';
         }}
         document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {{
           document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
           document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
           button.classList.add('active');
           document.getElementById('tab-' + button.dataset.tab).classList.add('active');
+        }}));
+        document.querySelectorAll('.subnav-item').forEach(button => button.addEventListener('click', () => {{
+          const parent = button.closest('.tab');
+          if (!parent) return;
+          parent.querySelectorAll('.subnav-item').forEach(item => item.classList.remove('active'));
+          parent.querySelectorAll('.subtab').forEach(item => item.classList.remove('active'));
+          button.classList.add('active');
+          document.getElementById(button.dataset.subtab)?.classList.add('active');
+        }}));
+        document.querySelectorAll('.session-subnav-button').forEach(button => button.addEventListener('click', () => {{
+          const parent = button.closest('#oauth-session-pane');
+          if (!parent) return;
+          parent.querySelectorAll('.session-subnav-button').forEach(item => item.classList.remove('active'));
+          parent.querySelectorAll('.session-subtab').forEach(item => item.classList.remove('active'));
+          button.classList.add('active');
+          document.getElementById(button.dataset.sessionSubtab)?.classList.add('active');
         }}));
         async function callAdmin(path, method = 'GET', body = null) {{
           const options = {{ method, credentials: 'same-origin', headers: {{ 'Content-Type': 'application/json' }} }};
@@ -8939,11 +13114,300 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (!response.ok) throw new Error(text);
           return payload;
         }}
+        const safeCredentialRefPrefixes = ['secret://', 'agent://'];
+        const credentialKindByAuth = {{
+          cookie_secret: 'cookie',
+          agent_provider_credential: 'agent_provider',
+        }};
+        function credentialKindForAuth(authMethod) {{
+          return credentialKindByAuth[authMethod] || 'agent_provider';
+        }}
+        function buildCredentialFields(rawValue) {{
+          const raw = String(rawValue || '').trim();
+          if (!raw) return {{ credential_value: '', credential_ref: '' }};
+          try {{
+            const parsed = JSON.parse(raw);
+            const ref = parsed.credential_ref || parsed.agent_ref || parsed.websession_ref || '';
+            if (ref) return {{ credential_value: '', credential_ref: String(ref).trim() }};
+          }} catch (_) {{}}
+          if (safeCredentialRefPrefixes.some(prefix => raw.startsWith(prefix))) {{
+            return {{ credential_value: '', credential_ref: raw }};
+          }}
+          return {{ credential_value: raw, credential_ref: '' }};
+        }}
+        function syncAuthMethodOptions(selectId, providerId) {{
+          const select = document.getElementById(selectId);
+          const hint = providerHints[providerId] || {{}};
+          const methods = Array.isArray(hint.auth_methods) ? hint.auth_methods : [];
+          if (!select) return;
+          Array.from(select.options).forEach(option => {{
+            option.hidden = methods.length ? !methods.includes(option.value) : false;
+          }});
+          if (methods.length && !methods.includes(select.value)) select.value = methods[0];
+        }}
+        function providerAllowedAuthMethods(providerId) {{
+          const hint = providerHints[providerId] || {{}};
+          return Array.isArray(hint.auth_methods) && hint.auth_methods.length ? hint.auth_methods : ['agent_provider_credential'];
+        }}
+        function setFormControlsDisabled(rootId, disabled) {{
+          const root = document.getElementById(rootId);
+          if (!root) return;
+          root.querySelectorAll('input, textarea, button').forEach(item => {{
+            if (item.dataset.keepEnabled === 'true') return;
+            item.disabled = disabled;
+          }});
+          root.classList.toggle('disabled-surface', disabled);
+        }}
+        function syncResourceEntryPanels(providerId) {{
+          const methods = providerAllowedAuthMethods(providerId);
+          const cookieAllowed = methods.includes('cookie_secret');
+          const agentAllowed = methods.includes('agent_provider_credential');
+          renderProviderProfileFields(providerId, 'cookie-provider-fields');
+          renderProviderProfileFields(providerId, 'agent-provider-fields');
+          renderProviderProfileFields(providerId, 'oauth-session-start-provider-fields');
+          renderProviderProfileFields(providerId, 'oauth-session-provider-fields');
+          renderProviderProfileFields(providerId, 'connector-provider-fields');
+          syncCredentialInputHints(providerId);
+          const providerLabel = providerId || '当前平台';
+          setFormControlsDisabled('oauth-cookie-pane', !cookieAllowed);
+          setFormControlsDisabled('oauth-agent-pane', !agentAllowed);
+          const cookieNote = document.getElementById('cookie-provider-note');
+          const agentNote = document.getElementById('agent-provider-note');
+          if (cookieNote) {{
+            cookieNote.textContent = cookieAllowed
+              ? '用于当前平台开源项目明确要求的 Web Cookie/session 资源。明文只用于本次提交，保存后转为 encrypted secret/ref。'
+              : providerLabel + ' 当前复核不要求 Web Cookie/session；请使用 Agent Provider 或该平台指南列出的字段。';
+          }}
+          if (agentNote) {{
+            agentNote.textContent = agentAllowed
+              ? '用于当前平台开源项目要求的 Agent Provider credential/profile、API key/ref、MCP config 或授权 helper 输出。'
+              : providerLabel + ' 当前复核不要求 Agent Provider；请使用 Web Cookie 或该平台指南列出的字段。';
+          }}
+        }}
+        const runtimeEndpointNamesByScope = {{
+          any: ['connector_base_url', 'agent_runtime_endpoint', 'runner_endpoint', 'channel_base_url', 'sdk_runtime_endpoint', 'self_hosted_endpoint'],
+          cookie: ['connector_base_url', 'runner_endpoint'],
+          agent: ['agent_runtime_endpoint', 'channel_base_url', 'sdk_runtime_endpoint', 'self_hosted_endpoint'],
+        }};
+        function providerRequirements(providerId) {{
+          const hint = providerHints[providerId] || {{}};
+          const guide = hint.oauth || {{}};
+          const requirements = Array.isArray(guide.input_requirements || hint.input_requirements) ? (guide.input_requirements || hint.input_requirements) : [];
+          return requirements.filter(item => item && item.name);
+        }}
+        function runtimeEndpointRequirement(providerId, scope = 'any') {{
+          const names = runtimeEndpointNamesByScope[scope] || runtimeEndpointNamesByScope.any;
+          return providerRequirements(providerId).find(item => names.includes(item.name));
+        }}
+        function syncRuntimeEndpointField(inputId, providerId, scope = 'any') {{
+          const input = document.getElementById(inputId);
+          if (!input) return;
+          const requirement = runtimeEndpointRequirement(providerId, scope);
+          const container = input.closest('div') || input.parentElement;
+          const visible = Boolean(requirement);
+          if (container) container.classList.toggle('field-hidden', !visible);
+          input.disabled = !visible;
+          if (!visible) {{
+            input.value = '';
+            return;
+          }}
+          const hintText = [requirement.label || requirement.name, requirement.when || ''].filter(Boolean).join(' - ');
+          input.placeholder = hintText || input.placeholder;
+        }}
+        function syncRuntimeEndpointFields() {{
+          const currentProvider = selectedProviderId();
+          const wizardProvider = document.getElementById('wizard-provider')?.value || currentProvider;
+          const bulkProvider = document.getElementById('bulk-provider')?.value || currentProvider;
+          const connectorProvider = document.getElementById('connector-provider')?.value || currentProvider;
+          const templateProvider = document.getElementById('template-id')?.value || currentProvider;
+          syncRuntimeEndpointField('cookie-runner-url', currentProvider, 'cookie');
+          syncRuntimeEndpointField('agent-runtime-endpoint', currentProvider, 'agent');
+          syncRuntimeEndpointField('oauth-base-url', currentProvider, 'any');
+          syncRuntimeEndpointField('wizard-base-url', wizardProvider, 'any');
+          syncRuntimeEndpointField('bulk-base-url', bulkProvider, 'any');
+          syncRuntimeEndpointField('connector-base-url', connectorProvider, 'any');
+          syncRuntimeEndpointField('template-base-url', templateProvider, 'any');
+        }}
+        function runtimeEndpointValue(inputId, providerId, scope = 'any') {{
+          if (!runtimeEndpointRequirement(providerId, scope)) return '';
+          return document.getElementById(inputId)?.value?.trim() || '';
+        }}
+        function providerCredentialRequirements(providerId, authMethod = null) {{
+          const method = authMethod || '';
+          return providerRequirements(providerId).filter(item => {{
+            const isCredentialField = Boolean(item.auth_method || item.store_as);
+            const methodMatches = !item.auth_method || !method || item.auth_method === method;
+            return isCredentialField && methodMatches;
+          }});
+        }}
+        function credentialRequirementSummary(providerId, authMethod) {{
+          const fields = providerCredentialRequirements(providerId, authMethod);
+          return fields.map(item => {{
+            const requiredLabel = item.any_of_group ? '（任选一项）' : (item.required ? '（必填）' : '（可选）');
+            const parts = [
+              (item.label || item.name) + requiredLabel,
+              item.when || '',
+              item.evidence ? '证据：' + item.evidence : '',
+            ].filter(Boolean);
+            return parts.join(' · ');
+          }}).join(' | ');
+        }}
+        function credentialRequirementPlaceholder(providerId, authMethod, fallback) {{
+          const fields = providerCredentialRequirements(providerId, authMethod);
+          if (!fields.length) return fallback;
+          const sample = {{}};
+          fields.forEach(item => {{
+            sample[item.name] = item.any_of_group ? '<one-of-required>' : (item.required ? '<required>' : '<optional>');
+          }});
+          return '按该开源项目字段粘贴明文、secret:// 或 JSON，例如 ' + JSON.stringify(sample);
+        }}
+        function syncCredentialInputHint(labelId, hintId, textareaId, providerId, authMethod, fallbackLabel, fallbackPlaceholder) {{
+          const fields = providerCredentialRequirements(providerId, authMethod);
+          const label = document.getElementById(labelId);
+          const hint = document.getElementById(hintId);
+          const textarea = document.getElementById(textareaId);
+          if (label) {{
+            const names = fields.map(item => item.label || item.name).filter(Boolean);
+            label.textContent = names.length ? names.join(' / ') : fallbackLabel;
+          }}
+          if (hint) {{
+            const summary = credentialRequirementSummary(providerId, authMethod);
+            hint.textContent = summary || '按当前平台开源项目要求粘贴授权材料；保存后只保留加密引用。';
+          }}
+          if (textarea) {{
+            textarea.placeholder = credentialRequirementPlaceholder(providerId, authMethod, fallbackPlaceholder);
+          }}
+        }}
+        function syncCredentialInputHints(providerId) {{
+          syncCredentialInputHint(
+            'cookie-secret-label',
+            'cookie-secret-hint',
+            'cookie-secret-value',
+            providerId,
+            'cookie_secret',
+            'Cookie header / JSON cookie jar / session token',
+            '粘贴本人已授权的 cookie/session；保存后不会明文展示'
+          );
+          syncCredentialInputHint(
+            'agent-secret-label',
+            'agent-secret-hint',
+            'agent-secret-value',
+            providerId,
+            'agent_provider_credential',
+            'Agent profile / CLI credential / MCP config JSON',
+            '{{"profile":"default","credential_cache":"...","runtime":"gemini-cli"}}'
+          );
+          const wizardAuth = document.getElementById('wizard-auth-method')?.value || 'agent_provider_credential';
+          syncCredentialInputHint(
+            'wizard-credential-label',
+            'wizard-credential-hint',
+            'wizard-credential',
+            providerId,
+            wizardAuth,
+            '授权材料',
+            '粘贴 Web cookie/session、Agent profile，或对应项目返回的 credential_ref / secret:// / agent:// 托管 JSON'
+          );
+          const connectorAuth = document.getElementById('connector-auth-method')?.value || 'agent_provider_credential';
+          syncCredentialInputHint(
+            'connector-credential-label',
+            'connector-credential-hint',
+            'connector-credential-ref',
+            providerId,
+            connectorAuth,
+            'Credential Ref',
+            'agent://providers/' + providerId + '/acct_01'
+          );
+        }}
+        function subscriptionImportRequirementExample(providerId, authMethod) {{
+          const accountId = providerId + '_account_01';
+          const hint = providerHints[providerId] || {{ operations: [], models: [] }};
+          const credentialFields = providerCredentialRequirements(providerId, authMethod);
+          const profileFields = providerProfileRequirements(providerId);
+          const sample = {{ accounts: {{}} }};
+          sample.accounts[accountId] = {{
+            auth: {{ type: authMethod }},
+            resource_profile: {{}},
+            models: [
+              {{
+                id: (hint.models || ['model-id'])[0] || 'model-id',
+                operations: hint.operations || [],
+              }},
+            ],
+          }};
+          if (credentialFields.length) {{
+            credentialFields.forEach(item => {{
+              sample.accounts[accountId].auth[item.name] = item.required
+                ? '<required credential/ref: ' + (item.label || item.name) + '>'
+                : '<optional credential/ref: ' + (item.label || item.name) + '>';
+            }});
+          }} else {{
+            sample.accounts[accountId].auth.ref = authMethod === 'cookie_secret'
+              ? 'secret://providers/' + providerId + '/cookie_01'
+              : 'agent://providers/' + providerId + '/acct_01';
+          }}
+          profileFields.forEach(item => {{
+            sample.accounts[accountId].resource_profile[item.name] = item.required
+              ? '<required: ' + (item.label || item.name) + '>'
+              : '<optional: ' + (item.label || item.name) + '>';
+          }});
+          return JSON.stringify(sample, null, 2);
+        }}
+        function syncBulkImportHint() {{
+          const providerId = document.getElementById('bulk-provider')?.value || selectedProviderId();
+          const authMethod = document.getElementById('bulk-auth-method')?.value || providerAllowedAuthMethods(providerId)[0] || 'agent_provider_credential';
+          const textarea = document.getElementById('bulk-jsonl');
+          if (!textarea) return;
+          const credentialSummary = credentialRequirementSummary(providerId, authMethod);
+          const profileLabels = providerProfileRequirements(providerId).map(item => item.label || item.name);
+          const lines = [];
+          if (credentialSummary) lines.push('Credential fields: ' + credentialSummary);
+          if (profileLabels.length) lines.push('resource_profile fields: ' + profileLabels.join(' / '));
+          lines.push('Example:');
+          textarea.placeholder = lines.join('\\n') + '\\n' + subscriptionImportRequirementExample(providerId, authMethod);
+        }}
+        function providerProfileRequirements(providerId) {{
+          const runtimeNames = new Set(runtimeEndpointNamesByScope.any);
+          return providerRequirements(providerId).filter(item => !item.auth_method && !item.store_as && !runtimeNames.has(item.name));
+        }}
+        function renderProviderProfileFields(providerId, containerId = 'wizard-provider-fields') {{
+          const container = document.getElementById(containerId);
+          if (!container) return;
+          const fields = providerProfileRequirements(providerId);
+          container.classList.toggle('field-hidden', !fields.length);
+          container.innerHTML = fields.map(item => `
+            <div>
+              <label>${{escapeHtml(item.label || item.name)}}${{item.required ? ' *' : ''}}</label>
+              <input data-provider-field="${{escapeHtml(item.name)}}" placeholder="${{escapeHtml(item.when || item.name)}}" />
+            </div>
+          `).join('');
+        }}
+        function collectProviderProfileFields(providerId, containerId = 'wizard-provider-fields') {{
+          const fields = providerProfileRequirements(providerId);
+          const required = new Set(fields.filter(item => item.required).map(item => item.name));
+          const values = {{}};
+          document.querySelectorAll('#' + containerId + ' [data-provider-field]').forEach(input => {{
+            const key = input.dataset.providerField;
+            const value = input.value.trim();
+            if (value) values[key] = value;
+            if (!value && required.has(key)) throw new Error('Please fill required platform field: ' + key);
+          }});
+          return values;
+        }}
         document.querySelectorAll('.op').forEach(button => button.addEventListener('click', async () => {{
           const label = button.textContent.trim();
           const path = button.dataset.path;
           const method = button.dataset.method;
-          const body = method === 'POST' ? (label === '试运行导入' ? {{ snapshot: {{}}, dry_run: true }} : label === '试运行启用模板' ? {{ dry_run: true }} : {{}}) : null;
+          if (!path || !method) return;
+          const selectedProvider = document.getElementById('connector-provider')?.value || document.getElementById('oauth-guide-provider')?.value || 'gemini';
+          const body = method === 'POST'
+            ? (label === '试运行导入'
+              ? {{ snapshot: {{}}, dry_run: true }}
+              : label === '试运行启用模板'
+                ? {{ dry_run: true }}
+                : path === '/v1/admin/account-onboarding/plan'
+                  ? {{ provider_id: selectedProvider, auth_method: document.getElementById('connector-auth-method')?.value || 'agent_provider_credential' }}
+                  : {{}})
+            : null;
           result.textContent = '正在执行：' + label + '...';
           try {{ await callAdmin(path, method, body); }} catch (error) {{ result.textContent = String(error); }}
         }}));
@@ -8978,33 +13442,324 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           document.getElementById('wizard-provider-help').textContent = hint.help || '';
           document.getElementById('wizard-operations').value = JSON.stringify(hint.operations || [], null, 2);
           document.getElementById('wizard-models').value = JSON.stringify(hint.models || [], null, 2);
+          syncAuthMethodOptions('wizard-auth-method', providerId);
+          syncAuthMethodOptions('bulk-auth-method', providerId);
+          syncAuthMethodOptions('connector-auth-method', providerId);
+          syncAuthMethodOptions('oauth-auth-method', providerId);
+          syncResourceEntryPanels(providerId);
+          const baseUrlInput = document.getElementById('wizard-base-url');
+          const oauthBaseUrlInput = document.getElementById('oauth-base-url');
+          const credentialInput = document.getElementById('wizard-credential');
+          if (baseUrlInput && hint.base_url_example) baseUrlInput.placeholder = hint.base_url_example;
+          if (oauthBaseUrlInput && hint.base_url_example) oauthBaseUrlInput.placeholder = hint.base_url_example;
+          if (credentialInput && hint.credential_ref_example) credentialInput.placeholder = hint.credential_ref_example;
           renderOAuthGuide(providerId);
+          renderProviderProfileFields(providerId);
+          syncRuntimeEndpointFields();
+          syncBulkImportHint();
         }}
         document.getElementById('oauth-guide-provider')?.addEventListener('change', event => {{
           renderOAuthGuide(event.target.value);
           if (document.getElementById('wizard-provider')) document.getElementById('wizard-provider').value = event.target.value;
+          if (document.getElementById('connector-provider')) document.getElementById('connector-provider').value = event.target.value;
+          syncAuthMethodOptions('connector-auth-method', event.target.value);
+          syncAuthMethodOptions('oauth-auth-method', event.target.value);
+          syncResourceEntryPanels(event.target.value);
+          syncRuntimeEndpointFields();
+        }});
+        document.getElementById('connector-provider')?.addEventListener('change', event => {{
+          if (document.getElementById('oauth-guide-provider')) document.getElementById('oauth-guide-provider').value = event.target.value;
+          if (document.getElementById('wizard-provider')) document.getElementById('wizard-provider').value = event.target.value;
+          syncAuthMethodOptions('connector-auth-method', event.target.value);
+          syncAuthMethodOptions('oauth-auth-method', event.target.value);
+          syncResourceEntryPanels(event.target.value);
+          renderOAuthGuide(event.target.value);
+          syncRuntimeEndpointFields();
+        }});
+        document.getElementById('bulk-provider')?.addEventListener('change', event => {{
+          syncAuthMethodOptions('bulk-auth-method', event.target.value);
+          syncRuntimeEndpointFields();
+          syncBulkImportHint();
+        }});
+        document.getElementById('bulk-auth-method')?.addEventListener('change', syncBulkImportHint);
+        document.getElementById('connector-auth-method')?.addEventListener('change', () => {{
+          syncCredentialInputHints(document.getElementById('connector-provider')?.value || selectedProviderId());
+        }});
+        document.getElementById('wizard-auth-method')?.addEventListener('change', () => {{
+          syncCredentialInputHints(document.getElementById('wizard-provider')?.value || selectedProviderId());
+        }});
+        document.getElementById('oauth-auth-method')?.addEventListener('change', () => {{
+          syncResourceEntryPanels(selectedProviderId());
+          syncRuntimeEndpointFields();
         }});
         document.getElementById('open-account-wizard-from-guide')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard-accounts')?.addEventListener('click', openAccountWizard);
+        function selectedProviderId() {{
+          return document.getElementById('oauth-guide-provider')?.value || document.getElementById('wizard-provider')?.value || 'openai_image';
+        }}
+        function providerHint(providerId) {{
+          return providerHints[providerId] || {{ operations: [], models: [] }};
+        }}
+        document.getElementById('save-web-cookie-provider')?.addEventListener('click', async () => {{
+          const providerId = selectedProviderId();
+          const hint = providerHint(providerId);
+          if (!providerAllowedAuthMethods(providerId).includes('cookie_secret')) {{
+            result.textContent = providerId + ' 当前不要求 Web Cookie/session；请按平台指南使用 Agent Provider 字段。';
+            return;
+          }}
+          const raw = document.getElementById('cookie-secret-value')?.value.trim() || '';
+          if (!raw) {{ result.textContent = '请粘贴 cookie header、cookie jar 或 session token。'; return; }}
+          const accountId = document.getElementById('cookie-account-id')?.value.trim() || null;
+          const profile = {{
+            cookie_domain_scope: document.getElementById('cookie-domain-scope')?.value.trim() || '',
+            session_expires_at: document.getElementById('cookie-expires-at')?.value.trim() || '',
+            connector_base_url: runtimeEndpointValue('cookie-runner-url', providerId, 'cookie'),
+            input_requirements: hint.input_requirements || [],
+            opensource_basis: (hint.oauth || {{}}).opensource_basis || [],
+          }};
+          Object.assign(profile, collectProviderProfileFields(providerId, 'cookie-provider-fields'));
+          const payload = {{
+            provider_id: providerId,
+            account_id: accountId,
+            label: document.getElementById('cookie-account-label')?.value.trim() || providerId + ' web cookie',
+            resource_type: 'web_cookie_provider',
+            resource_profile: profile,
+            provider_base_url: profile.connector_base_url || null,
+            auth_method: 'cookie_secret',
+            credential_kind: 'cookie',
+            credential_value: raw,
+            supported_operations: hint.operations || [],
+            supported_provider_models: hint.models || [],
+            concurrency_limit: Number(document.getElementById('cookie-concurrency')?.value || 1),
+            sync_capabilities: false,
+            run_health_check: false,
+          }};
+          result.textContent = '正在保存 Web Cookie Provider...';
+          try {{ await callAdmin('/v1/admin/account-onboarding', 'POST', payload); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('save-agent-provider')?.addEventListener('click', async () => {{
+          const providerId = selectedProviderId();
+          const hint = providerHint(providerId);
+          if (!providerAllowedAuthMethods(providerId).includes('agent_provider_credential')) {{
+            result.textContent = providerId + ' 当前不要求 Agent Provider；请按平台指南使用 Web Cookie 字段。';
+            return;
+          }}
+          const raw = document.getElementById('agent-secret-value')?.value.trim() || '';
+          if (!raw) {{ result.textContent = '请粘贴 Agent profile、CLI credential 或 MCP config。'; return; }}
+          const endpoint = runtimeEndpointValue('agent-runtime-endpoint', providerId, 'agent');
+          const profile = {{
+            agent_runtime_endpoint: endpoint,
+            workspace_policy: document.getElementById('agent-workspace-policy')?.value.trim() || 'isolated',
+            network_policy: document.getElementById('agent-network-policy')?.value.trim() || 'provider_allowlist',
+            input_requirements: hint.input_requirements || [],
+            opensource_basis: (hint.oauth || {{}}).opensource_basis || [],
+          }};
+          Object.assign(profile, collectProviderProfileFields(providerId, 'agent-provider-fields'));
+          const payload = {{
+            provider_id: providerId,
+            account_id: document.getElementById('agent-account-id')?.value.trim() || null,
+            label: document.getElementById('agent-account-label')?.value.trim() || providerId + ' agent provider',
+            resource_type: 'agent_provider',
+            resource_profile: profile,
+            provider_base_url: endpoint || null,
+            auth_method: 'agent_provider_credential',
+            credential_kind: 'agent_provider',
+            credential_value: raw,
+            supported_operations: hint.operations || [],
+            supported_provider_models: hint.models || [],
+            concurrency_limit: Number(document.getElementById('agent-concurrency')?.value || 1),
+            sync_capabilities: false,
+            run_health_check: false,
+          }};
+          result.textContent = '正在保存 Agent Provider...';
+          try {{ await callAdmin('/v1/admin/account-onboarding', 'POST', payload); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('start-connector-oauth')?.addEventListener('click', async () => {{
+          const providerId = selectedProviderId();
+          const hint = providerHints[providerId] || {{}};
+          const baseUrl = runtimeEndpointValue('oauth-base-url', providerId, 'any');
+          const authMethod = document.getElementById('oauth-auth-method')?.value || 'agent_provider_credential';
+          try {{
+            const payload = {{
+              provider_id: providerId,
+              account_id: document.getElementById('oauth-account-id')?.value || null,
+              label: providerId + ' delegated auth account',
+              provider_base_url: baseUrl || null,
+              auth_method: authMethod,
+              resource_type: authMethod === 'cookie_secret' ? 'web_cookie_provider' : 'agent_provider',
+              resource_profile: {{
+                input_requirements: hint.input_requirements || [],
+                opensource_basis: (hint.oauth || {{}}).opensource_basis || [],
+                ...collectProviderProfileFields(providerId, 'oauth-session-start-provider-fields'),
+              }},
+              supported_operations: hint.operations || [],
+              supported_provider_models: hint.models || [],
+            }};
+            result.textContent = '正在发起授权会话...';
+            const response = await callAdmin('/v1/admin/authorized-resource-sessions', 'POST', payload);
+            if (response.id) document.getElementById('oauth-session-id').value = response.id;
+            if (response.authorize_url) window.open(response.authorize_url, '_blank', 'noopener,noreferrer');
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        document.getElementById('complete-connector-oauth')?.addEventListener('click', async () => {{
+          const sessionId = document.getElementById('oauth-session-id')?.value.trim();
+          if (!sessionId) {{ result.textContent = '请先填写授权会话 Session ID。'; return; }}
+          const providerId = selectedProviderId();
+          const hint = providerHints[providerId] || {{}};
+          const credentialRef = document.getElementById('oauth-credential-ref')?.value.trim();
+          const credentialValueText = document.getElementById('oauth-credential-value')?.value.trim();
+          const connectorResponseText = document.getElementById('oauth-connector-response')?.value.trim();
+          try {{
+            const connectorResponse = connectorResponseText ? JSON.parse(connectorResponseText) : null;
+            let credentialValue = null;
+            if (credentialValueText) {{
+              try {{ credentialValue = JSON.parse(credentialValueText); }} catch (_) {{ credentialValue = credentialValueText; }}
+            }}
+            const payload = {{
+              credential_ref: credentialRef || null,
+              credential_value: credentialValue,
+              connector_response: connectorResponse,
+              auth_method: document.getElementById('oauth-auth-method')?.value || null,
+              resource_type: (document.getElementById('oauth-auth-method')?.value || '').includes('cookie') ? 'web_cookie_provider' : 'agent_provider',
+              resource_profile: {{
+                input_requirements: hint.input_requirements || [],
+                opensource_basis: (hint.oauth || {{}}).opensource_basis || [],
+                ...collectProviderProfileFields(providerId, 'oauth-session-provider-fields'),
+              }},
+              create_account: true,
+              provider_base_url: runtimeEndpointValue('oauth-base-url', providerId, 'any') || null,
+              supported_operations: hint.operations || [],
+              supported_provider_models: hint.models || [],
+              sync_capabilities: false,
+              run_health_check: false,
+            }};
+            result.textContent = '正在完成授权会话并添加账号...';
+            await callAdmin('/v1/admin/authorized-resource-sessions/' + encodeURIComponent(sessionId) + '/complete', 'POST', payload);
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        document.getElementById('refresh-connector-registry')?.addEventListener('click', async () => {{
+          result.textContent = '正在扫描 res-repo...';
+          try {{ await callAdmin('/v1/admin/connector-registry/refresh', 'POST', {{}}); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('load-connector-guide')?.addEventListener('click', async () => {{
+          const providerId = document.getElementById('connector-provider')?.value || 'gemini';
+          result.textContent = '正在读取账号添加指南...';
+          try {{ await callAdmin('/v1/admin/account-guides/' + encodeURIComponent(providerId)); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('load-connector-runtime')?.addEventListener('click', async () => {{
+          const providerId = document.getElementById('connector-provider')?.value || 'gemini';
+          result.textContent = '正在读取反代运行时契约...';
+          try {{ await callAdmin('/v1/admin/providers/' + encodeURIComponent(providerId) + '/connector-runtime'); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('build-onboarding-plan')?.addEventListener('click', async () => {{
+          const providerId = document.getElementById('connector-provider')?.value || 'gemini';
+          const authMethod = document.getElementById('connector-auth-method')?.value || 'agent_provider_credential';
+          result.textContent = '正在生成账号接入计划...';
+          try {{ await callAdmin('/v1/admin/account-onboarding/plan', 'POST', {{ provider_id: providerId, auth_method: authMethod }}); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        function connectorProjectBlueprintPayload(dryRun) {{
+          const providerId = document.getElementById('connector-provider')?.value || 'gemini';
+          const authMethod = document.getElementById('connector-auth-method')?.value || 'agent_provider_credential';
+          const subscriptionUrl = document.getElementById('connector-subscription-url')?.value.trim() || '';
+          const resourceProfile = collectProviderProfileFields(providerId, 'connector-provider-fields');
+          return {{
+            provider_id: providerId,
+            auth_method: authMethod,
+            base_url: runtimeEndpointValue('connector-base-url', providerId, 'any') || null,
+            resource_profile: resourceProfile,
+            credential_ref: document.getElementById('connector-credential-ref')?.value.trim() || null,
+            subscription_url: subscriptionUrl || null,
+            create_subscription_source: Boolean(subscriptionUrl),
+            sync_capabilities: false,
+            run_health_check: false,
+            run_contract_tests: false,
+            run_quota_sync: false,
+            dry_run: dryRun,
+          }};
+        }}
+        document.querySelectorAll('.connector-project-blueprint').forEach(button => {{
+          button.addEventListener('click', async () => {{
+            const projectId = button.getAttribute('data-project-id') || '';
+            document.getElementById('connector-project-id').value = projectId;
+            const payload = connectorProjectBlueprintPayload(true);
+            result.textContent = '正在生成项目蓝图...';
+            try {{ await callAdmin('/v1/admin/connector-registry/' + encodeURIComponent(projectId) + '/blueprint/apply', 'POST', payload); }} catch (error) {{ result.textContent = String(error); }}
+          }});
+        }});
+        document.getElementById('build-project-blueprint')?.addEventListener('click', async () => {{
+          const projectId = document.getElementById('connector-project-id')?.value.trim() || '';
+          if (!projectId) {{ result.textContent = '请先填写或点击一个项目 ID。'; return; }}
+          const payload = connectorProjectBlueprintPayload(true);
+          result.textContent = '正在生成项目蓝图...';
+          try {{ await callAdmin('/v1/admin/connector-registry/' + encodeURIComponent(projectId) + '/blueprint/apply', 'POST', payload); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('apply-project-blueprint')?.addEventListener('click', async () => {{
+          const projectId = document.getElementById('connector-project-id')?.value.trim() || '';
+          if (!projectId) {{ result.textContent = '请先填写或点击一个项目 ID。'; return; }}
+          result.textContent = '正在应用项目蓝图...';
+          try {{ await callAdmin('/v1/admin/connector-registry/' + encodeURIComponent(projectId) + '/blueprint/apply', 'POST', connectorProjectBlueprintPayload(false)); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        function accountSetupWorkflowPayload() {{
+          const payload = connectorProjectBlueprintPayload(document.getElementById('connector-workflow-dry-run')?.value !== 'false');
+          payload.step = document.getElementById('connector-workflow-step')?.value || 'plan';
+          payload.project_id = document.getElementById('connector-project-id')?.value.trim() || null;
+          payload.account_id = null;
+          payload.run_samples = payload.step === 'account_acceptance';
+          return payload;
+        }}
+        document.getElementById('load-account-setup-workflow')?.addEventListener('click', async () => {{
+          const providerId = document.getElementById('connector-provider')?.value || 'gemini';
+          result.textContent = '正在读取接入工作流...';
+          try {{ await callAdmin('/v1/admin/account-setup-workflows/' + encodeURIComponent(providerId)); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('run-account-setup-workflow')?.addEventListener('click', async () => {{
+          const providerId = document.getElementById('connector-provider')?.value || 'gemini';
+          result.textContent = '正在运行接入工作流步骤...';
+          try {{ await callAdmin('/v1/admin/account-setup-workflows/' + encodeURIComponent(providerId) + '/run', 'POST', accountSetupWorkflowPayload()); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('run-account-quickstart')?.addEventListener('click', async () => {{
+          const payload = accountSetupWorkflowPayload();
+          payload.mode = 'auto';
+          payload.apply_manifest = true;
+          payload.create_subscription_source = Boolean(payload.subscription_url);
+          payload.run_preflight = true;
+          payload.run_acceptance = payload.step === 'account_acceptance';
+          delete payload.step;
+          result.textContent = '正在一键准备账号...';
+          try {{ await callAdmin('/v1/admin/account-setup-quickstart', 'POST', payload); }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('close-account-wizard')?.addEventListener('click', closeAccountWizard);
         document.getElementById('account-wizard')?.addEventListener('click', event => {{
           if (event.target.id === 'account-wizard') closeAccountWizard();
         }});
         document.getElementById('wizard-provider')?.addEventListener('change', fillProviderHints);
         renderOAuthGuide();
+        fillProviderHints();
         document.getElementById('wizard-submit')?.addEventListener('click', async () => {{
           try {{
             const regionPlan = document.getElementById('wizard-region-plan').value.split('/').map(item => item.trim());
+            const wizardProviderId = document.getElementById('wizard-provider').value;
+            const authMethod = document.getElementById('wizard-auth-method').value;
+            const credentialFields = buildCredentialFields(document.getElementById('wizard-credential').value);
+            const resourceProfileText = document.getElementById('wizard-provider-config').value.trim();
+            const resourceProfile = resourceProfileText ? JSON.parse(resourceProfileText) : {{}};
+            Object.assign(resourceProfile, collectProviderProfileFields(wizardProviderId));
             const payload = {{
-              provider_id: document.getElementById('wizard-provider').value,
+              provider_id: wizardProviderId,
               account_id: document.getElementById('wizard-account-id').value || null,
-              label: document.getElementById('wizard-label').value || document.getElementById('wizard-provider').value + ' 账号',
-              provider_base_url: document.getElementById('wizard-base-url').value || null,
-              provider_config: document.getElementById('wizard-provider-config').value.trim() ? JSON.parse(document.getElementById('wizard-provider-config').value) : {{}},
-              auth_method: document.getElementById('wizard-auth-method').value,
-              credential_value: document.getElementById('wizard-credential').value,
-              credential_kind: document.getElementById('wizard-auth-method').value,
+              label: document.getElementById('wizard-label').value || wizardProviderId + ' 账号',
+              provider_base_url: runtimeEndpointValue('wizard-base-url', wizardProviderId, 'any') || null,
+              resource_profile: resourceProfile,
+              provider_config: {{}},
+              auth_method: authMethod,
+              credential_value: credentialFields.credential_value,
+              credential_ref: credentialFields.credential_ref || null,
+              credential_kind: credentialKindForAuth(authMethod),
               supported_operations: parseJsonArrayField('wizard-operations'),
               supported_provider_models: parseJsonArrayField('wizard-models'),
               concurrency_limit: Number(document.getElementById('wizard-concurrency').value || 1),
@@ -9013,11 +13768,121 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               sync_capabilities: document.getElementById('wizard-sync').checked,
               run_health_check: document.getElementById('wizard-health').checked,
             }};
-            if (!payload.credential_value.trim()) throw new Error('请填写真实授权材料。');
+            if (!payload.credential_value.trim() && !payload.credential_ref) throw new Error('请填写真实授权材料。');
             result.textContent = '正在保存平台账号...';
             const response = await callAdmin('/v1/admin/account-onboarding', 'POST', payload);
             closeAccountWizard();
             result.textContent = JSON.stringify(response, null, 2);
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        function buildSubscriptionImportPayload() {{
+          const providerId = document.getElementById('bulk-provider')?.value || 'gemini';
+          const authMethod = document.getElementById('bulk-auth-method')?.value || 'agent_provider_credential';
+          const hint = providerHints[providerId] || {{ operations: [], models: [] }};
+          const regionPlan = (document.getElementById('bulk-region-plan')?.value || '').split('/').map(item => item.trim());
+          const content = document.getElementById('bulk-jsonl')?.value.trim() || '';
+          const subscriptionUrl = document.getElementById('bulk-subscription-url')?.value.trim() || '';
+          if (!content && !subscriptionUrl) throw new Error('请填写资源清单 URL，或粘贴 JSON / JSONL 账号资源清单。');
+          return {{
+            provider_id: providerId,
+            auth_method: authMethod,
+            subscription_url: subscriptionUrl || null,
+            content: content || null,
+            provider_base_url: runtimeEndpointValue('bulk-base-url', providerId, 'any') || null,
+            supported_operations: hint.operations || [],
+            supported_provider_models: hint.models || [],
+            region: regionPlan[0] || '',
+            plan: regionPlan[1] || '',
+            max_items: Number(document.getElementById('bulk-max-items')?.value || 200),
+            auto_create_mappings: document.getElementById('bulk-auto-mappings')?.value !== 'false',
+            sync_capabilities: false,
+            run_health_check: false,
+          }};
+        }}
+        document.getElementById('bulk-preview-subscription')?.addEventListener('click', async () => {{
+          try {{
+            result.textContent = '正在预览账号资源清单...';
+            await callAdmin('/v1/admin/account-subscriptions/preview', 'POST', buildSubscriptionImportPayload());
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        document.getElementById('bulk-import-subscription')?.addEventListener('click', async () => {{
+          try {{
+            result.textContent = '正在导入账号资源清单...';
+            await callAdmin('/v1/admin/account-subscriptions/import', 'POST', buildSubscriptionImportPayload());
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        function buildSubscriptionSourcePayload() {{
+          const payload = buildSubscriptionImportPayload();
+          const sourceId = document.getElementById('bulk-source-id')?.value.trim() || '';
+          return {{
+            id: sourceId || null,
+            provider_id: payload.provider_id,
+            name: document.getElementById('bulk-source-name')?.value.trim() || payload.provider_id + ' resource list source',
+            auth_method: payload.auth_method,
+            subscription_url: payload.subscription_url,
+            content: payload.content,
+            persist_content: document.getElementById('bulk-source-persist')?.value === 'true',
+            provider_base_url: payload.provider_base_url,
+            supported_operations: payload.supported_operations,
+            supported_provider_models: payload.supported_provider_models,
+            region: payload.region,
+            plan: payload.plan,
+            max_items: payload.max_items,
+            sync_capabilities: false,
+            run_health_check: false,
+          }};
+        }}
+        document.getElementById('bulk-create-source')?.addEventListener('click', async () => {{
+          try {{
+            result.textContent = '正在创建资源清单源...';
+            const response = await callAdmin('/v1/admin/account-subscription-sources', 'POST', buildSubscriptionSourcePayload());
+            const sourceId = response.source && response.source.id;
+            if (sourceId && document.getElementById('bulk-source-id')) document.getElementById('bulk-source-id').value = sourceId;
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        document.getElementById('bulk-sync-source')?.addEventListener('click', async () => {{
+          try {{
+            const sourceId = document.getElementById('bulk-source-id')?.value.trim();
+            if (!sourceId) throw new Error('请先填写或创建资源清单源 ID。');
+            const dryRun = (document.getElementById('bulk-source-sync-mode')?.value || 'preview') === 'preview';
+            const content = document.getElementById('bulk-jsonl')?.value.trim() || null;
+            result.textContent = dryRun ? '正在预览资源清单源同步...' : '正在同步资源清单源...';
+            await callAdmin('/v1/admin/account-subscription-sources/' + encodeURIComponent(sourceId) + '/sync', 'POST', {{
+              dry_run: dryRun,
+              content,
+              sync_capabilities: false,
+              run_health_check: false,
+            }});
+          }} catch (error) {{
+            result.textContent = String(error);
+          }}
+        }});
+        document.getElementById('bulk-production-source')?.addEventListener('click', async () => {{
+          try {{
+            const sourceId = document.getElementById('bulk-source-id')?.value.trim();
+            if (!sourceId) throw new Error('请先填写或创建资源清单源 ID。');
+            const dryRun = (document.getElementById('bulk-source-sync-mode')?.value || 'preview') === 'preview';
+            const content = document.getElementById('bulk-jsonl')?.value.trim() || null;
+            result.textContent = dryRun ? '正在执行生产化预演...' : '正在执行生产化同步...';
+            await callAdmin('/v1/admin/account-subscription-sources/' + encodeURIComponent(sourceId) + '/production-sync', 'POST', {{
+              dry_run: dryRun,
+              content,
+              sync_capabilities: true,
+              run_health_check: true,
+              run_quota_sync: true,
+              include_preflight: true,
+              run_acceptance: document.getElementById('bulk-production-run-acceptance')?.value === 'true',
+              run_samples: document.getElementById('bulk-production-run-samples')?.value === 'true',
+              max_samples: 1,
+            }});
           }} catch (error) {{
             result.textContent = String(error);
           }}
@@ -9168,6 +14033,10 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     request_count = db.query(models.RequestAuditLog).count()
     provider_capabilities = {provider.id: capability_service.snapshot(db, provider) for provider in providers}
     template_options = "".join(f"<option value='{t.id}'>{t.id} - {t.name}</option>" for t in PROVIDER_TEMPLATES.values())
+    template_runtime_base_url_allowed = {
+        template.id: provider_runtime_base_url_allowed(template.id)
+        for template in PROVIDER_TEMPLATES.values()
+    }
     provider_options = "".join(f"<option value='{p.id}'>{p.id} ({p.status})</option>" for p in providers)
     account_options = "".join(f"<option value='{a.id}'>{a.id} - {a.provider_id} ({a.status})</option>" for a in accounts)
     image_model_options = "".join(
@@ -9288,10 +14157,30 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
           if (!response.ok) throw new Error(typeof body === 'string' ? body : JSON.stringify(body));
           return body;
         }
+        const templateRuntimeBaseUrlAllowed = __TEMPLATE_RUNTIME_BASE_URL_ALLOWED__;
+        function syncTemplateBaseUrlField() {
+          const templateId = document.getElementById('template-id')?.value || '';
+          const input = document.getElementById('template-base-url');
+          const row = document.getElementById('template-base-url-row');
+          const visible = Boolean(templateRuntimeBaseUrlAllowed[templateId]);
+          if (row) row.classList.toggle('field-hidden', !visible);
+          if (input) {
+            input.disabled = !visible;
+            if (!visible) input.value = '';
+          }
+        }
+        function templateBaseUrlValue() {
+          syncTemplateBaseUrlField();
+          const templateId = document.getElementById('template-id')?.value || '';
+          if (!templateRuntimeBaseUrlAllowed[templateId]) return null;
+          return document.getElementById('template-base-url')?.value || null;
+        }
+        document.addEventListener('DOMContentLoaded', syncTemplateBaseUrlField);
+        document.getElementById('template-id')?.addEventListener('change', syncTemplateBaseUrlField);
         async function installTemplate() {
           const body = {
-            base_url: document.getElementById('template-base-url').value || null,
-            credential_ref: document.getElementById('template-credential-ref').value || 'env://MEDIA2API_CONNECTOR_KEY',
+            base_url: templateBaseUrlValue(),
+            credential_ref: document.getElementById('template-credential-ref').value || 'agent://providers/template/acct_01',
             credential_secret_id: document.getElementById('template-secret-id').value || null,
             credential_kind: document.getElementById('template-credential-kind').value,
             status: document.getElementById('template-status').value,
@@ -9309,8 +14198,8 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
             .filter(Boolean);
           const body = {
             dry_run: dryRun,
-            base_url: document.getElementById('template-base-url').value || null,
-            credential_ref: document.getElementById('template-credential-ref').value || 'env://MEDIA2API_CONNECTOR_KEY',
+            base_url: templateBaseUrlValue(),
+            credential_ref: document.getElementById('template-credential-ref').value || 'agent://providers/template/acct_01',
             credential_value: document.getElementById('template-credential-value').value || null,
             credential_secret_id: document.getElementById('template-secret-id').value || null,
             credential_kind: document.getElementById('template-credential-kind').value,
@@ -9334,7 +14223,7 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
             .filter(Boolean);
           const body = {
             dry_run: dryRun,
-            base_url: document.getElementById('template-base-url').value || null,
+            base_url: templateBaseUrlValue(),
             credential_ref: document.getElementById('template-credential-ref').value || null,
             credential_value: document.getElementById('template-credential-value').value || null,
             credential_secret_id: document.getElementById('template-secret-id').value || null,
@@ -9561,6 +14450,10 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
         }
       </script>
     """
+    admin_script = admin_script.replace(
+        "__TEMPLATE_RUNTIME_BASE_URL_ALLOWED__",
+        json.dumps(template_runtime_base_url_allowed, ensure_ascii=False),
+    )
     html = f"""
     <html>
     <head>
@@ -9581,6 +14474,7 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
         button.secondary {{ background:#fff; color:#0f766e; }}
         .inline {{ display:flex; gap:10px; align-items:center; }}
         .inline input[type=checkbox] {{ width:auto; }}
+        .field-hidden {{ display:none !important; }}
         pre.result {{ white-space:pre-wrap; overflow:auto; max-height:360px; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; }}
         table {{ border-collapse: collapse; width: 100%; margin-bottom: 28px; }}
         th, td {{ border: 1px solid #d8dee9; padding: 8px 10px; text-align: left; font-size: 13px; }}
@@ -9642,16 +14536,18 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
           <h3>Activate Template</h3>
           <label for="template-id">Template</label>
           <select id="template-id">{template_options}</select>
-          <label for="template-base-url">Base URL</label>
-          <input id="template-base-url" placeholder="http://127.0.0.1:18091">
+          <div id="template-base-url-row" class="field-hidden">
+            <label for="template-base-url">可选执行器地址</label>
+            <input id="template-base-url" placeholder="仅对应项目要求服务地址时填写">
+          </div>
           <label for="template-credential-ref">Credential Ref</label>
-          <input id="template-credential-ref" value="env://MEDIA2API_CONNECTOR_KEY">
+          <input id="template-credential-ref" value="agent://providers/template/acct_01">
           <label for="template-credential-value">Credential Value</label>
           <input id="template-credential-value" type="password" placeholder="optional, stored as secret://">
           <label for="template-secret-id">Secret ID</label>
           <input id="template-secret-id" placeholder="optional stable secret id">
           <label for="template-credential-kind">Credential Kind</label>
-          <select id="template-credential-kind"><option value="custom">custom</option><option value="bearer_token">bearer_token</option><option value="cookie">cookie</option><option value="subscription">subscription</option></select>
+          <select id="template-credential-kind"><option value="agent_provider">agent_provider</option><option value="cookie">cookie</option></select>
           <label for="template-status">Provider Status</label>
           <select id="template-status"><option value="disabled">disabled</option><option value="active">active</option><option value="cooldown">cooldown</option></select>
           <label for="template-account-status">Account Status</label>
@@ -9889,7 +14785,7 @@ def target_platforms(ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]
 
 @app.get("/v1/provider-templates")
 def provider_templates(ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]:
-    return {"object": "list", "data": [template_as_dict(template) for template in PROVIDER_TEMPLATES.values()]}
+    return {"object": "list", "data": [provider_template_payload(template) for template in PROVIDER_TEMPLATES.values()]}
 
 
 @app.get("/v1/admin/provider-capabilities")
@@ -9947,9 +14843,10 @@ def admin_install_provider_template(
     if not template:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
 
-    base_config = deepcopy(template.default_config)
-    if req.base_url:
-        base_config["base_url"] = req.base_url
+    base_config = provider_template_default_config(template.id, template.default_config)
+    requested_base_url = validate_provider_base_url_input(template.id, req.base_url)
+    if requested_base_url:
+        base_config["base_url"] = requested_base_url
 
     provider = db.get(models.Provider, template.id)
     if provider:
@@ -9973,6 +14870,46 @@ def admin_install_provider_template(
     account_id = req.account_id or f"acct_{template.id}_default"
     account = db.get(models.AccountResource, account_id)
     quota_buckets = [{"type": "account", "remaining_estimate": None, "confidence": 0.0}]
+    validate_runtime_base_url_fields(template.id, req.resource_profile, field_name="resource_profile")
+    validate_platform_resource_profile_fields(template.id, req.resource_profile, field_name="resource_profile")
+    resource_candidate = (
+        req.resource_type
+        or expected_resource_type_for_credential_ref(req.credential_ref, req.credential_kind)
+        or expected_resource_type_for_credential_kind(req.credential_kind)
+        or infer_account_resource_type(template.id, "")
+    )
+    resource_type = validate_provider_resource_type(
+        template.id,
+        resource_candidate,
+        credential_kind=req.credential_kind,
+    )
+    secret_kind = normalize_account_secret_kind(resource_type, req.credential_kind)
+    validate_required_platform_inputs(
+        template.id,
+        auth_method="cookie_secret" if resource_type == "web_cookie_provider" else "agent_provider_credential",
+        resource_type=resource_type,
+        resource_profile=req.resource_profile,
+        credential_ref=req.credential_ref,
+        credential_secret_id=req.credential_secret_id,
+        db=db,
+    )
+    validate_credential_ref_resource_type(
+        template.id,
+        resource_type,
+        req.credential_ref,
+        credential_kind=secret_kind,
+        db=db,
+    )
+    resource_profile_json = dumps(
+        build_account_resource_profile(
+            provider_id=template.id,
+            auth_method="",
+            resource_type=resource_type,
+            credential_kind=secret_kind,
+            provider_base_url=requested_base_url or None,
+            resource_profile=req.resource_profile,
+        )
+    )
     try:
         credential_ref, secret_payload = normalize_account_credential_ref(
             db,
@@ -9981,13 +14918,15 @@ def admin_install_provider_template(
             label=req.account_label or f"{template.name} default",
             credential_ref=req.credential_ref,
             credential_secret_id=req.credential_secret_id,
-            credential_kind=req.credential_kind,
+            credential_kind=secret_kind,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
     if account:
         account.provider_id = template.id
         account.label = req.account_label or f"{template.name} default"
+        account.resource_type = resource_type
+        account.resource_profile_json = resource_profile_json
         account.credential_ref = credential_ref
         account.supported_operations_json = dumps(template.operations)
         account.supported_provider_models_json = dumps(template.models)
@@ -9999,7 +14938,9 @@ def admin_install_provider_template(
             id=account_id,
             provider_id=template.id,
             label=req.account_label or f"{template.name} default",
+            resource_type=resource_type,
             credential_ref=credential_ref,
+            resource_profile_json=resource_profile_json,
             supported_operations_json=dumps(template.operations),
             supported_provider_models_json=dumps(template.models),
             quota_buckets_json=dumps(quota_buckets),
@@ -10044,7 +14985,7 @@ def admin_install_provider_template(
 
     db.commit()
     return {
-        "template": template_as_dict(template),
+        "template": provider_template_payload(template),
         "provider": serialize_provider(provider),
         "account": serialize_account(account),
         "secret": secret_payload,
@@ -10072,12 +15013,43 @@ def admin_activate_provider_template(
     invalid_operations = [operation for operation in contract_operations if operation not in template.operations]
     if invalid_operations:
         raise HTTPException(status_code=400, detail={"error": "CONTRACT_OPERATION_UNSUPPORTED", "operations": invalid_operations})
+    requested_base_url = validate_provider_base_url_input(template.id, req.base_url) if req.base_url else template_default_provider_base_url(template.id)
+    requested_resource_type = validate_provider_resource_type(
+        template.id,
+        req.resource_type
+        or expected_resource_type_for_credential_ref(credential_ref, req.credential_kind)
+        or expected_resource_type_for_credential_kind(req.credential_kind)
+        or infer_account_resource_type(template.id, ""),
+        credential_kind=req.credential_kind,
+    )
+    normalized_secret_kind = normalize_account_secret_kind(requested_resource_type, req.credential_kind)
+    validate_runtime_base_url_fields(template.id, req.resource_profile, field_name="resource_profile")
+    validate_platform_resource_profile_fields(template.id, req.resource_profile, field_name="resource_profile")
+    validate_required_platform_inputs(
+        template.id,
+        auth_method="cookie_secret" if requested_resource_type == "web_cookie_provider" else "agent_provider_credential",
+        resource_type=requested_resource_type,
+        resource_profile=req.resource_profile,
+        credential_ref=credential_ref,
+        credential_value=req.credential_value or "",
+        credential_secret_id=req.credential_secret_id,
+        db=db,
+    )
+    validate_credential_ref_resource_type(
+        template.id,
+        requested_resource_type,
+        credential_ref,
+        credential_kind=normalized_secret_kind,
+        db=db,
+    )
 
     install_req = TemplateInstallRequest(
-        base_url=req.base_url,
+        base_url=requested_base_url or None,
         credential_ref=credential_ref,
         credential_secret_id=req.credential_secret_id,
-        credential_kind=req.credential_kind,
+        credential_kind=normalized_secret_kind,
+        resource_type=requested_resource_type,
+        resource_profile=req.resource_profile,
         status=req.status,
         account_status=req.account_status,
         account_id=req.account_id,
@@ -10094,7 +15066,9 @@ def admin_activate_provider_template(
         "account_id": req.account_id or f"acct_{template.id}_default",
         "credential_ref": redact_credential_ref(credential_ref),
         "credential_secret_id": req.credential_secret_id or "",
-        "base_url": req.base_url or str(template.default_config.get("base_url") or ""),
+        "resource_type": requested_resource_type,
+        "credential_kind": normalized_secret_kind,
+        **({"base_url": requested_base_url} if requested_base_url else {}),
         "enable_mappings": req.enable_mappings,
         "contract_operations": contract_operations,
         "contract_run_submit": req.contract_run_submit,
@@ -10108,7 +15082,7 @@ def admin_activate_provider_template(
             "status": "planned",
             "ok": True,
             "dry_run": True,
-            "template": template_as_dict(template),
+            "template": provider_template_payload(template),
             "plan": plan,
             "action_items": [],
         }
@@ -10188,7 +15162,7 @@ def admin_activate_provider_template(
         "status": "activated" if ok else "action_required",
         "ok": ok,
         "dry_run": False,
-        "template": template_as_dict(template),
+        "template": provider_template_payload(template),
         "plan": plan,
         "install": install_result,
         "health_check": health_result,
@@ -10348,11 +15322,12 @@ def admin_provider_template_external_acceptance(
     if not template:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
 
-    credential_ref = req.credential_ref or str(template.default_config.get("credential_ref") or template.default_config.get("api_key_ref") or "env://MEDIA2API_CONNECTOR_KEY")
+    credential_ref = req.credential_ref or str(template.default_config.get("credential_ref") or template.default_config.get("api_key_ref") or f"agent://providers/{template_id}/acct_01")
     operations = req.operations or list(template.operations)
     invalid_operations = [operation for operation in operations if operation not in template.operations]
     if invalid_operations:
         raise HTTPException(status_code=400, detail={"error": "ACCEPTANCE_OPERATION_UNSUPPORTED", "operations": invalid_operations})
+    requested_base_url = validate_provider_base_url_input(template.id, req.base_url) if req.base_url else template_default_provider_base_url(template.id)
 
     if not req.dry_run and req.credential_value is None:
         credential = credential_ref_info(db, credential_ref)
@@ -10375,7 +15350,7 @@ def admin_provider_template_external_acceptance(
             }
 
     activate_req = TemplateActivateRequest(
-        base_url=req.base_url,
+        base_url=requested_base_url or None,
         credential_ref=credential_ref,
         credential_secret_id=req.credential_secret_id,
         credential_kind=req.credential_kind,
@@ -11378,6 +16353,7 @@ def admin_create_credential_secret(req: CredentialSecretAdminRequest, ctx: AuthC
     secret_id = req.id or new_id("secret")
     if db.get(models.CredentialSecret, secret_id):
         raise HTTPException(status_code=409, detail={"error": "CREDENTIAL_SECRET_EXISTS"})
+    validate_credential_secret_material_for_provider(provider_id=req.provider_id, kind=req.kind, value=req.value)
     try:
         item = secret_service.create(
             db,
@@ -11403,11 +16379,17 @@ def admin_patch_credential_secret(secret_id: str, req: CredentialSecretPatchRequ
     if not item:
         raise HTTPException(status_code=404, detail={"error": "CREDENTIAL_SECRET_NOT_FOUND"})
     next_kind = req.kind if req.kind is not None else item.kind
+    next_provider_id = req.provider_id if req.provider_id is not None else item.provider_id
     next_status = req.status if req.status is not None else item.status
     try:
         secret_service.validate(next_kind, next_status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+    if req.value is not None or req.kind is not None or req.provider_id is not None:
+        next_value = req.value
+        if next_value is None:
+            next_value = credential_secret_ref_value_for_validation(db, f"secret://{secret_id}", require_active=False)
+        validate_credential_secret_material_for_provider(provider_id=next_provider_id, kind=next_kind, value=next_value)
     if req.name is not None:
         item.name = req.name
     if req.value is not None:
@@ -12197,12 +17179,14 @@ def admin_create_provider(req: ProviderAdminRequest, ctx: AuthContext = Depends(
         raise HTTPException(status_code=400, detail={"error": "PROVIDER_ID_REQUIRED"})
     if db.get(models.Provider, req.id):
         raise HTTPException(status_code=409, detail={"error": "PROVIDER_EXISTS"})
+    validate_runtime_base_url_fields(req.id, req.base_config or {}, field_name="base_config")
+    base_config = provider_runtime_config(req.id, req.base_config or {})
     provider = models.Provider(
         id=req.id,
         name=req.name or req.id,
         adapter_type=req.adapter_type or "http_adapter",
         status=req.status or "disabled",
-        base_config_json=dumps(req.base_config or {}),
+        base_config_json=dumps(base_config),
         notes=req.notes or "",
     )
     db.add(provider)
@@ -12234,6 +17218,16 @@ def admin_provider_health_check(provider_id: str, ctx: AuthContext = Depends(req
         alert_service.provider_health(db, check)
     db.commit()
     return serialize_health_check(check)
+
+
+@app.get("/v1/admin/providers/{provider_id}/connector-runtime")
+def admin_provider_connector_runtime(
+    provider_id: str,
+    account_id: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return build_connector_runtime_diagnostics(db, provider_id, account_id=account_id)
 
 
 @app.post("/v1/admin/providers/{provider_id}/sync-quotas")
@@ -12274,7 +17268,8 @@ def admin_patch_provider(provider_id: str, req: ProviderAdminRequest, ctx: AuthC
     if req.status is not None:
         provider.status = req.status
     if req.base_config is not None:
-        provider.base_config_json = dumps(req.base_config)
+        validate_runtime_base_url_fields(provider_id, req.base_config, field_name="base_config")
+        provider.base_config_json = dumps(provider_runtime_config(provider_id, req.base_config))
     if req.notes is not None:
         provider.notes = req.notes
     db.commit()
@@ -12304,31 +17299,90 @@ def admin_bulk_upsert_accounts(req: AccountBulkUpsertRequest, ctx: AuthContext =
             continue
 
         account_id = item.id or new_id("acct")
-        credential_ref = item.credential_ref or "env://MEDIA2API_CONNECTOR_KEY"
+        try:
+            auth_method = validate_provider_auth_method(item.provider_id, item.auth_method) if item.auth_method else ""
+            resource_candidate = (
+                item.resource_type
+                or expected_resource_type_for_credential_ref(item.credential_ref, item.credential_kind)
+                or expected_resource_type_for_credential_kind(item.credential_kind)
+                or infer_account_resource_type(item.provider_id, auth_method)
+            )
+            resource_type = validate_provider_resource_type(
+                item.provider_id,
+                resource_candidate,
+                auth_method=auth_method,
+                credential_kind=item.credential_kind,
+            )
+            secret_kind = normalize_account_secret_kind(resource_type, item.credential_kind)
+            validate_runtime_base_url_fields(item.provider_id, item.resource_profile, field_name="resource_profile")
+            validate_platform_resource_profile_fields(item.provider_id, item.resource_profile, field_name="resource_profile")
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+            errors.append({"index": index, "account_id": account_id, "provider_id": item.provider_id, **detail})
+            continue
+        submitted_credential_ref = item.credential_ref
+        credential_value = normalize_credential_material(item.credential_value)
+        credential_ref = submitted_credential_ref or (
+            f"agent://providers/{item.provider_id}/acct_01"
+            if resource_type == "agent_provider"
+            else f"secret://providers/{item.provider_id}/cookie_01"
+        )
+        try:
+            validate_required_platform_inputs(
+                item.provider_id,
+                auth_method=auth_method,
+                resource_type=resource_type,
+                resource_profile=item.resource_profile,
+                credential_ref=submitted_credential_ref,
+                credential_value=credential_value,
+                credential_secret_id=item.credential_secret_id,
+                db=db,
+            )
+            validate_credential_ref_resource_type(
+                item.provider_id,
+                resource_type,
+                credential_ref,
+                credential_kind=secret_kind,
+                db=db,
+            )
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+            errors.append({"index": index, "account_id": account_id, "provider_id": item.provider_id, **detail})
+            continue
+        resource_profile_json = dumps(
+            build_account_resource_profile(
+                provider_id=item.provider_id,
+                auth_method=auth_method,
+                resource_type=resource_type,
+                credential_kind=secret_kind,
+                provider_base_url=None,
+                resource_profile=item.resource_profile,
+            )
+        )
         secret_payload: dict[str, Any] | None = None
-        if item.credential_value is not None:
+        if credential_value:
             secret_id = item.credential_secret_id or f"secret_{account_id}"
             secret = db.get(models.CredentialSecret, secret_id)
             try:
                 if secret:
-                    secret_service.validate(item.credential_kind, "active")
+                    secret_service.validate(secret_kind, "active")
                     secret.name = f"{item.label} credential"
-                    secret.kind = item.credential_kind
+                    secret.kind = secret_kind
                     secret.provider_id = item.provider_id
                     secret.account_id = account_id
-                    secret.metadata_json = dumps(item.secret_metadata)
+                    secret.metadata_json = dumps({**item.secret_metadata, "resource_type": resource_type, "auth_method": auth_method, "credential_kind": secret_kind})
                     secret.status = "active"
-                    secret_service.update_value(secret, item.credential_value)
+                    secret_service.update_value(secret, credential_value)
                 else:
                     secret = secret_service.create(
                         db,
                         secret_id=secret_id,
                         name=f"{item.label} credential",
-                        value=item.credential_value,
-                        kind=item.credential_kind,
+                        value=credential_value,
+                        kind=secret_kind,
                         provider_id=item.provider_id,
                         account_id=account_id,
-                        metadata=item.secret_metadata,
+                        metadata={**item.secret_metadata, "resource_type": resource_type, "auth_method": auth_method, "credential_kind": secret_kind},
                         status="active",
                     )
             except ValueError as exc:
@@ -12346,8 +17400,8 @@ def admin_bulk_upsert_accounts(req: AccountBulkUpsertRequest, ctx: AuthContext =
                     label=item.label,
                     credential_ref=credential_ref,
                     credential_secret_id=item.credential_secret_id,
-                    credential_kind=item.credential_kind,
-                    metadata=item.secret_metadata,
+                    credential_kind=secret_kind,
+                    metadata={**item.secret_metadata, "resource_type": resource_type, "auth_method": auth_method, "credential_kind": secret_kind},
                 )
                 if secret_payload:
                     upserted_secrets += 1
@@ -12359,6 +17413,8 @@ def admin_bulk_upsert_accounts(req: AccountBulkUpsertRequest, ctx: AuthContext =
         if account:
             account.provider_id = item.provider_id
             account.label = item.label
+            account.resource_type = resource_type
+            account.resource_profile_json = resource_profile_json
             account.credential_ref = credential_ref
             account.supported_operations_json = dumps(item.supported_operations)
             account.supported_provider_models_json = dumps(item.supported_provider_models)
@@ -12374,7 +17430,9 @@ def admin_bulk_upsert_accounts(req: AccountBulkUpsertRequest, ctx: AuthContext =
                 id=account_id,
                 provider_id=item.provider_id,
                 label=item.label,
+                resource_type=resource_type,
                 credential_ref=credential_ref,
+                resource_profile_json=resource_profile_json,
                 supported_operations_json=dumps(item.supported_operations),
                 supported_provider_models_json=dumps(item.supported_provider_models),
                 quota_buckets_json=dumps(item.quota_buckets),
@@ -12482,20 +17540,32 @@ def admin_compatibility_matrix(
 
 
 def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict[str, Any]:
-    allowed_auth_methods = {"token_reference", "subscription_url", "secret_json"}
-    if req.auth_method not in allowed_auth_methods:
-        raise HTTPException(status_code=400, detail={"error": "UPSTREAM_OFFICIAL_API_AUTH_NOT_ALLOWED", "allowed_auth_methods": sorted(allowed_auth_methods)})
+    req.auth_method = validate_provider_auth_method(req.provider_id, req.auth_method)
     if req.credential_kind == "api_key":
-        raise HTTPException(status_code=400, detail={"error": "UPSTREAM_OFFICIAL_API_KEY_NOT_ALLOWED", "allowed_credential_kinds": ["bearer_token", "cookie", "custom", "subscription"]})
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "UPSTREAM_OFFICIAL_API_KEY_NOT_ALLOWED",
+                "allowed_credential_kinds": ["cookie", "cookie_secret", "agent_provider"],
+                "aggregator_hint": "Use a Web Cookie/session secret or an Agent Provider credential/profile; official upstream API keys are out of scope.",
+            },
+        )
     provider = db.get(models.Provider, req.provider_id)
     if not provider:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
     if provider.id == "mock":
         raise HTTPException(status_code=400, detail={"error": "MOCK_PROVIDER_NOT_ALLOWED"})
+    validate_runtime_base_url_fields(req.provider_id, req.provider_config, field_name="provider_config")
+    validate_runtime_base_url_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    validate_platform_provider_config_fields(req.provider_id, req.provider_config, field_name="provider_config")
+    validate_platform_resource_profile_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
     provider_config = loads(provider.base_config_json, {})
+    if not provider_runtime_base_url_allowed(req.provider_id):
+        provider_config = strip_runtime_base_url_fields(provider_config)
     provider_config.update(req.provider_config or {})
-    if req.provider_base_url:
-        provider_config["base_url"] = req.provider_base_url.strip()
+    provider_base_url = validate_provider_base_url_input(req.provider_id, req.provider_base_url)
+    if provider_base_url:
+        provider_config["base_url"] = provider_base_url
     provider.base_config_json = dumps(provider_config)
     account_id = req.account_id or new_id(f"acct_{req.provider_id}")
     default_operations, default_models = provider_default_operations_and_models(req.provider_id)
@@ -12504,18 +17574,51 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
     if not supported_operations or not supported_provider_models:
         raise HTTPException(status_code=400, detail={"error": "ACCOUNT_CAPABILITIES_REQUIRED"})
     provider.status = "active"
+    requested_credential_kind = req.credential_kind if req.credential_kind and req.credential_kind != "session" else credential_kind_for_auth_method(req.auth_method)
+    if req.auth_method == "cookie_secret":
+        requested_credential_kind = "cookie"
+    if req.auth_method == "agent_provider_credential":
+        requested_credential_kind = "agent_provider"
+    resource_type = validate_provider_resource_type(
+        req.provider_id,
+        infer_account_resource_type(req.provider_id, req.auth_method, req.resource_type),
+        auth_method=req.auth_method,
+        credential_kind=requested_credential_kind,
+    )
 
     secret_payload = None
     credential_ref = (req.credential_ref or "").strip()
-    if req.credential_value.strip():
+    credential_value = normalize_credential_material(req.credential_value)
+    validate_required_platform_inputs(
+        req.provider_id,
+        auth_method=req.auth_method,
+        resource_type=resource_type,
+        provider_config=provider_config,
+        resource_profile=req.resource_profile,
+        credential_ref=credential_ref,
+        credential_value=credential_value,
+        credential_secret_id=req.credential_secret_id,
+        db=db,
+    )
+    if credential_ref:
+        validate_credential_ref_resource_type(
+            req.provider_id,
+            resource_type,
+            credential_ref,
+            credential_kind=requested_credential_kind,
+            db=db,
+        )
+    if credential_value:
         secret_id = req.credential_secret_id or f"secret_{account_id}"
-        secret_kind = req.credential_kind if req.credential_kind in {"bearer_token", "cookie", "custom"} else "custom"
+        secret_kind = requested_credential_kind if requested_credential_kind in {"cookie", "cookie_secret", "agent_provider"} else "agent_provider"
         secret = db.get(models.CredentialSecret, secret_id)
         metadata = {
             "auth_method": req.auth_method,
             "requested_credential_kind": req.credential_kind,
+            "resource_type": resource_type,
             "source": "account_onboarding_wizard",
             "credential_ref": credential_ref,
+            "resource_profile": redact_resource_profile(req.resource_profile),
         }
         if secret:
             secret.name = f"{req.label} 鉴权"
@@ -12524,13 +17627,13 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
             secret.account_id = account_id
             secret.status = "active"
             secret.metadata_json = dumps(metadata)
-            secret_service.update_value(secret, req.credential_value)
+            secret_service.update_value(secret, credential_value)
         else:
             secret = secret_service.create(
                 db,
                 secret_id=secret_id,
                 name=f"{req.label} 鉴权",
-                value=req.credential_value,
+                value=credential_value,
                 kind=secret_kind,
                 provider_id=req.provider_id,
                 account_id=account_id,
@@ -12541,6 +17644,26 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
         secret_payload = serialize_secret(secret)
     if not credential_ref:
         raise HTTPException(status_code=400, detail={"error": "CREDENTIAL_VALUE_REQUIRED"})
+    try:
+        credential_ref, normalized_secret = normalize_account_credential_ref(
+            db,
+            account_id=account_id,
+            provider_id=req.provider_id,
+            label=req.label,
+            credential_ref=credential_ref,
+            credential_secret_id=req.credential_secret_id,
+            credential_kind=secret_kind if credential_value else requested_credential_kind,
+            metadata={
+                "auth_method": req.auth_method,
+                "resource_type": resource_type,
+                "resource_profile": redact_resource_profile(req.resource_profile),
+                "source": "account_onboarding_wizard",
+            },
+        )
+        if normalized_secret:
+            secret_payload = normalized_secret
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "allowed_reference_prefixes": list(DIRECT_ACCOUNT_REF_PREFIXES) + ["plain://"], "legacy_reference_policy": "old refs are accepted only as compatibility input and stored as secret://"}) from exc
 
     account = db.get(models.AccountResource, account_id)
     created = account is None
@@ -12551,7 +17674,19 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
         db.add(account)
     account.provider_id = req.provider_id
     account.label = req.label
+    account.resource_type = resource_type
     account.credential_ref = credential_ref
+    account.resource_profile_json = dumps(
+        build_account_resource_profile(
+            provider_id=req.provider_id,
+            auth_method=req.auth_method,
+            resource_type=resource_type,
+            credential_kind=requested_credential_kind,
+            provider_base_url=provider_base_url,
+            resource_profile=req.resource_profile,
+            provider_config=provider_config,
+        )
+    )
     account.supported_operations_json = dumps(supported_operations)
     account.supported_provider_models_json = dumps(supported_provider_models)
     account.quota_buckets_json = dumps(req.quota_buckets)
@@ -12559,6 +17694,15 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
     account.region = req.region
     account.plan = req.plan
     account.status = req.status
+    mapping_result: dict[str, Any] | None = None
+    if req.auto_create_mappings:
+        mapping_result = ensure_account_model_mappings(
+            db,
+            provider_id=req.provider_id,
+            supported_operations=supported_operations,
+            supported_provider_models=supported_provider_models,
+            provider_config=provider_config,
+        )
     db.commit()
 
     sync_result: dict[str, Any] | None = None
@@ -12588,6 +17732,7 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
         "provider": serialize_provider(provider),
         "account": serialize_account(account),
         "secret": secret_payload,
+        "model_mappings": mapping_result,
         "sync_capabilities": sync_result,
         "health_check": health_result,
         "next_steps": [
@@ -12595,6 +17740,470 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
             "查看同步能力和健康检查结果。",
             "到模型映射中确认该账号支持的 provider_model 已覆盖目标模型。",
             "运行账号验收套件或真实平台外部验收。",
+        ],
+        "guide": connector_registry_service.provider_guide(db, req.provider_id),
+    }
+
+
+def build_account_subscription_import_plan(db: Session, req: AccountSubscriptionImportRequest) -> dict[str, Any]:
+    req.auth_method = validate_provider_auth_method(req.provider_id, req.auth_method)
+    if req.resource_type:
+        validate_provider_resource_type(req.provider_id, req.resource_type, auth_method=req.auth_method)
+    validate_provider_base_url_input(req.provider_id, req.provider_base_url)
+    validate_runtime_base_url_fields(req.provider_id, req.provider_config, field_name="provider_config")
+    validate_runtime_base_url_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    validate_platform_provider_config_fields(req.provider_id, req.provider_config, field_name="provider_config")
+    validate_platform_resource_profile_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    try:
+        plan = account_import_service.build_plan(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "allowed_auth_methods": REFERENCE_AUTH_TYPES}) from exc
+    warning_count = 0
+    for row in plan.get("data", []):
+        payload = row.get("onboarding_request") or {}
+        provider_id = str(payload.get("provider_id") or req.provider_id)
+        default_operations, default_models = provider_default_operations_and_models(provider_id)
+        if not payload.get("supported_operations"):
+            payload["supported_operations"] = default_operations
+        if not payload.get("supported_provider_models"):
+            payload["supported_provider_models"] = default_models
+        if not payload.get("credential_kind"):
+            payload["credential_kind"] = credential_kind_for_auth_method(str(payload.get("auth_method") or req.auth_method))
+        row_auth_method = validate_provider_auth_method(provider_id, str(payload.get("auth_method") or req.auth_method))
+        payload["auth_method"] = row_auth_method
+        row_resource_type = validate_provider_resource_type(
+            provider_id,
+            infer_account_resource_type(provider_id, row_auth_method, str(payload.get("resource_type") or req.resource_type or "")),
+            auth_method=row_auth_method,
+            credential_kind=str(payload.get("credential_kind") or ""),
+        )
+        payload["resource_type"] = row_resource_type
+        validate_required_platform_inputs(
+            provider_id,
+            auth_method=row_auth_method,
+            resource_type=row_resource_type,
+            provider_config=payload.get("provider_config") or {},
+            resource_profile=payload.get("resource_profile") or {},
+            credential_ref=str(payload.get("credential_ref") or ""),
+            credential_value=str(payload.get("credential_value") or ""),
+            credential_secret_id=str(payload.get("credential_secret_id") or ""),
+            db=db,
+        )
+        validate_credential_ref_resource_type(
+            provider_id,
+            row_resource_type,
+            str(payload.get("credential_ref") or ""),
+            credential_kind=str(payload.get("credential_kind") or ""),
+            db=db,
+        )
+        if payload.get("provider_base_url"):
+            validate_provider_base_url_input(provider_id, str(payload.get("provider_base_url") or ""))
+        validate_runtime_base_url_fields(provider_id, payload.get("provider_config") or {}, field_name="provider_config")
+        validate_runtime_base_url_fields(provider_id, payload.get("resource_profile") or {}, field_name="resource_profile")
+        validate_platform_provider_config_fields(provider_id, payload.get("provider_config") or {}, field_name="provider_config")
+        validate_platform_resource_profile_fields(provider_id, payload.get("resource_profile") or {}, field_name="resource_profile")
+        warnings: list[dict[str, Any]] = []
+        if not db.get(models.Provider, provider_id):
+            warnings.append({"code": "PROVIDER_NOT_FOUND", "provider_id": provider_id})
+        if not payload.get("supported_operations") or not payload.get("supported_provider_models"):
+            warnings.append({"code": "ACCOUNT_CAPABILITIES_REQUIRED", "provider_id": provider_id})
+        row["warnings"] = warnings
+        warning_count += len(warnings)
+    plan["warning_count"] = warning_count
+    return plan
+
+
+def account_subscription_source_payload(source: models.AccountSubscriptionSource, *, content: str | None = None, sync_capabilities: bool | None = None, run_health_check: bool | None = None) -> AccountSubscriptionImportRequest:
+    return AccountSubscriptionImportRequest(
+        provider_id=source.provider_id,
+        auth_method=source.auth_method,
+        subscription_url=source.subscription_url or None,
+        content=content if content is not None else (source.content_json or None),
+        provider_base_url=source.provider_base_url or None,
+        provider_config=loads(source.provider_config_json, {}),
+        supported_operations=loads(source.default_supported_operations_json, []),
+        supported_provider_models=loads(source.default_supported_provider_models_json, []),
+        quota_buckets=loads(source.default_quota_buckets_json, []),
+        concurrency_limit=source.default_concurrency_limit,
+        region=source.default_region,
+        plan=source.default_plan,
+        status="active",
+        upsert=True,
+        sync_capabilities=source.sync_capabilities if sync_capabilities is None else bool(sync_capabilities),
+        run_health_check=source.run_health_check if run_health_check is None else bool(run_health_check),
+        fetch_timeout_seconds=source.fetch_timeout_seconds,
+        max_items=source.max_items,
+    )
+
+
+def redact_subscription_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.query:
+        return url.split("?", 1)[0] + "?[redacted]"
+    if len(url) > 180:
+        return url[:160] + "...[truncated]"
+    return url
+
+
+def serialize_account_subscription_source(source: models.AccountSubscriptionSource) -> dict[str, Any]:
+    summary = loads(source.last_sync_summary_json, {})
+    preview = loads(source.last_preview_json, {})
+    return {
+        "object": "media2api.account_subscription_source",
+        "id": source.id,
+        "provider_id": source.provider_id,
+        "name": source.name,
+        "status": source.status,
+        "auth_method": source.auth_method,
+        "subscription_url": redact_subscription_url(source.subscription_url),
+        "has_persisted_content": bool(source.content_json),
+        "provider_base_url": source.provider_base_url,
+        "provider_config": redact_config(loads(source.provider_config_json, {})),
+        "supported_operations": loads(source.default_supported_operations_json, []),
+        "supported_provider_models": loads(source.default_supported_provider_models_json, []),
+        "quota_buckets": loads(source.default_quota_buckets_json, []),
+        "concurrency_limit": source.default_concurrency_limit,
+        "region": source.default_region,
+        "plan": source.default_plan,
+        "max_items": source.max_items,
+        "fetch_timeout_seconds": source.fetch_timeout_seconds,
+        "sync_capabilities": source.sync_capabilities,
+        "run_health_check": source.run_health_check,
+        "last_sync_status": source.last_sync_status,
+        "last_sync_error": source.last_sync_error,
+        "last_sync_summary": summary,
+        "last_preview_summary": {
+            "planned": preview.get("planned"),
+            "failed": preview.get("failed"),
+            "warning_count": preview.get("warning_count"),
+            "source": preview.get("source"),
+        } if preview else {},
+        "last_sync_at": source.last_sync_at.isoformat() + "Z" if source.last_sync_at else None,
+        "created_at": source.created_at.isoformat() + "Z" if source.created_at else None,
+        "updated_at": source.updated_at.isoformat() + "Z" if source.updated_at else None,
+    }
+
+
+def apply_account_subscription_import_plan(db: Session, plan: dict[str, Any]) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = list(plan.get("errors", []))
+    for row in plan.get("data", []):
+        try:
+            payload = dict(row.get("onboarding_request") or {})
+            account_req = AccountOnboardingRequest(**payload)
+            results.append(apply_account_onboarding(db, account_req))
+        except HTTPException as exc:
+            errors.append({"index": row.get("index"), "detail": exc.detail})
+        except Exception as exc:
+            errors.append({"index": row.get("index"), "error": type(exc).__name__, "message": str(exc)})
+    return {
+        "object": "media2api.account_subscription_import",
+        "planned": int(plan.get("planned") or 0),
+        "created": len(results),
+        "created_or_updated": len(results),
+        "failed": len(errors),
+        "summary": {
+            "planned": int(plan.get("planned") or 0),
+            "created": len(results),
+            "created_or_updated": len(results),
+            "failed": len(errors),
+            "ok": not errors,
+        },
+        "data": results,
+        "results": results,
+        "errors": errors,
+        "plan": sanitize_import_plan(plan),
+    }
+
+
+def upsert_account_subscription_source(db: Session, req: AccountSubscriptionSourceRequest) -> dict[str, Any]:
+    req.auth_method = validate_provider_auth_method(req.provider_id, req.auth_method)
+    if not db.get(models.Provider, req.provider_id):
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    if not (req.subscription_url or (req.content and req.persist_content)):
+        raise HTTPException(status_code=400, detail={"error": "RESOURCE_LIST_SOURCE_INPUT_REQUIRED", "message": "Provide a resource-list URL via subscription_url, or content with persist_content=true."})
+    source_id = req.id or new_id("subsrc")
+    if db.get(models.AccountSubscriptionSource, source_id):
+        raise HTTPException(status_code=409, detail={"error": "ACCOUNT_SUBSCRIPTION_SOURCE_EXISTS"})
+    provider_base_url = validate_provider_base_url_input(req.provider_id, req.provider_base_url)
+    validate_runtime_base_url_fields(req.provider_id, req.provider_config, field_name="provider_config")
+    validate_platform_provider_config_fields(req.provider_id, req.provider_config, field_name="provider_config")
+    default_operations, default_models = provider_default_operations_and_models(req.provider_id)
+    source = models.AccountSubscriptionSource(
+        id=source_id,
+        provider_id=req.provider_id,
+        name=req.name or f"{req.provider_id} resource list source",
+        status=req.status,
+        auth_method=req.auth_method,
+        subscription_url=(req.subscription_url or "").strip(),
+        content_json=(req.content or "").strip() if req.persist_content else "",
+        provider_base_url=provider_base_url,
+        provider_config_json=dumps(req.provider_config),
+        default_supported_operations_json=dumps(req.supported_operations or default_operations),
+        default_supported_provider_models_json=dumps(req.supported_provider_models or default_models),
+        default_quota_buckets_json=dumps(req.quota_buckets),
+        default_concurrency_limit=max(1, req.concurrency_limit),
+        default_region=req.region,
+        default_plan=req.plan,
+        max_items=max(1, req.max_items),
+        fetch_timeout_seconds=max(1, req.fetch_timeout_seconds),
+        sync_capabilities=req.sync_capabilities,
+        run_health_check=req.run_health_check,
+    )
+    db.add(source)
+    db.commit()
+    result = {"object": "media2api.account_subscription_source_created", "source": serialize_account_subscription_source(source)}
+    if req.sync_now:
+        result["sync"] = sync_account_subscription_source(db, source.id, AccountSubscriptionSourceSyncRequest())
+    return result
+
+
+def patch_account_subscription_source(db: Session, source_id: str, req: AccountSubscriptionSourcePatchRequest) -> dict[str, Any]:
+    source = db.get(models.AccountSubscriptionSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_SUBSCRIPTION_SOURCE_NOT_FOUND"})
+    if req.auth_method is not None:
+        source.auth_method = validate_provider_auth_method(source.provider_id, req.auth_method)
+    if req.name is not None:
+        source.name = req.name
+    if req.subscription_url is not None:
+        source.subscription_url = req.subscription_url.strip()
+    if req.content is not None:
+        source.content_json = req.content.strip() if req.persist_content else ""
+    elif req.persist_content is False:
+        source.content_json = ""
+    if req.provider_base_url is not None:
+        source.provider_base_url = validate_provider_base_url_input(source.provider_id, req.provider_base_url)
+    if req.provider_config is not None:
+        validate_runtime_base_url_fields(source.provider_id, req.provider_config, field_name="provider_config")
+        validate_platform_provider_config_fields(source.provider_id, req.provider_config, field_name="provider_config")
+        source.provider_config_json = dumps(req.provider_config)
+    if req.supported_operations is not None:
+        source.default_supported_operations_json = dumps(req.supported_operations)
+    if req.supported_provider_models is not None:
+        source.default_supported_provider_models_json = dumps(req.supported_provider_models)
+    if req.quota_buckets is not None:
+        source.default_quota_buckets_json = dumps(req.quota_buckets)
+    if req.concurrency_limit is not None:
+        source.default_concurrency_limit = max(1, req.concurrency_limit)
+    if req.region is not None:
+        source.default_region = req.region
+    if req.plan is not None:
+        source.default_plan = req.plan
+    if req.status is not None:
+        source.status = req.status
+    if req.max_items is not None:
+        source.max_items = max(1, req.max_items)
+    if req.fetch_timeout_seconds is not None:
+        source.fetch_timeout_seconds = max(1, req.fetch_timeout_seconds)
+    if req.sync_capabilities is not None:
+        source.sync_capabilities = req.sync_capabilities
+    if req.run_health_check is not None:
+        source.run_health_check = req.run_health_check
+    db.commit()
+    return {"object": "media2api.account_subscription_source_updated", "source": serialize_account_subscription_source(source)}
+
+
+def sync_account_subscription_source(db: Session, source_id: str, req: AccountSubscriptionSourceSyncRequest) -> dict[str, Any]:
+    source = db.get(models.AccountSubscriptionSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_SUBSCRIPTION_SOURCE_NOT_FOUND"})
+    if source.status != "active" and not req.dry_run:
+        raise HTTPException(status_code=400, detail={"error": "ACCOUNT_SUBSCRIPTION_SOURCE_NOT_ACTIVE", "status": source.status})
+    import_req = account_subscription_source_payload(
+        source,
+        content=req.content,
+        sync_capabilities=req.sync_capabilities,
+        run_health_check=req.run_health_check,
+    )
+    plan = build_account_subscription_import_plan(db, import_req)
+    sanitized_plan = sanitize_import_plan(plan)
+    source.last_preview_json = dumps(sanitized_plan)
+    if req.dry_run:
+        source.last_sync_status = "previewed"
+        source.last_sync_summary_json = dumps({"planned": plan.get("planned"), "failed": plan.get("failed"), "warning_count": plan.get("warning_count")})
+        source.last_sync_error = ""
+        db.commit()
+        return {"object": "media2api.account_subscription_source_preview", "source": serialize_account_subscription_source(source), "preview": sanitized_plan}
+    result = apply_account_subscription_import_plan(db, plan)
+    source.last_sync_status = "ok" if result["failed"] == 0 else "partial_failed" if result["created_or_updated"] else "failed"
+    source.last_sync_error = dumps(result["errors"][:5]) if result["errors"] else ""
+    source.last_sync_summary_json = dumps(
+        {
+            "planned": result["planned"],
+            "created_or_updated": result["created_or_updated"],
+            "failed": result["failed"],
+            "warning_count": plan.get("warning_count"),
+        }
+    )
+    source.last_sync_at = datetime.utcnow()
+    db.commit()
+    return {"object": "media2api.account_subscription_source_sync", "source": serialize_account_subscription_source(source), "import": result}
+
+
+def account_ids_from_subscription_result(result: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    import_result = result.get("import") if isinstance(result.get("import"), dict) else {}
+    for item in import_result.get("data", []) or []:
+        account = item.get("account") if isinstance(item, dict) else None
+        if isinstance(account, dict) and account.get("id"):
+            ids.append(str(account["id"]))
+    preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+    for row in preview.get("data", []) or []:
+        payload = row.get("onboarding_request") if isinstance(row, dict) else None
+        if isinstance(payload, dict) and payload.get("account_id"):
+            ids.append(str(payload["account_id"]))
+    return list(dict.fromkeys(ids))
+
+
+def production_sync_account_subscription_source(
+    db: Session,
+    source_id: str,
+    req: AccountSubscriptionSourceProductionSyncRequest,
+    ctx: AuthContext,
+) -> dict[str, Any]:
+    source = db.get(models.AccountSubscriptionSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_SUBSCRIPTION_SOURCE_NOT_FOUND"})
+    operations = req.operations or loads(source.default_supported_operations_json, [])
+    if not operations:
+        operations, _ = provider_default_operations_and_models(source.provider_id)
+    operations = [str(operation) for operation in operations if str(operation)]
+
+    sync_result = sync_account_subscription_source(
+        db,
+        source_id,
+        AccountSubscriptionSourceSyncRequest(
+            content=req.content,
+            dry_run=req.dry_run,
+            sync_capabilities=req.sync_capabilities,
+            run_health_check=req.run_health_check,
+        ),
+    )
+    account_ids = account_ids_from_subscription_result(sync_result)
+    if not account_ids:
+        account_ids = [
+            account_id
+            for account_id, in db.query(models.AccountResource.id)
+            .filter(models.AccountResource.provider_id == source.provider_id, models.AccountResource.status == "active")
+            .order_by(models.AccountResource.id)
+            .limit(max(1, min(req.max_accounts, 100)))
+            .all()
+        ]
+
+    action_items: list[dict[str, Any]] = []
+    if (sync_result.get("import") or {}).get("failed"):
+        action_items.append({"check": "subscription_import", "detail": (sync_result.get("import") or {}).get("errors", [])})
+    if (sync_result.get("preview") or {}).get("failed"):
+        action_items.append({"check": "subscription_preview", "detail": (sync_result.get("preview") or {}).get("errors", [])})
+
+    capability_sync: dict[str, Any] | None = None
+    health_check: dict[str, Any] | None = None
+    provider = db.get(models.Provider, source.provider_id)
+    if provider and not req.dry_run and req.sync_capabilities:
+        try:
+            capability_sync = capability_service.sync_remote(db, provider)
+            if capability_sync.get("status") != "ok":
+                action_items.append({"check": "capability_sync", "detail": capability_sync})
+        except Exception as exc:
+            capability_sync = {"status": "failed", "error": type(exc).__name__, "message": str(exc)}
+            action_items.append({"check": "capability_sync", "detail": capability_sync})
+    if provider and not req.dry_run and req.run_health_check:
+        try:
+            health_check = run_provider_health_check_preserve_active(db, provider)
+            if health_check.get("status") != "ok":
+                action_items.append({"check": "health_check", "detail": health_check})
+        except Exception as exc:
+            health_check = {"status": "failed", "error": type(exc).__name__, "message": str(exc)}
+            action_items.append({"check": "health_check", "detail": health_check})
+
+    quota_results: list[dict[str, Any]] = []
+    if not req.dry_run and req.run_quota_sync:
+        for account_id in account_ids[: max(1, min(req.max_accounts, 100))]:
+            account = db.get(models.AccountResource, account_id)
+            if not account:
+                continue
+            quota = sync_account_quota_from_provider(db, account, ctx.user.id)
+            db.commit()
+            quota_results.append(quota)
+            if quota.get("status") != "ok":
+                action_items.append({"check": "quota_sync", "detail": {"account_id": account_id, "result": quota}})
+
+    preflight = None
+    if req.include_preflight:
+        preflight = build_external_connector_preflight(db, provider_id=source.provider_id, operations=operations)
+        summary = preflight.get("summary") or {}
+        if summary.get("aggregate_missing_operations"):
+            action_items.append({"check": "preflight", "detail": summary})
+
+    acceptance = None
+    if not req.dry_run and req.run_acceptance:
+        acceptance = admin_account_acceptance_suite(
+            AccountAcceptanceSuiteRequest(
+                dry_run=False,
+                account_ids=account_ids[: max(1, min(req.max_accounts, 100))],
+                provider_ids=[source.provider_id],
+                active_only=True,
+                external_only=True,
+                operations=operations,
+                run_health_check=req.run_health_check,
+                run_contract_tests=True,
+                contract_run_submit=req.contract_run_submit,
+                run_quota_sync=req.run_quota_sync,
+                run_samples=req.run_samples,
+                max_samples=req.max_samples,
+                max_accounts=req.max_accounts,
+                require_production_ready=req.require_production_ready,
+            ),
+            ctx,
+            db,
+        )
+        if not acceptance.get("ok"):
+            action_items.append({"check": "account_acceptance", "detail": acceptance.get("action_items", [])})
+
+    ok = not action_items
+    source = db.get(models.AccountSubscriptionSource, source_id) or source
+    preflight_ready = None
+    if isinstance(preflight, dict):
+        preflight_ready = (preflight.get("summary") or {}).get("aggregate_missing_operations") == []
+    production_summary = {
+        "dry_run": req.dry_run,
+        "ok": ok,
+        "account_ids": account_ids,
+        "operations": operations,
+        "quota_results": len(quota_results),
+        "preflight_ready": preflight_ready,
+        "acceptance_ok": acceptance.get("ok") if isinstance(acceptance, dict) else None,
+        "action_items": len(action_items),
+    }
+    source.last_sync_summary_json = dumps({**loads(source.last_sync_summary_json, {}), "production_sync": production_summary})
+    source.last_sync_status = "production_ready" if ok and not req.dry_run else "production_preview" if req.dry_run else "production_action_required"
+    source.last_sync_error = dumps(action_items[:5]) if action_items else ""
+    source.last_sync_at = datetime.utcnow()
+    db.commit()
+
+    return {
+        "object": "media2api.account_subscription_source_production_sync",
+        "status": "passed" if ok and not req.dry_run else "planned" if req.dry_run else "action_required",
+        "ok": ok,
+        "dry_run": req.dry_run,
+        "source": serialize_account_subscription_source(source),
+        "account_ids": account_ids,
+        "operations": operations,
+        "subscription_sync": sync_result,
+        "capability_sync": capability_sync,
+        "health_check": health_check,
+        "quota_sync": quota_results,
+        "preflight": preflight,
+        "acceptance": acceptance,
+        "action_items": action_items,
+        "next_steps": [
+            "If dry_run=true, inspect preview/preflight/action_items and then rerun with dry_run=false.",
+            "If quota_sync fails because the connector has no quota endpoint, configure quota_endpoint or disable run_quota_sync for that source.",
+            "After production sync passes, run account acceptance with run_samples=true for at least one real media sample before routing production traffic.",
         ],
     }
 
@@ -12610,15 +18219,29 @@ def admin_account_onboarding_bulk(req: AccountOnboardingBulkRequest, ctx: AuthCo
     errors: list[dict[str, Any]] = []
     for index, item in enumerate(req.items):
         try:
+            item_credential_ref = item.get("credential_ref") or item.get("credentialRef") or item.get("ref")
+            item_credential_value = item.get("credential_value")
+            if item_credential_value is None:
+                item_credential_value = item.get("credentialValue")
+            if item_credential_value is None:
+                for value_key in ["credential_material", "credentialMaterial", "subscription_url", "subscriptionUrl", "value", "token"]:
+                    candidate = item.get(value_key)
+                    if candidate not in (None, ""):
+                        item_credential_value = candidate
+                        break
+            if item_credential_value is None:
+                item_credential_value = ""
             account_req = AccountOnboardingRequest(
                 provider_id=str(item.get("provider_id") or req.provider_id),
                 account_id=item.get("account_id") or item.get("id"),
                 label=str(item.get("label") or item.get("account_id") or item.get("id") or f"{req.provider_id}-{index + 1}"),
+                resource_type=item.get("resource_type"),
+                resource_profile=item.get("resource_profile") or {},
                 provider_base_url=item.get("provider_base_url"),
                 provider_config=item.get("provider_config") or {},
                 auth_method=str(item.get("auth_method") or req.auth_method),
-                credential_value=str(item.get("credential_value") or item.get("subscription_url") or item.get("value") or item.get("token") or item.get("credential_ref") or ""),
-                credential_ref=item.get("credential_ref"),
+                credential_value=item_credential_value,
+                credential_ref=item_credential_ref,
                 credential_secret_id=item.get("credential_secret_id"),
                 credential_kind=str(item.get("credential_kind") or "session"),
                 supported_operations=item.get("supported_operations") or [],
@@ -12640,13 +18263,103 @@ def admin_account_onboarding_bulk(req: AccountOnboardingBulkRequest, ctx: AuthCo
     return {"object": "account.onboarding.bulk", "created_or_updated": len(results), "failed": len(errors), "data": results, "results": results, "errors": errors}
 
 
+@app.post("/v1/admin/account-subscriptions/preview")
+def admin_account_subscription_import_preview(req: AccountSubscriptionImportRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    plan = build_account_subscription_import_plan(db, req)
+    preview = sanitize_import_plan(plan)
+    preview["object"] = "media2api.account_subscription_import_preview"
+    return preview
+
+
+@app.post("/v1/admin/account-subscriptions/import")
+def admin_account_subscription_import(req: AccountSubscriptionImportRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    plan = build_account_subscription_import_plan(db, req)
+    return apply_account_subscription_import_plan(db, plan)
+
+
+@app.get("/v1/admin/account-subscription-sources")
+def admin_list_account_subscription_sources(
+    provider_id: str | None = None,
+    status: str | None = None,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = db.query(models.AccountSubscriptionSource)
+    if provider_id:
+        query = query.filter(models.AccountSubscriptionSource.provider_id == provider_id)
+    if status:
+        query = query.filter(models.AccountSubscriptionSource.status == status)
+    rows = query.order_by(models.AccountSubscriptionSource.created_at.desc()).all()
+    return {"object": "media2api.account_subscription_sources", "data": [serialize_account_subscription_source(row) for row in rows]}
+
+
+@app.post("/v1/admin/account-subscription-sources")
+def admin_create_account_subscription_source(req: AccountSubscriptionSourceRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return upsert_account_subscription_source(db, req)
+
+
+@app.get("/v1/admin/account-subscription-sources/{source_id}")
+def admin_get_account_subscription_source(source_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    source = db.get(models.AccountSubscriptionSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail={"error": "ACCOUNT_SUBSCRIPTION_SOURCE_NOT_FOUND"})
+    return serialize_account_subscription_source(source)
+
+
+@app.patch("/v1/admin/account-subscription-sources/{source_id}")
+def admin_patch_account_subscription_source(source_id: str, req: AccountSubscriptionSourcePatchRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return patch_account_subscription_source(db, source_id, req)
+
+
+@app.post("/v1/admin/account-subscription-sources/{source_id}/sync")
+def admin_sync_account_subscription_source(source_id: str, req: AccountSubscriptionSourceSyncRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return sync_account_subscription_source(db, source_id, req)
+
+
+@app.post("/v1/admin/account-subscription-sources/{source_id}/production-sync")
+def admin_production_sync_account_subscription_source(
+    source_id: str,
+    req: AccountSubscriptionSourceProductionSyncRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return production_sync_account_subscription_source(db, source_id, req, ctx)
+
+
 @app.post("/v1/admin/accounts")
 def admin_create_account(req: AccountAdminRequest, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     if not db.get(models.Provider, req.provider_id):
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
+    validate_runtime_base_url_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
+    validate_platform_resource_profile_fields(req.provider_id, req.resource_profile, field_name="resource_profile")
     account_id = req.id or new_id("acct")
     if db.get(models.AccountResource, account_id):
         raise HTTPException(status_code=409, detail={"error": "ACCOUNT_EXISTS"})
+    resource_type = validate_provider_resource_type(
+        req.provider_id,
+        req.resource_type
+        or expected_resource_type_for_credential_ref(req.credential_ref, req.credential_kind)
+        or expected_resource_type_for_credential_kind(req.credential_kind)
+        or infer_account_resource_type(req.provider_id, ""),
+        credential_kind=req.credential_kind,
+    )
+    secret_kind = normalize_account_secret_kind(resource_type, req.credential_kind)
+    validate_required_platform_inputs(
+        req.provider_id,
+        auth_method="cookie_secret" if resource_type == "web_cookie_provider" else "agent_provider_credential",
+        resource_type=resource_type,
+        resource_profile=req.resource_profile,
+        credential_ref=req.credential_ref,
+        credential_secret_id=req.credential_secret_id,
+        db=db,
+    )
+    validate_credential_ref_resource_type(
+        req.provider_id,
+        resource_type,
+        req.credential_ref,
+        credential_kind=secret_kind,
+        db=db,
+    )
     try:
         credential_ref, secret_payload = normalize_account_credential_ref(
             db,
@@ -12655,7 +18368,7 @@ def admin_create_account(req: AccountAdminRequest, ctx: AuthContext = Depends(re
             label=req.label,
             credential_ref=req.credential_ref,
             credential_secret_id=req.credential_secret_id,
-            credential_kind=req.credential_kind,
+            credential_kind=secret_kind,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -12663,7 +18376,18 @@ def admin_create_account(req: AccountAdminRequest, ctx: AuthContext = Depends(re
         id=account_id,
         provider_id=req.provider_id,
         label=req.label,
+        resource_type=resource_type,
         credential_ref=credential_ref,
+        resource_profile_json=dumps(
+            build_account_resource_profile(
+                provider_id=req.provider_id,
+                auth_method="",
+                resource_type=resource_type,
+                credential_kind=secret_kind,
+                provider_base_url=None,
+                resource_profile=req.resource_profile,
+            )
+        ),
         supported_operations_json=dumps(req.supported_operations),
         supported_provider_models_json=dumps(req.supported_provider_models),
         quota_buckets_json=dumps(req.quota_buckets),
@@ -12687,7 +18411,46 @@ def admin_patch_account(account_id: str, req: AccountPatchRequest, ctx: AuthCont
         raise HTTPException(status_code=404, detail={"error": "ACCOUNT_NOT_FOUND"})
     if req.label is not None:
         account.label = req.label
+    if req.resource_type is not None:
+        account.resource_type = validate_provider_resource_type(
+            account.provider_id,
+            infer_account_resource_type(account.provider_id, "", req.resource_type),
+            credential_kind=req.credential_kind,
+        )
+    elif req.credential_kind != "custom":
+        validate_provider_resource_type(account.provider_id, account.resource_type, credential_kind=req.credential_kind)
+    effective_secret_kind = normalize_account_secret_kind(account.resource_type, req.credential_kind) if req.resource_type is not None or req.credential_ref is not None or req.credential_kind != "custom" else req.credential_kind
+    effective_auth_method = "cookie_secret" if account.resource_type == "web_cookie_provider" else "agent_provider_credential"
+    validate_required_platform_inputs(
+        account.provider_id,
+        auth_method=effective_auth_method,
+        resource_type=account.resource_type,
+        resource_profile=req.resource_profile if req.resource_profile is not None else loads(account.resource_profile_json, {}),
+        credential_ref=req.credential_ref if req.credential_ref is not None else account.credential_ref,
+        credential_secret_id=req.credential_secret_id,
+        db=db,
+    )
+    if req.resource_profile is not None:
+        validate_runtime_base_url_fields(account.provider_id, req.resource_profile, field_name="resource_profile")
+        validate_platform_resource_profile_fields(account.provider_id, req.resource_profile, field_name="resource_profile")
+        account.resource_profile_json = dumps(
+            build_account_resource_profile(
+                provider_id=account.provider_id,
+                auth_method="",
+                resource_type=account.resource_type or infer_account_resource_type(account.provider_id, "", req.resource_type),
+                credential_kind=effective_secret_kind,
+                provider_base_url=None,
+                resource_profile=req.resource_profile,
+            )
+        )
     if req.credential_ref is not None:
+        validate_credential_ref_resource_type(
+            account.provider_id,
+            account.resource_type,
+            req.credential_ref,
+            credential_kind=effective_secret_kind,
+            db=db,
+        )
         try:
             credential_ref, secret_payload = normalize_account_credential_ref(
                 db,
@@ -12696,13 +18459,21 @@ def admin_patch_account(account_id: str, req: AccountPatchRequest, ctx: AuthCont
                 label=req.label or account.label,
                 credential_ref=req.credential_ref,
                 credential_secret_id=req.credential_secret_id,
-                credential_kind=req.credential_kind,
+                credential_kind=effective_secret_kind,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         account.credential_ref = credential_ref
     else:
         secret_payload = None
+        if req.resource_type is not None or req.credential_kind != "custom":
+            validate_credential_ref_resource_type(
+                account.provider_id,
+                account.resource_type,
+                account.credential_ref,
+                credential_kind=effective_secret_kind,
+                db=db,
+            )
     if req.supported_operations is not None:
         account.supported_operations_json = dumps(req.supported_operations)
     if req.supported_provider_models is not None:

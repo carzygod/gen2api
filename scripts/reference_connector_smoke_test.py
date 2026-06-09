@@ -65,7 +65,7 @@ def upsert_reference_secret(client: TestClient, provider_id: str, account_id: st
         "id": secret_id,
         "name": "Reference Connector Smoke Secret",
         "value": CONNECTOR_TOKEN,
-        "kind": "bearer_token",
+        "kind": "agent_provider",
         "provider_id": provider_id,
         "account_id": account_id,
         "metadata": {"source": "reference_connector_smoke"},

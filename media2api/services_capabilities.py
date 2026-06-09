@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from . import models
 from .provider_templates import PROVIDER_TEMPLATES
 from .providers import get_provider, resolve_credential
+from .services_connector_registry import provider_runtime_config as _provider_runtime_config
 from .utils import dumps, loads, redact_sensitive
 
 
@@ -58,15 +59,15 @@ OPERATION_DEFAULTS: dict[str, dict[str, Any]] = {
 
 class ProviderCapabilityService:
     def sync_remote(self, db: Session, provider: models.Provider, endpoint: str | None = None, timeout_seconds: float | None = None) -> dict[str, Any]:
-        config = loads(provider.base_config_json, {})
+        config = _provider_runtime_config(provider.id, loads(provider.base_config_json, {}))
         base_url = str(config.get("base_url") or "").rstrip("/")
         if not base_url:
             return {
                 "object": "provider_capability_sync",
                 "provider_id": provider.id,
-                "status": "failed",
-                "error_code": "PROVIDER_CONFIG_INVALID",
-                "message": "Provider base_config.base_url is required.",
+                "status": "skipped",
+                "error_code": "",
+                "message": "No runner base_url configured; skipped external capability sync for Web Cookie / Agent Provider resource.",
             }
         capability_endpoint = str(endpoint or config.get("capability_endpoint") or config.get("capabilities_endpoint") or "/capabilities")
         if not capability_endpoint.startswith("/"):
@@ -119,7 +120,7 @@ class ProviderCapabilityService:
         config["capabilities"] = normalized
         config["capability_endpoint"] = capability_endpoint
         config["capability_last_sync_at"] = datetime.utcnow().isoformat() + "Z"
-        provider.base_config_json = dumps(config)
+        provider.base_config_json = dumps(_provider_runtime_config(provider.id, config))
         db.commit()
         return {
             "object": "provider_capability_sync",

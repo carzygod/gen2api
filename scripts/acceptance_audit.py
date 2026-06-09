@@ -191,7 +191,7 @@ def main() -> int:
         "pollinations_direct_adapter_template",
         pollinations_template.get("adapter_type") == "aggregator_adapter"
         and pollinations_config.get("base_url") == "https://gen.pollinations.ai"
-        and pollinations_config.get("credential_ref") == "env://POLLINATIONS_CONNECTOR_CREDENTIAL",
+        and pollinations_config.get("credential_ref") == "agent://providers/pollinations/acct_01",
         pollinations_template,
     )
     activation_plan = client.json(
@@ -200,7 +200,7 @@ def main() -> int:
         {
             "dry_run": True,
             "base_url": "http://127.0.0.1:18091",
-            "credential_ref": "env://MEDIA2API_CONNECTOR_KEY",
+            "credential_ref": "agent://providers/gemini/acct_01",
             "contract_operations": ["text_to_image"],
             "run_quota_sync": False,
         },
@@ -211,7 +211,7 @@ def main() -> int:
         and activation_plan.get("dry_run") is True
         and activation_plan.get("status") == "planned"
         and activation_plan.get("plan", {}).get("template_id") == "gemini"
-        and "MEDIA2API_CONNECTOR_KEY" in str(activation_plan.get("plan", {}).get("credential_ref")),
+        and activation_plan.get("plan", {}).get("credential_ref") == "agent://providers/gemini/acct_01",
         activation_plan,
     )
     external_acceptance_plan = client.json(
@@ -224,7 +224,7 @@ def main() -> int:
         external_acceptance_plan.get("object") == "media2api.external_provider_acceptance"
         and external_acceptance_plan.get("status") == "planned"
         and (external_acceptance_plan.get("activation") or {}).get("status") == "planned"
-        and ((external_acceptance_plan.get("activation") or {}).get("plan") or {}).get("credential_ref") == "env://POLLINATIONS_CONNECTOR_CREDENTIAL",
+        and ((external_acceptance_plan.get("activation") or {}).get("plan") or {}).get("credential_ref") == "agent://providers/pollinations/acct_01",
         external_acceptance_plan,
     )
     account_acceptance_plan = client.json(
@@ -340,13 +340,11 @@ def main() -> int:
     audit.check(
         "admin_console",
         admin_status == 200
-        and "连接器引用" in admin_html
-        and "订阅地址" in admin_html
-        and "反代连接器" in admin_html
+        and "Web Cookie" in admin_html
+        and "Agent Provider" in admin_html
+        and "授权资源" in admin_html
         and "调用密钥" in admin_html
-        and "token_reference" in admin_html
-        and "使用该平台连接器后台" in admin_html
-        and "subscription_url" in admin_html
+        and "agent_provider_credential" in admin_html
         and "/v1/admin/account-onboarding" in admin_html
         and "Google OAuth 2.0 Playground" not in admin_html
         and "https://developers.google.com/oauthplayground/" not in admin_html
@@ -368,10 +366,10 @@ def main() -> int:
             "provider_id": "qwen",
             "account_id": f"acct_acceptance_onboarding_{onboard_suffix}",
             "label": "acceptance onboarding account",
-            "provider_base_url": "http://127.0.0.1:18091",
             "provider_config": {"source": "acceptance"},
-            "auth_method": "token_reference",
-            "credential_value": "vault://acceptance/qwen/account",
+            "resource_type": "agent_provider",
+            "auth_method": "agent_provider_credential",
+            "credential_value": "{\"qwen_oauth_credentials\":{\"profile\":\"acceptance-qwen\"}}",
             "supported_operations": ["text_to_image"],
             "supported_provider_models": ["qwen-image"],
             "sync_capabilities": False,
@@ -473,19 +471,19 @@ def main() -> int:
         },
     )
     manifest_secret = "acceptance-manifest-secret-token"
+    manifest_credential_value = json.dumps({"api_key": manifest_secret})
     manifest_plan = client.json(
         "POST",
         "/v1/admin/external-connector-manifest",
         {
             "provider_id": "jimeng",
-            "base_url": "https://connector.example.com",
-            "credential_value": manifest_secret,
-            "credential_kind": "bearer_token",
+            "credential_value": manifest_credential_value,
+            "credential_kind": "agent_provider",
             "dry_run": True,
             "operations": ["text_to_image", "image_edit", "text_to_video", "image_to_video"],
             "accounts": [
                 {"account_id": "acct_acceptance_manifest_1", "account_label": "Acceptance Manifest 1", "concurrency_limit": 1},
-                {"account_id": "acct_acceptance_manifest_2", "account_label": "Acceptance Manifest 2", "credential_ref": "env://ACCEPTANCE_MANIFEST_2", "concurrency_limit": 2},
+                {"account_id": "acct_acceptance_manifest_2", "account_label": "Acceptance Manifest 2", "credential_ref": "agent://acceptance/manifest/2", "concurrency_limit": 2},
             ],
         },
     )
@@ -622,8 +620,9 @@ def main() -> int:
         not exported_pollinations
         or (
             (
-                pollinations_ref in {None, "public://pollinations", "env://POLLINATIONS_CONNECTOR_CREDENTIAL"}
+                pollinations_ref in {None, "public://pollinations", "agent://providers/pollinations/acct_01"}
                 or str(pollinations_ref).startswith("secret://")
+                or str(pollinations_ref).startswith("agent://")
             )
             and pollinations_ref != "[redacted]"
         ),

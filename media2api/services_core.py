@@ -35,6 +35,18 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "expired"}
 ACTIVE_ATTEMPT_STATUSES = {"created", "submitting", "provider_queued", "polling", "fetching_assets", "storing"}
 UNLEASED_STALLED_JOB_STATUSES = {"admitted", "leasing_account"}
 PROVIDERS_WITH_VIRTUAL_CREDENTIALS = {"mock"}
+EXTERNAL_REFERENCE_CREDENTIAL_PREFIXES = (
+    "vault://",
+    "subscription://",
+    "oauth://",
+    "cli://",
+    "websession://",
+    "agent://",
+    "mcp://",
+    "endpoint://",
+    "connector://",
+    "tokenref://",
+)
 
 
 def quota_bucket_matches(bucket: dict[str, Any], operation: str, provider_model: str) -> bool:
@@ -104,6 +116,8 @@ def account_credential_available(db: Session, account: models.AccountResource) -
         return True
     credential_ref = (account.credential_ref or "").strip()
     if credential_ref.startswith("public://"):
+        return True
+    if credential_ref.startswith(EXTERNAL_REFERENCE_CREDENTIAL_PREFIXES):
         return True
     if credential_ref.startswith("env://"):
         return bool(os.getenv(credential_ref.replace("env://", "", 1)))

@@ -46,7 +46,6 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         models=["gpt-image-2", "codex-gpt-image-2"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"]],
         default_config={
-            "base_url": "http://127.0.0.1:18090",
             "health_endpoint": "/health",
             "endpoints": {
                 OPS["t2i"]: "/v1/images/generations",
@@ -58,7 +57,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
             MappingTemplate("t2i-pro", "gpt-image-2", [OPS["t2i"]], priority=10, quality_score=0.9, reliability_score=0.7),
             MappingTemplate("image-edit", "gpt-image-2", [OPS["edit"], OPS["i2i"]], priority=10, quality_score=0.9, reliability_score=0.7),
         ],
-        notes="Configure this with an already-authorized image connector base_url.",
+        notes="Configure this with an authorized Web Cookie or Codex Agent resource; runner base_url is optional.",
     ),
     "gemini": ProviderTemplate(
         id="gemini",
@@ -67,7 +66,6 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         models=["veo-3.1", "nano-banana", "nano-banana-pro", "imagen-4"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
         default_config={
-            "base_url": "http://127.0.0.1:18091",
             "health_endpoint": "/health",
             "endpoints": {
                 OPS["t2i"]: "/v1/images/generations",
@@ -93,7 +91,6 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         models=["grok-imagine-image", "grok-imagine-video"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["t2v"], OPS["i2v"]],
         default_config={
-            "base_url": "http://127.0.0.1:18092",
             "health_endpoint": "/health",
             "poll_timeout_seconds": 600,
         },
@@ -111,7 +108,6 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         models=["qwen-image", "qwen-image-edit", "qwen-video", "wan-video"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
         default_config={
-            "base_url": "http://127.0.0.1:18093",
             "health_endpoint": "/health",
             "poll_timeout_seconds": 600,
         },
@@ -130,7 +126,6 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         models=["seedream", "seededit", "seedance-i2v", "seedance-t2v"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
         default_config={
-            "base_url": "http://127.0.0.1:18094",
             "health_endpoint": "/health",
             "poll_timeout_seconds": 600,
         },
@@ -149,7 +144,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["kling-i2v-standard", "kling-i2v-hq", "kling-t2v", "kling-extend"],
         operations=[OPS["t2v"], OPS["i2v"], OPS["extend"]],
-        default_config={"base_url": "http://127.0.0.1:18095", "health_endpoint": "/health", "poll_timeout_seconds": 1200},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200},
         mappings=[
             MappingTemplate("i2v-pro", "kling-i2v-hq", [OPS["i2v"]], priority=10, quality_score=0.9, reliability_score=0.6),
             MappingTemplate("t2v-general", "kling-t2v", [OPS["t2v"]], priority=35, quality_score=0.8),
@@ -163,7 +158,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["luma-dream-machine", "luma-extend"],
         operations=[OPS["t2v"], OPS["i2v"], OPS["extend"]],
-        default_config={"base_url": "http://127.0.0.1:18096", "health_endpoint": "/health", "poll_timeout_seconds": 1200},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200},
         mappings=[
             MappingTemplate("i2v-pro", "luma-dream-machine", [OPS["i2v"]], priority=30, quality_score=0.85),
             MappingTemplate("t2v-general", "luma-dream-machine", [OPS["t2v"]], priority=25, quality_score=0.85),
@@ -177,7 +172,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["runway-gen3", "runway-gen4", "runway-extend"],
         operations=[OPS["t2v"], OPS["i2v"], OPS["extend"]],
-        default_config={"base_url": "http://127.0.0.1:18097", "health_endpoint": "/health", "poll_timeout_seconds": 1200},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200},
         mappings=[
             MappingTemplate("i2v-pro", "runway-gen4", [OPS["i2v"]], priority=40, quality_score=0.85),
             MappingTemplate("t2v-general", "runway-gen4", [OPS["t2v"]], priority=40, quality_score=0.85),
@@ -191,7 +186,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["mj-v6", "mj-v7", "niji"],
         operations=[OPS["t2i"], OPS["i2i"]],
-        default_config={"base_url": "http://127.0.0.1:18098", "health_endpoint": "/health", "poll_timeout_seconds": 1200},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200},
         mappings=[
             MappingTemplate("image-variation", "mj-v7", [OPS["i2i"]], priority=10, quality_score=0.9),
             MappingTemplate("t2i-pro", "mj-v7", [OPS["t2i"]], priority=50, quality_score=0.9),
@@ -204,14 +199,14 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="aggregator_adapter",
         models=["gpt-image-2", "nanobanana", "seedream", "qwen-image", "grok-imagine", "veo", "seedance", "wan"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["t2v"], OPS["i2v"]],
-        default_config={"base_url": "https://gen.pollinations.ai", "credential_ref": "env://POLLINATIONS_CONNECTOR_CREDENTIAL", "health_timeout_seconds": 10, "timeout_seconds": 300, "max_reference_assets": 2},
+        default_config={"base_url": "https://gen.pollinations.ai", "credential_ref": "agent://providers/pollinations/acct_01", "health_timeout_seconds": 10, "timeout_seconds": 300, "max_reference_assets": 2},
         mappings=[
             MappingTemplate("t2i-fast", "seedream", [OPS["t2i"]], priority=60, cost_score=0.7),
             MappingTemplate("t2i-pro", "gpt-image-2", [OPS["t2i"]], priority=60, quality_score=0.75),
             MappingTemplate("i2v-fast", "seedance", [OPS["i2v"]], priority=60, speed_score=0.7),
             MappingTemplate("t2v-general", "veo", [OPS["t2v"]], priority=60, quality_score=0.75),
         ],
-        notes="Third-party aggregator connector template. Store access material as credential_ref, subscription_url, or a secret-backed account reference.",
+        notes="Third-party aggregator connector template. Store access material as an Agent Provider credential reference or secret-backed Web Cookie/session when the matched runner supports it.",
     ),
     "openrouter_image": ProviderTemplate(
         id="openrouter_image",
@@ -219,7 +214,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["gpt-image", "nano-banana", "seedream", "recraft", "flux", "qwen-image"],
         operations=[OPS["t2i"], OPS["i2i"]],
-        default_config={"base_url": "http://127.0.0.1:18100", "health_endpoint": "/health", "poll_timeout_seconds": 600},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 600},
         mappings=[
             MappingTemplate("t2i-pro", "gpt-image", [OPS["t2i"]], priority=70, quality_score=0.8, reliability_score=0.65),
             MappingTemplate("t2i-fast", "qwen-image", [OPS["t2i"]], priority=70, speed_score=0.75, cost_score=0.65),
@@ -233,7 +228,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["nano-banana", "qwen-image", "seedream", "flux", "recraft", "wan-video"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["t2v"], OPS["i2v"]],
-        default_config={"base_url": "http://127.0.0.1:18101", "health_endpoint": "/health", "poll_timeout_seconds": 1200},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200},
         mappings=[
             MappingTemplate("t2i-fast", "qwen-image", [OPS["t2i"]], priority=80, cost_score=0.65),
             MappingTemplate("t2i-pro", "flux", [OPS["t2i"]], priority=80, quality_score=0.8),
@@ -249,7 +244,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["seedream-3", "seedream-4", "seedream-5", "seededit"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"]],
-        default_config={"base_url": "http://127.0.0.1:18102", "health_endpoint": "/health", "poll_timeout_seconds": 600},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 600},
         mappings=[
             MappingTemplate("t2i-fast", "seedream-4", [OPS["t2i"]], priority=65, speed_score=0.75, cost_score=0.7),
             MappingTemplate("t2i-pro", "seedream-5", [OPS["t2i"]], priority=65, quality_score=0.8),
@@ -263,7 +258,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["qwen-image", "qwen-image-edit", "wan-image"],
         operations=[OPS["t2i"], OPS["i2i"]],
-        default_config={"base_url": "http://127.0.0.1:18103", "health_endpoint": "/health", "poll_timeout_seconds": 600},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 600},
         mappings=[
             MappingTemplate("t2i-fast", "qwen-image", [OPS["t2i"]], priority=75, speed_score=0.8, cost_score=0.7),
             MappingTemplate("t2i-pro", "qwen-image", [OPS["t2i"]], priority=75, quality_score=0.75),
@@ -277,7 +272,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["flux", "sdxl", "stable-image", "controlnet"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"]],
-        default_config={"base_url": "http://127.0.0.1:18104", "health_endpoint": "/health", "poll_timeout_seconds": 600},
+        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 600},
         mappings=[
             MappingTemplate("t2i-fast", "flux", [OPS["t2i"]], priority=90, cost_score=0.75),
             MappingTemplate("t2i-pro", "stable-image", [OPS["t2i"]], priority=90, quality_score=0.75),

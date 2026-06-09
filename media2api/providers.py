@@ -343,7 +343,7 @@ class PollinationsProvider:
         base_url = str(config.get("base_url") or "https://gen.pollinations.ai").rstrip("/")
         headers = self._headers(db, config, ctx.account.credential_ref)
         if headers is None:
-            raise RuntimeError("POLLINATIONS_KEY_MISSING")
+            raise RuntimeError("POLLINATIONS_CREDENTIAL_MISSING")
 
         params = loads(job.normalized_params_json, {})
         prompt = str(params.get("prompt") or "media generation").strip() or "media generation"
@@ -399,7 +399,7 @@ class PollinationsProvider:
 
     def classify_error(self, error: Exception) -> dict[str, Any]:
         message = str(error)
-        if "POLLINATIONS_KEY_MISSING" in message or "401" in message or "403" in message:
+        if "POLLINATIONS_CREDENTIAL_MISSING" in message or "POLLINATIONS_KEY_MISSING" in message or "401" in message or "403" in message:
             return {"code": "AUTH_REQUIRED", "message": "Pollinations credential is missing or invalid.", "retryable": False}
         if "402" in message or "PAYMENT" in message.upper() or "budget" in message.lower() or "quota" in message.lower():
             return {"code": "QUOTA_EXHAUSTED", "message": message, "retryable": False}
@@ -433,7 +433,7 @@ class PollinationsProvider:
                     account_id = account.id
                     break
         if headers is None:
-            return {"status": "failed", "latency_ms": None, "message": "missing Pollinations credential", "detail": {"requires": "env://POLLINATIONS_KEY or secret:// credential"}}
+            return {"status": "failed", "latency_ms": None, "message": "missing Pollinations credential", "detail": {"requires": "agent:// Agent Provider reference or secret:// Web Cookie/session credential"}}
         started = time.time()
         try:
             response = httpx.get(f"{base_url}/v1/models", headers=headers, timeout=float(config.get("health_timeout_seconds") or 10))
@@ -451,7 +451,7 @@ class PollinationsProvider:
         config = loads(provider.base_config_json if provider else "{}", {})
         headers = self._headers(db, config, ctx.account.credential_ref)
         if headers is None:
-            raise RuntimeError("POLLINATIONS_KEY_MISSING")
+            raise RuntimeError("POLLINATIONS_CREDENTIAL_MISSING")
         return {
             "status": "ok",
             "message": "Pollinations quota is account-managed upstream; exact balance is not exposed by this adapter.",
@@ -478,13 +478,21 @@ class PollinationsProvider:
         return False
 
     def _api_key(self, db: Session, config: dict[str, Any], credential_ref: str | None) -> str | None:
-        return (
-            resolve_credential(str(config.get("credential_ref") or ""), db)
-            or resolve_credential(credential_ref, db)
-            or resolve_credential(str(config.get("api_key_ref") or ""), db)
-            or os.getenv("POLLINATIONS_KEY")
-            or os.getenv("MEDIA2API_POLLINATIONS_KEY")
-        )
+        for value in [
+            resolve_credential(str(config.get("credential_ref") or ""), db),
+            resolve_credential(credential_ref, db),
+            resolve_credential(str(config.get("api_key_ref") or ""), db),
+            os.getenv("POLLINATIONS_KEY"),
+            os.getenv("POLLINATIONS_API_KEY"),
+            os.getenv("MEDIA2API_POLLINATIONS_KEY"),
+        ]:
+            api_key = credential_named_value(
+                value,
+                ["POLLINATIONS_KEY", "POLLINATIONS_API_KEY", "pollinations_key", "pollinations_api_key", "key"],
+            )
+            if api_key:
+                return api_key
+        return None
 
     def _query_params(self, params: dict[str, Any], provider_model: str, operation: str, reference_urls: list[str], config: dict[str, Any]) -> dict[str, Any]:
         width, height = self._size(params)
@@ -596,6 +604,66 @@ def resolve_credential(ref: str | None, db: Session | None = None) -> str | None
     return None
 
 
+def credential_named_value(value: str | None, field_names: list[str]) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = loads(raw, None)
+    if isinstance(parsed, dict):
+        stack: list[dict[str, Any]] = [parsed]
+        names = set(field_names)
+        while stack:
+            current = stack.pop()
+            for key, child in current.items():
+                if key in names and child not in (None, "", [], {}):
+                    if isinstance(child, (dict, list)):
+                        return dumps(child)
+                    return str(child).strip()
+                if isinstance(child, dict):
+                    stack.append(child)
+        return None
+    for line in raw.splitlines():
+        clean = line.strip()
+        if not clean or clean.startswith("#") or "=" not in clean:
+            continue
+        key, child = clean.split("=", 1)
+        if key.strip() in set(field_names):
+            return child.strip().strip('"').strip("'")
+    return raw
+
+
+CONNECTOR_REFERENCE_PREFIXES = (
+    "env://",
+    "secret://",
+    "public://",
+    "vault://",
+    "subscription://",
+    "oauth://",
+    "cli://",
+    "websession://",
+    "agent://",
+    "mcp://",
+    "endpoint://",
+    "connector://",
+    "tokenref://",
+)
+INLINE_CREDENTIAL_PREFIXES = ("plain://", "bearer://")
+
+
+def credential_ref_type(ref: str | None) -> str:
+    if not ref or "://" not in ref:
+        return "unknown"
+    return ref.split("://", 1)[0]
+
+
+def connector_reference_only(ref: str | None, resolved_value: str | None = None) -> bool:
+    if not ref:
+        return False
+    if ref.startswith(("vault://", "subscription://", "oauth://", "cli://", "websession://", "agent://", "mcp://", "endpoint://", "connector://", "tokenref://")):
+        return True
+    return not bool(resolved_value) and not ref.startswith(INLINE_CREDENTIAL_PREFIXES)
+
+
 class ConnectorProvider:
     """Generic adapter for already-authorized HTTP sidecars/connectors.
 
@@ -620,7 +688,7 @@ class ConnectorProvider:
         if not base_url:
             raise RuntimeError(f"Provider {ctx.provider_id} is active but missing base_config.base_url")
 
-        headers = self._headers(db, config, ctx.account.credential_ref)
+        headers = self._headers(db, config, ctx.account.credential_ref, provider_id=ctx.provider_id, account=ctx.account)
         payload = self._payload(db, job, ctx, config)
         endpoint = self._endpoint(job.operation, config)
         timeout = float(config.get("timeout_seconds") or 120)
@@ -701,7 +769,7 @@ class ConnectorProvider:
         endpoint = cancel_endpoint.replace("{provider_task_id}", provider_task_id).replace("{task_id}", provider_task_id)
         method = str(config.get("cancel_method") or "POST").upper()
         timeout = float(config.get("cancel_timeout_seconds") or config.get("timeout_seconds") or 30)
-        headers = self._headers(db, config, ctx.account.credential_ref if ctx.account else None)
+        headers = self._headers(db, config, ctx.account.credential_ref if ctx.account else None, provider_id=ctx.provider_id, account=ctx.account)
         payload = {"id": provider_task_id, "task_id": provider_task_id}
         if isinstance(config.get("cancel_payload"), dict):
             payload.update(config["cancel_payload"])
@@ -744,7 +812,7 @@ class ConnectorProvider:
         endpoint = str(config.get("health_endpoint") or "/health")
         timeout = float(config.get("health_timeout_seconds") or 10)
         account = db.query(models.AccountResource).filter(models.AccountResource.provider_id == provider_id).first()
-        headers = self._headers(db, config, account.credential_ref if account else None)
+        headers = self._headers(db, config, account.credential_ref if account else None, provider_id=provider_id, account=account)
         started = time.time()
         try:
             response = httpx.get(f"{base_url}{endpoint}", headers=headers, timeout=timeout)
@@ -780,7 +848,7 @@ class ConnectorProvider:
         endpoint = endpoint.replace("{account_id}", ctx.account.id).replace("{provider_id}", ctx.provider_id)
         method = str(config.get("quota_method") or "GET").upper()
         timeout = float(config.get("quota_timeout_seconds") or config.get("health_timeout_seconds") or 10)
-        headers = self._headers(db, config, ctx.account.credential_ref)
+        headers = self._headers(db, config, ctx.account.credential_ref, provider_id=ctx.provider_id, account=ctx.account)
         payload = {
             "account_id": ctx.account.id,
             "provider_id": ctx.provider_id,
@@ -808,7 +876,15 @@ class ConnectorProvider:
             "detail": redact_sensitive({k: v for k, v in data.items() if k not in {"quota_buckets", "quotas", "buckets"}}),
         }
 
-    def _headers(self, db: Session, config: dict[str, Any], credential_ref: str | None) -> dict[str, str]:
+    def _headers(
+        self,
+        db: Session,
+        config: dict[str, Any],
+        credential_ref: str | None,
+        *,
+        provider_id: str = "",
+        account: models.AccountResource | None = None,
+    ) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         api_key = resolve_credential(str(config.get("credential_ref") or ""), db) or resolve_credential(credential_ref, db) or resolve_credential(str(config.get("api_key_ref") or ""), db)
         if api_key:
@@ -817,11 +893,37 @@ class ConnectorProvider:
                 headers[header_name] = f"Bearer {api_key}"
             else:
                 headers[header_name] = api_key
+        if config.get("forward_credential_ref_headers", True) is not False:
+            account_ref = (credential_ref or "").strip()
+            if account_ref.startswith(CONNECTOR_REFERENCE_PREFIXES):
+                header_prefix = str(config.get("account_header_prefix") or "X-Media2API").strip() or "X-Media2API"
+                headers[str(config.get("provider_id_header") or f"{header_prefix}-Provider-ID")] = provider_id
+                if account:
+                    headers[str(config.get("account_id_header") or f"{header_prefix}-Account-ID")] = account.id
+                    headers[str(config.get("account_label_header") or f"{header_prefix}-Account-Label")] = account.label
+                headers[str(config.get("credential_ref_header") or f"{header_prefix}-Credential-Ref")] = account_ref
+                headers[str(config.get("credential_type_header") or f"{header_prefix}-Credential-Type")] = credential_ref_type(account_ref)
+                headers[str(config.get("credential_reference_only_header") or f"{header_prefix}-Credential-Reference-Only")] = "true" if connector_reference_only(account_ref, api_key) else "false"
         return headers
 
     def _payload(self, db: Session, job: models.MediaJob, ctx: ProviderContext, config: dict[str, Any]) -> dict[str, Any]:
         payload = loads(job.normalized_params_json, {})
+        payload.setdefault("operation", job.operation)
+        payload.setdefault("provider_id", ctx.provider_id)
         payload["model"] = ctx.provider_model
+        account_ref = ctx.account.credential_ref
+        resolved_account_secret = resolve_credential(account_ref, db)
+        account_payload = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+        account_payload.setdefault("id", ctx.account.id)
+        account_payload.setdefault("label", ctx.account.label)
+        account_payload["credential_ref"] = account_ref
+        account_payload["credential_ref_type"] = credential_ref_type(account_ref)
+        account_payload["credential_reference_only"] = connector_reference_only(account_ref, resolved_account_secret)
+        account_payload.setdefault("supported_operations", loads(ctx.account.supported_operations_json, []))
+        account_payload.setdefault("supported_provider_models", loads(ctx.account.supported_provider_models_json, []))
+        account_payload.setdefault("region", ctx.account.region)
+        account_payload.setdefault("plan", ctx.account.plan)
+        payload["account"] = account_payload
         asset_urls = []
         asset_service = AssetService()
         asset_base_url = str(config.get("asset_base_url") or "").rstrip("/")
@@ -842,6 +944,15 @@ class ConnectorProvider:
         if asset_urls:
             payload["image"] = asset_urls[0] if len(asset_urls) == 1 else asset_urls
             payload["assets"] = asset_urls
+        template = self._request_template(job.operation, config)
+        if template is not None:
+            rendered = self._render_template_value(template, self._template_context(payload, job, ctx))
+            if config.get("drop_empty_template_values", True) is not False:
+                rendered = self._prune_empty_template_values(rendered)
+            if isinstance(rendered, dict):
+                if config.get("merge_standard_account_context", True) is not False and "account" not in rendered:
+                    rendered["account"] = payload["account"]
+                return rendered
         return payload
 
     def _replace_asset_ids_with_urls(self, value: Any, asset_url_by_id: dict[str, str]) -> Any:
@@ -1022,18 +1133,106 @@ class ConnectorProvider:
             return any(key in item and item.get(key) for key in MEDIA_ITEM_KEYS)
         return False
 
-    def _render_template(self, value: str, variables: dict[str, str]) -> str:
-        for key, replacement in variables.items():
-            value = value.replace("{" + key + "}", replacement)
-        return value
+    def _request_template(self, operation: str, config: dict[str, Any]) -> Any | None:
+        templates = config.get("request_templates") if config.get("request_templates") is not None else config.get("payload_templates")
+        if isinstance(templates, dict):
+            if operation in templates:
+                return templates[operation]
+            if "*" in templates:
+                return templates["*"]
+        for key in ["request_template", "payload_template"]:
+            if key in config:
+                return config[key]
+        return None
 
-    def _render_template_value(self, value: Any, variables: dict[str, str]) -> Any:
+    def _template_context(self, payload: dict[str, Any], job: models.MediaJob, ctx: ProviderContext) -> dict[str, Any]:
+        context = dict(payload)
+        context.setdefault("params", loads(job.normalized_params_json, {}))
+        context.update(
+            {
+                "operation": job.operation,
+                "provider_id": ctx.provider_id,
+                "provider_model": ctx.provider_model,
+                "model": ctx.provider_model,
+                "job_id": job.id,
+                "user_id": job.user_id,
+                "account": payload.get("account") or {},
+                "input_asset_ids": loads(job.input_asset_ids_json, []),
+            }
+        )
+        return context
+
+    def _render_template(self, value: str, variables: dict[str, Any]) -> str:
+        rendered = self._render_template_string(value, variables)
+        if rendered is None:
+            return ""
+        return str(rendered)
+
+    def _render_template_value(self, value: Any, variables: dict[str, Any]) -> Any:
         if isinstance(value, str):
-            return self._render_template(value, variables)
+            return self._render_template_string(value, variables)
         if isinstance(value, list):
             return [self._render_template_value(item, variables) for item in value]
         if isinstance(value, dict):
             return {key: self._render_template_value(item, variables) for key, item in value.items()}
+        return value
+
+    def _render_template_string(self, value: str, variables: dict[str, Any]) -> Any:
+        placeholders = self._template_placeholders(value)
+        if not placeholders:
+            return value
+        if len(placeholders) == 1 and value == "{" + placeholders[0] + "}":
+            return self._template_lookup(placeholders[0], variables)
+        rendered = value
+        for placeholder in placeholders:
+            replacement = self._template_lookup(placeholder, variables)
+            rendered = rendered.replace("{" + placeholder + "}", "" if replacement is None else str(replacement))
+        return rendered
+
+    def _template_placeholders(self, value: str) -> list[str]:
+        placeholders: list[str] = []
+        cursor = 0
+        while cursor < len(value):
+            start = value.find("{", cursor)
+            if start < 0:
+                break
+            end = value.find("}", start + 1)
+            if end < 0:
+                break
+            name = value[start + 1 : end].strip()
+            if name:
+                placeholders.append(name)
+            cursor = end + 1
+        return placeholders
+
+    def _template_lookup(self, path: str, variables: dict[str, Any]) -> Any:
+        if path in variables:
+            return variables[path]
+        value: Any = variables
+        for part in path.split("."):
+            if isinstance(value, dict) and part in value:
+                value = value[part]
+            elif isinstance(value, list):
+                try:
+                    value = value[int(part)]
+                except (TypeError, ValueError, IndexError):
+                    return None
+            else:
+                return None
+        return value
+
+    def _prune_empty_template_values(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                pruned = self._prune_empty_template_values(item)
+                if pruned is None or pruned == "" or pruned == [] or pruned == {}:
+                    continue
+                result[key] = pruned
+            return result
+        if isinstance(value, list):
+            result = [self._prune_empty_template_values(item) for item in value]
+            return [item for item in result if item is not None and item != "" and item != [] and item != {}]
         return value
 
     def _set_job_stage(

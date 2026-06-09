@@ -246,7 +246,7 @@ def main() -> None:
                         headers=HEADERS,
                         json={
                             "base_url": f"http://127.0.0.1:{port}",
-                            "credential_value": POLLINATIONS_KEY,
+                            "credential_value": json.dumps({"POLLINATIONS_KEY": POLLINATIONS_KEY}),
                             "credential_secret_id": "secret_pollinations_external_acceptance",
                             "operations": ["text_to_image"],
                             "run_samples": True,

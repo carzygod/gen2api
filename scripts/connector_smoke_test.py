@@ -28,6 +28,14 @@ def tiny_png_b64() -> str:
 
 
 class ConnectorHandler(BaseHTTPRequestHandler):
+    last_submit_headers: dict[str, str] = {}
+    last_submit_payload: dict = {}
+    last_quota_headers: dict[str, str] = {}
+
+    @classmethod
+    def capture_headers(cls, headers) -> dict[str, str]:
+        return {str(key).lower(): str(value) for key, value in headers.items()}
+
     def _authorized(self) -> bool:
         return self.headers.get("authorization") == f"Bearer {CONNECTOR_SECRET_VALUE}"
 
@@ -65,10 +73,13 @@ class ConnectorHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw_body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
             payload = {}
-        if payload.get("prompt") == "connector async smoke":
+        ConnectorHandler.last_submit_headers = self.capture_headers(self.headers)
+        ConnectorHandler.last_submit_payload = payload
+        prompt = payload.get("prompt") or (payload.get("input") or {}).get("prompt")
+        if prompt == "connector async smoke":
             self._json({"id": "task_connector_async", "status": "queued"})
             return
-        if payload.get("prompt") == "connector custom path smoke":
+        if prompt == "connector custom path smoke":
             self._json({"task": {"uid": "task_connector_custom", "state": "pending"}})
             return
         self._json(
@@ -90,6 +101,7 @@ class ConnectorHandler(BaseHTTPRequestHandler):
             self._unauthorized()
             return
         if self.path.startswith("/quota"):
+            ConnectorHandler.last_quota_headers = self.capture_headers(self.headers)
             self._json(
                 {
                     "status": "ok",
@@ -134,6 +146,13 @@ def assert_ok(resp):
     return resp.json()
 
 
+def connector_attempt(attempts: dict) -> dict:
+    for item in attempts.get("data", []):
+        if item.get("provider_id") == "connector_smoke" and item.get("status") == "completed":
+            return item
+    raise AssertionError(attempts)
+
+
 def upsert_provider(client: TestClient, port: int) -> None:
     payload = {
         "id": "connector_smoke",
@@ -143,12 +162,27 @@ def upsert_provider(client: TestClient, port: int) -> None:
         "base_config": {
             "base_url": f"http://127.0.0.1:{port}",
             "timeout_seconds": 10,
+            "credential_ref": "secret://secret_connector_smoke",
             "quota_endpoint": "/quota",
             "poll_endpoint": "/tasks/{task_id}",
             "poll_interval_seconds": 0.1,
             "task_id_paths": ["id", "task.uid"],
             "status_paths": ["status", "task.state"],
             "output_paths": ["data", "result.assets"],
+            "request_templates": {
+                "text_to_image": {
+                    "input": {
+                        "prompt": "{prompt}",
+                        "model": "{model}",
+                        "account_ref": "{account.credential_ref}",
+                        "account_type": "{account.credential_ref_type}",
+                        "reference_only": "{account.credential_reference_only}",
+                    },
+                    "options": {"n": "{n}", "size": "{size}", "quality": "{quality}"},
+                    "operation": "{operation}",
+                    "provider_id": "{provider_id}",
+                }
+            },
         },
         "notes": "Local connector contract smoke test",
     }
@@ -164,7 +198,7 @@ def upsert_account(client: TestClient) -> None:
         "id": "secret_connector_smoke",
         "name": "Connector Smoke Secret",
         "value": CONNECTOR_SECRET_VALUE,
-        "kind": "bearer_token",
+        "kind": "agent_provider",
         "provider_id": "connector_smoke",
         "account_id": "acct_connector_smoke",
         "metadata": {"source": "connector_smoke"},
@@ -180,7 +214,7 @@ def upsert_account(client: TestClient) -> None:
         "id": "acct_connector_smoke",
         "provider_id": "connector_smoke",
         "label": "Connector Smoke Account",
-        "credential_ref": "secret://secret_connector_smoke",
+        "credential_ref": "agent://providers/connector_smoke/acct_01",
         "supported_operations": ["text_to_image"],
         "supported_provider_models": ["connector-smoke-image"],
         "quota_buckets": [{"type": "credits", "remaining_estimate": 1000, "confidence": 1}],
@@ -232,32 +266,53 @@ def main() -> None:
             upsert_provider(client, port)
             upsert_account(client)
             upsert_mapping(client, True)
+            runtime_contract = assert_ok(client.get("/v1/admin/providers/connector_smoke/connector-runtime", headers=headers))
+            assert runtime_contract["object"] == "media2api.connector_runtime_diagnostics", runtime_contract
+            assert runtime_contract["summary"]["credential_ref_headers_enabled"] is True, runtime_contract
+            assert runtime_contract["runtime_contract"]["request_templates_configured"] is True, runtime_contract
+            assert "text_to_image" in runtime_contract["runtime_contract"]["request_template_operations"], runtime_contract
+            assert runtime_contract["accounts"][0]["connector_forwarding"]["forwardable_reference"] is True, runtime_contract
+            assert runtime_contract["accounts"][0]["connector_forwarding"]["payload_account_fields"]["credential_ref_type"] == "agent", runtime_contract
             result = assert_ok(
                 client.post(
                     "/v1/images/generations",
                     headers=headers,
-                    json={"model": "t2i-fast", "prompt": "connector smoke", "n": 1},
+                    json={"model": "t2i-fast", "prompt": "connector smoke", "n": 1, "providers": ["connector_smoke"], "preferred_account_id": "acct_connector_smoke"},
                 )
             )
             assert result["data"][0]["asset_id"]
+            assert ConnectorHandler.last_submit_headers.get("authorization") == f"Bearer {CONNECTOR_SECRET_VALUE}", ConnectorHandler.last_submit_headers
+            assert ConnectorHandler.last_submit_headers.get("x-media2api-provider-id") == "connector_smoke", ConnectorHandler.last_submit_headers
+            assert ConnectorHandler.last_submit_headers.get("x-media2api-account-id") == "acct_connector_smoke", ConnectorHandler.last_submit_headers
+            assert ConnectorHandler.last_submit_headers.get("x-media2api-credential-ref") == "agent://providers/connector_smoke/acct_01", ConnectorHandler.last_submit_headers
+            assert ConnectorHandler.last_submit_headers.get("x-media2api-credential-type") == "agent", ConnectorHandler.last_submit_headers
+            assert ConnectorHandler.last_submit_headers.get("x-media2api-credential-reference-only") == "true", ConnectorHandler.last_submit_headers
+            account_payload = ConnectorHandler.last_submit_payload.get("account") or {}
+            assert account_payload["credential_ref"] == "agent://providers/connector_smoke/acct_01", account_payload
+            assert account_payload["credential_ref_type"] == "agent" and account_payload["credential_reference_only"] is True, account_payload
+            input_payload = ConnectorHandler.last_submit_payload.get("input") or {}
+            assert input_payload["prompt"] == "connector smoke", ConnectorHandler.last_submit_payload
+            assert input_payload["model"] == "connector-smoke-image", ConnectorHandler.last_submit_payload
+            assert input_payload["account_ref"] == "agent://providers/connector_smoke/acct_01", ConnectorHandler.last_submit_payload
+            assert input_payload["account_type"] == "agent" and input_payload["reference_only"] is True, ConnectorHandler.last_submit_payload
             job = assert_ok(client.get(f"/v1/media-jobs/{result['job_id']}", headers=headers))
             assert job["provider"] == "connector_smoke", job
             attempts = assert_ok(client.get(f"/v1/media-jobs/{result['job_id']}/attempts", headers=headers))
-            assert attempts["data"] and attempts["data"][0]["request_snapshot"]["params"]["prompt"] == "connector smoke", attempts
-            raw_response = attempts["data"][0]["raw_response"]
+            sync_attempt = connector_attempt(attempts)
+            assert sync_attempt["request_snapshot"]["params"]["prompt"] == "connector smoke", attempts
+            raw_response = sync_attempt["raw_response"]
             assert raw_response["api_key"] == "[redacted]" and raw_response["token"] == "[redacted]" and raw_response["authorization"] == "[redacted]", raw_response
             assert raw_response["data"][0]["mime_type"] == "image/png", raw_response
             events = assert_ok(client.get(f"/v1/media-jobs/{result['job_id']}/events", headers=headers))
             sync_event_types = [item["event_type"] for item in events["data"]]
             assert "fetching_assets" in sync_event_types and "completed" in sync_event_types, events
-            sync_attempt = assert_ok(client.get(f"/v1/media-jobs/{result['job_id']}/attempts", headers=headers))["data"][0]
             assert sync_attempt["status"] == "completed", sync_attempt
 
             async_result = assert_ok(
                 client.post(
                     "/v1/images/generations",
                     headers=headers,
-                    json={"model": "t2i-fast", "prompt": "connector async smoke", "n": 1},
+                    json={"model": "t2i-fast", "prompt": "connector async smoke", "n": 1, "providers": ["connector_smoke"], "preferred_account_id": "acct_connector_smoke"},
                 )
             )
             assert async_result["data"][0]["asset_id"]
@@ -265,14 +320,14 @@ def main() -> None:
             async_event_types = [item["event_type"] for item in async_events["data"]]
             for expected in ["provider_queued", "polling", "fetching_assets", "completed"]:
                 assert expected in async_event_types, async_events
-            async_attempt = assert_ok(client.get(f"/v1/media-jobs/{async_result['job_id']}/attempts", headers=headers))["data"][0]
+            async_attempt = connector_attempt(assert_ok(client.get(f"/v1/media-jobs/{async_result['job_id']}/attempts", headers=headers)))
             assert async_attempt["status"] == "completed" and async_attempt["provider_task_id"] == "task_connector_async", async_attempt
 
             custom_result = assert_ok(
                 client.post(
                     "/v1/images/generations",
                     headers=headers,
-                    json={"model": "t2i-fast", "prompt": "connector custom path smoke", "n": 1},
+                    json={"model": "t2i-fast", "prompt": "connector custom path smoke", "n": 1, "providers": ["connector_smoke"], "preferred_account_id": "acct_connector_smoke"},
                 )
             )
             assert custom_result["data"][0]["asset_id"]
@@ -282,10 +337,11 @@ def main() -> None:
             custom_event_types = [item["event_type"] for item in custom_events["data"]]
             for expected in ["provider_queued", "polling", "fetching_assets", "completed"]:
                 assert expected in custom_event_types, custom_events
-            custom_attempt = assert_ok(client.get(f"/v1/media-jobs/{custom_result['job_id']}/attempts", headers=headers))["data"][0]
+            custom_attempt = connector_attempt(assert_ok(client.get(f"/v1/media-jobs/{custom_result['job_id']}/attempts", headers=headers)))
             assert custom_attempt["provider_task_id"] == "task_connector_custom" and custom_attempt["status"] == "completed", custom_attempt
 
             quota_sync = assert_ok(client.post("/v1/admin/accounts/acct_connector_smoke/sync-quota", headers=headers))
+            assert ConnectorHandler.last_quota_headers.get("x-media2api-credential-ref") == "agent://providers/connector_smoke/acct_01", ConnectorHandler.last_quota_headers
             assert quota_sync["status"] == "ok" and quota_sync["quota_buckets"][0]["remaining_estimate"] == 321.0, quota_sync
             assert quota_sync["provider_result"]["detail"]["api_key"] == "[redacted]", quota_sync
             synced_account = quota_sync["account"]

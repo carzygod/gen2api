@@ -49,6 +49,10 @@ def ensure_schema_columns() -> None:
             account_missing_text.append(("last_error_code", "VARCHAR(64) NOT NULL DEFAULT ''"))
         if "last_error_message" not in columns:
             account_missing_text.append(("last_error_message", "TEXT NOT NULL DEFAULT ''"))
+        if "resource_type" not in columns:
+            account_missing_text.append(("resource_type", "VARCHAR(64) NOT NULL DEFAULT ''"))
+        if "resource_profile_json" not in columns:
+            account_missing_text.append(("resource_profile_json", "TEXT NOT NULL DEFAULT '{}'"))
         if "last_failed_at" not in columns:
             account_missing_timestamp.append("last_failed_at")
 
@@ -67,19 +71,39 @@ def ensure_schema_columns() -> None:
             if column not in columns:
                 request_audit_missing_text.append((column, definition))
 
-    if not attempt_missing_text and not attempt_missing_timestamp and not account_missing_text and not account_missing_timestamp and not request_audit_missing_text:
+    if attempt_missing_text or attempt_missing_timestamp or account_missing_text or account_missing_timestamp or request_audit_missing_text:
+        with engine.begin() as conn:
+            for column in attempt_missing_text:
+                conn.execute(text(f"ALTER TABLE media_job_attempts ADD COLUMN {column} TEXT NOT NULL DEFAULT '{{}}'"))
+            for column in attempt_missing_timestamp:
+                conn.execute(text(f"ALTER TABLE media_job_attempts ADD COLUMN {column} TIMESTAMP"))
+            for column, definition in account_missing_text:
+                conn.execute(text(f"ALTER TABLE account_resources ADD COLUMN {column} {definition}"))
+            for column in account_missing_timestamp:
+                conn.execute(text(f"ALTER TABLE account_resources ADD COLUMN {column} TIMESTAMP"))
+            for column, definition in request_audit_missing_text:
+                conn.execute(text(f"ALTER TABLE request_audit_logs ADD COLUMN {column} {definition}"))
+    normalize_account_subscription_source_auth_methods(tables)
+
+
+def normalize_account_subscription_source_auth_methods(tables: set[str]) -> None:
+    if "account_subscription_sources" not in tables:
         return
     with engine.begin() as conn:
-        for column in attempt_missing_text:
-            conn.execute(text(f"ALTER TABLE media_job_attempts ADD COLUMN {column} TEXT NOT NULL DEFAULT '{{}}'"))
-        for column in attempt_missing_timestamp:
-            conn.execute(text(f"ALTER TABLE media_job_attempts ADD COLUMN {column} TIMESTAMP"))
-        for column, definition in account_missing_text:
-            conn.execute(text(f"ALTER TABLE account_resources ADD COLUMN {column} {definition}"))
-        for column in account_missing_timestamp:
-            conn.execute(text(f"ALTER TABLE account_resources ADD COLUMN {column} TIMESTAMP"))
-        for column, definition in request_audit_missing_text:
-            conn.execute(text(f"ALTER TABLE request_audit_logs ADD COLUMN {column} {definition}"))
+        conn.execute(
+            text(
+                """
+                UPDATE account_subscription_sources
+                SET auth_method = CASE
+                    WHEN provider_id IN ('openai_image', 'grok', 'midjourney') THEN 'cookie_secret'
+                    ELSE 'agent_provider_credential'
+                END
+                WHERE auth_method IS NULL
+                   OR auth_method = ''
+                   OR auth_method NOT IN ('cookie_secret', 'agent_provider_credential')
+                """
+            )
+        )
 
 
 def get_db():

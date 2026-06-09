@@ -101,7 +101,9 @@ class AccountResource(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     provider_id: Mapped[str] = mapped_column(String(64), ForeignKey("providers.id"), nullable=False)
     label: Mapped[str] = mapped_column(String(120), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     credential_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource_profile_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     supported_operations_json: Mapped[str] = mapped_column(Text, nullable=False)
     supported_provider_models_json: Mapped[str] = mapped_column(Text, nullable=False)
     quota_buckets_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
@@ -117,6 +119,82 @@ class AccountResource(TimestampMixin, Base):
     last_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AccountSubscriptionSource(TimestampMixin, Base):
+    __tablename__ = "account_subscription_sources"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String(64), ForeignKey("providers.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    auth_method: Mapped[str] = mapped_column(String(64), default="agent_provider_credential", nullable=False)
+    subscription_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    content_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    provider_base_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    provider_config_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    default_supported_operations_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    default_supported_provider_models_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    default_quota_buckets_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    default_concurrency_limit: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    default_region: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    default_plan: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    max_items: Mapped[int] = mapped_column(Integer, default=200, nullable=False)
+    fetch_timeout_seconds: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
+    sync_capabilities: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    run_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_sync_status: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    last_sync_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_sync_summary_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    last_preview_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OpenSourceConnectorProject(TimestampMixin, Base):
+    __tablename__ = "open_source_connector_projects"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    repo_url: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
+    owner: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    repo: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    local_path: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    project_type: Mapped[str] = mapped_column(String(64), default="unknown", nullable=False)
+    status: Mapped[str] = mapped_column(String(64), default="discovered", nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(64), default="needs_review", nullable=False)
+    provider_ids_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    platforms_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    models_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    operations_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    auth_types_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    downstream_auth_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    maintenance_status: Mapped[str] = mapped_column(String(64), default="unknown", nullable=False)
+    license: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ConnectorOAuthSession(TimestampMixin, Base):
+    __tablename__ = "connector_oauth_sessions"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String(64), ForeignKey("providers.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    label: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    auth_method: Mapped[str] = mapped_column(String(64), default="agent_provider_credential", nullable=False)
+    connector_base_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    connector_session_id: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    authorize_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    callback_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    credential_ref: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    requested_operations_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    requested_provider_models_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    error_code: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AccountLease(TimestampMixin, Base):

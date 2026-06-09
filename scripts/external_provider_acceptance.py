@@ -27,6 +27,19 @@ DEFAULT_PROVIDER_ENV = {
     "openai_image": "MEDIA2API_OPENAI_IMAGE_KEY",
 }
 
+DEFAULT_PROVIDER_CREDENTIAL_FIELD = {
+    "pollinations": "POLLINATIONS_KEY",
+    "jimeng": "api_key",
+    "seedream_proxy": "api_key",
+    "gemini": "GEMINI_CREDENTIALS",
+    "qwen": "qwen_oauth_credentials",
+    "amux_qwen": "qwen_oauth_credentials",
+    "luma": "LUMA_API_KEY",
+    "runway": "apiKey",
+    "openrouter_image": "OPENROUTER_API_KEY",
+    "fal_replicate": "FAL_KEY",
+}
+
 SENSITIVE_KEYS = {"credential_value", "api_key", "authorization", "token", "password", "value"}
 
 
@@ -95,20 +108,38 @@ def parse_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def named_credential_value(template_id: str, value: str) -> str:
+    field = DEFAULT_PROVIDER_CREDENTIAL_FIELD.get(template_id)
+    raw = str(value or "").strip()
+    if not field or not raw:
+        return raw
+    if "\n" in raw or f"{field}=" in raw or f"{field}:" in raw:
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return json.dumps({field: raw}, ensure_ascii=False)
+    if isinstance(parsed, dict):
+        if field in parsed or field.upper() in parsed:
+            return raw
+        return json.dumps({field: parsed}, ensure_ascii=False)
+    return json.dumps({field: parsed}, ensure_ascii=False)
+
+
 def choose_credential(args: argparse.Namespace) -> tuple[str | None, str | None, str | None]:
     if args.credential_value:
-        return None, args.credential_value, "argument"
+        return None, named_credential_value(args.template_id, args.credential_value), "argument"
     if args.credential_env:
         env_value = os.getenv(args.credential_env)
         if env_value:
-            return None, env_value, f"local_env:{args.credential_env}"
+            return None, named_credential_value(args.template_id, env_value), f"local_env:{args.credential_env}"
         return f"env://{args.credential_env}", None, f"remote_env:{args.credential_env}"
     if args.credential_ref:
         return args.credential_ref, None, "argument_ref"
     default_env = DEFAULT_PROVIDER_ENV.get(args.template_id, "MEDIA2API_CONNECTOR_KEY")
     env_value = os.getenv(default_env)
     if env_value:
-        return None, env_value, f"local_env:{default_env}"
+        return None, named_credential_value(args.template_id, env_value), f"local_env:{default_env}"
     return f"env://{default_env}", None, f"remote_env:{default_env}"
 
 
@@ -245,7 +276,7 @@ def main() -> int:
     parser.add_argument("--credential-ref", default="")
     parser.add_argument("--credential-value", default="")
     parser.add_argument("--credential-env", default="")
-    parser.add_argument("--credential-kind", default="api_key")
+    parser.add_argument("--credential-kind", default="agent_provider")
     parser.add_argument("--account-id", default="")
     parser.add_argument("--account-label", default="")
     parser.add_argument("--concurrency-limit", type=int, default=1)

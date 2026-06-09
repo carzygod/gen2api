@@ -13,7 +13,20 @@ from .config import settings
 from .utils import dumps, loads, new_id
 
 
-ALLOWED_SECRET_KINDS = {"api_key", "bearer_token", "cookie", "custom"}
+ALLOWED_SECRET_KINDS = {
+    "api_key",
+    "bearer_token",
+    "cookie",
+    "cookie_secret",
+    "custom",
+    "subscription",
+    "oauth_reference",
+    "cli_credential",
+    "agent_provider",
+    "web_session",
+    "mcp_config",
+    "self_hosted_endpoint",
+}
 ALLOWED_SECRET_STATUSES = {"active", "disabled"}
 
 
