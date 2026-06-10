@@ -12315,19 +12315,22 @@ def admin_login_html(error: str = "") -> str:
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>media2api 管理后台</title>
       <style>
-        :root {{ color-scheme: dark; --bg:#08090b; --panel:rgba(22,24,28,.72); --panel2:rgba(34,36,42,.58); --line:rgba(255,255,255,.1); --text:#f4f5f7; --muted:#9ca3af; --soft:#d1d5db; }}
+        :root {{ color-scheme: light; --bg:#f4f6f8; --surface:#ffffff; --surface-2:#f8fafc; --line:#d9e1ea; --line-strong:#b7c3d0; --text:#18202a; --muted:#647284; --soft:#334155; --accent:#0f766e; --accent-2:#4338ca; --danger:#b42318; --shadow:0 18px 42px rgba(15,23,42,.12); }}
+        html {{ color-scheme:light !important; background:var(--bg); }}
         * {{ box-sizing:border-box; }}
-        body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:radial-gradient(circle at 50% 0%, #24262c 0, #090a0d 44%, #050608 100%); color:var(--text); }}
-        .shell {{ width:min(430px, calc(100vw - 32px)); padding:28px; border:1px solid var(--line); border-radius:24px; background:linear-gradient(145deg, rgba(32,34,39,.76), rgba(12,13,16,.82)); box-shadow:18px 18px 50px rgba(0,0,0,.55), -14px -14px 36px rgba(255,255,255,.035); backdrop-filter:blur(22px); }}
-        .mark {{ width:46px; height:46px; border-radius:16px; background:linear-gradient(145deg,#2c2f36,#0c0d10); box-shadow:inset 5px 5px 12px rgba(0,0,0,.55), inset -5px -5px 12px rgba(255,255,255,.045); display:grid; place-items:center; margin-bottom:18px; font-weight:800; }}
+        body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }}
+        button,input,select,textarea {{ font:inherit; color-scheme:light; }}
+        .shell {{ width:min(430px, calc(100vw - 32px)); padding:28px; border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); }}
+        .mark {{ width:46px; height:46px; border-radius:8px; background:var(--text); color:#fff; display:grid; place-items:center; margin-bottom:18px; font-weight:800; }}
         h1 {{ margin:0; font-size:26px; letter-spacing:0; }}
         p {{ margin:8px 0 22px; color:var(--muted); line-height:1.55; }}
-        label {{ display:block; margin:14px 0 7px; font-size:12px; color:var(--soft); text-transform:uppercase; }}
-        input {{ width:100%; height:46px; border:1px solid rgba(255,255,255,.08); border-radius:14px; background:rgba(5,6,8,.72); color:var(--text); padding:0 14px; outline:none; box-shadow:inset 5px 5px 14px rgba(0,0,0,.45), inset -4px -4px 12px rgba(255,255,255,.035); }}
-        input:focus {{ border-color:rgba(255,255,255,.25); }}
-        button {{ width:100%; height:46px; margin-top:20px; border:1px solid rgba(255,255,255,.14); border-radius:14px; background:linear-gradient(145deg,#f5f5f5,#b7bcc5); color:#07080a; font-weight:800; cursor:pointer; }}
-        .error {{ margin:14px 0 4px; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:rgba(127,29,29,.32); color:#fecaca; }}
-        .hint {{ margin-top:16px; color:#858b96; font-size:12px; }}
+        label {{ display:block; margin:14px 0 7px; font-size:12px; color:var(--soft); font-weight:700; }}
+        input {{ width:100%; height:46px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); color:var(--text); padding:0 14px; outline:none; }}
+        input:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(15,118,110,.14); background:#fff; }}
+        button {{ width:100%; height:46px; margin-top:20px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; font-weight:800; cursor:pointer; appearance:none; -webkit-appearance:none; }}
+        button:hover {{ background:#115e59; }}
+        .error {{ margin:14px 0 4px; padding:10px 12px; border-radius:8px; border:1px solid #f3b4ad; background:#fff1f0; color:var(--danger); }}
+        .hint {{ margin-top:16px; color:var(--muted); font-size:12px; }}
       </style>
     </head>
     <body>
@@ -12397,11 +12400,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         for method in REFERENCE_AUTH_TYPES
     )
     provider_hint_text = {
-        "gemini": "Gemini / Veo / Nano Banana：按 geminicli2api/CLIProxyAPI 类项目填写 Agent profile 或 credential cache；只有使用外部 wrapper 时才填写 runtime/base_url。",
+        "gemini": "Gemini / Veo / Nano Banana：从 Gemini CLI/Antigravity 的 OAuth 凭据文件或 geminicli2api 的 GEMINI_CREDENTIALS/GOOGLE_APPLICATION_CREDENTIALS 取得授权 JSON；只有使用外部 wrapper 时才填写 runtime/base_url。",
         "kling": "可灵：按 kling-api/mcp-kling/ComfyUI-KLingAI-API 类项目填写 Access Key + Secret Key 或 MCP/Agent config；不要求 Web cookie/JWT。",
         "jimeng": "即梦 / Seedream / Seedance：按 ComfyUI-Jimeng-API/seedance-api 填写 Ark/API key/ref 或 Agent profile；不要求 Web cookie 或通用 base_url。",
         "qwen": "千问 / Qwen：填写 Qwen Code Agent profile/credential cache；使用 CliRelay/CLIProxyAPI 时才填写 runtime/base_url。",
-        "grok": "Grok Imagine：填写 Grok Web/Build cookie/session 或 agent profile；执行器地址不是资源本体。",
+        "grok": "Grok Imagine：从已登录的 grok.com/Grok Build 浏览器会话复制 Cookie header 和同一次请求的 User-Agent；执行器地址不是资源本体。",
         "pollinations": "Pollinations：非首期核心，作为 fallback/Agent 后端时填写 Agent Provider 引用或项目要求的执行端配置。",
         "openai_image": "OpenAI 图像模型：首选 ChatGPT Web cookie/session 或 Codex Agent profile；使用 chatgpt2api/codex-proxy 时才填写执行器地址。",
         "midjourney": "Midjourney：按 midjourney-proxy 字段填写 Discord session、guild、channel；gen2api 账号资源不要求通用 proxy/base_url。",
@@ -12424,12 +12427,18 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     provider_oauth_guides = {
         "gemini": {
             "title": "Gemini / Veo / Nano Banana Agent Provider",
-            "credential_type": "Agent Provider profile / credential reference",
-            "primary_url": "",
-            "console_url": "",
-            "where": "选择 Gemini CLI / Antigravity / Agent Provider profile，或复制对应 helper 输出的 agent:// 或 secret:// 引用；CLI/OAuth/MCP cache 只作为 Agent Provider 内部材料。",
-            "paste": '{"credential_ref":"agent://providers/gemini/acct_01","resource_type":"agent_provider"}',
-            "connector": "Gemini 主线填写 CLI/Agent profile；执行器地址仅在 geminicli2api/CLIProxyAPI 等 wrapper 要求服务地址时填写。",
+            "credential_type": "Gemini OAuth/profile JSON 或 agent:// 引用",
+            "primary_url": "https://console.cloud.google.com/",
+            "console_url": "https://github.com/gzzhongqi/geminicli2api",
+            "where": "先在本机完成 Gemini CLI/Antigravity 授权；默认凭据文件通常在 Windows 的 %USERPROFILE%\\.gemini\\oauth_creds.json，Linux/macOS 的 ~/.gemini/oauth_creds.json。也可以从 geminicli2api 使用的 GEMINI_CREDENTIALS JSON、GOOGLE_APPLICATION_CREDENTIALS 指向的 oauth_creds.json，或 AIClient2API 的 --gemini-oauth-creds-base64/--gemini-oauth-creds-file 取得。",
+            "source_steps": [
+                "方式 A：已登录 Gemini CLI 后，打开 %USERPROFILE%\\.gemini\\oauth_creds.json 或 ~/.gemini/oauth_creds.json，复制整个 JSON，填到授权材料。",
+                "方式 B：如果已有 geminicli2api .env，把 GEMINI_CREDENTIALS 的 JSON 原样复制；若配置 GOOGLE_APPLICATION_CREDENTIALS=oauth_creds.json，则打开该文件复制 JSON。",
+                "方式 C：如果使用 AIClient2API，把 --gemini-oauth-creds-file 指向的文件内容复制；如果只有 --gemini-oauth-creds-base64，复制 base64 字符串并使用 gemini_oauth_creds_base64 字段。",
+                "Google Cloud project id 来自 Google Cloud Console 的项目 ID；只有所选 wrapper 要求 --project-id/GEMINI_PROJECT_ID 时再填。",
+            ],
+            "paste": '{"gemini_oauth_creds_file":"~/.gemini/oauth_creds.json","gemini_project_id":"your-gcp-project-id"}',
+            "connector": "Gemini 主线填写 CLI/Agent profile 或 OAuth credential JSON；Runtime endpoint 仅在 geminicli2api/CLIProxyAPI 等 wrapper 已部署并要求服务地址时填写。",
         },
         "qwen": {
             "title": "Qwen / 千问 Agent Provider",
@@ -12469,12 +12478,18 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         },
         "grok": {
             "title": "Grok Imagine Web Cookie / Agent",
-            "credential_type": "Grok Web/Build cookie/session 或 Agent profile",
-            "primary_url": "",
-            "console_url": "",
-            "where": "导入本人已授权的 Grok Web/Build cookie/session，或登记 Grok Agent/MCP profile。",
-            "paste": '{"credential_ref":"secret://providers/grok/session_01","resource_type":"web_cookie_provider"}',
-            "connector": "Grok 主线填写 Web/Build cookie/session 或 Agent profile；执行器地址仅在外部 runner 要求时填写。",
+            "credential_type": "Grok Web/Build Cookie header + User-Agent",
+            "primary_url": "https://grok.com/",
+            "console_url": "https://github.com/chenyme/grok2api",
+            "where": "打开你本人已登录的 grok.com 或 Grok Build 页面，用浏览器 DevTools 获取同一次会话的 Cookie header 和 User-Agent。grok2api 的 proxy.clearance 手动模式对应 cf_cookies 与 user_agent，两者必须来自同一个浏览器环境。",
+            "source_steps": [
+                "Chrome/Edge：打开 grok.com 并确认能正常使用 Imagine；按 F12 打开 DevTools。",
+                "Network 面板刷新页面，点任意发往 grok.com/x.ai 的请求，在 Request Headers 里复制 Cookie 整行；同一位置复制 User-Agent。",
+                "如果 Network 里没有 Cookie header，可到 Application -> Cookies -> grok.com，复制登录相关 cookie 后拼成 name=value; name2=value2 的 Cookie header。",
+                "把 Cookie header 放入 grok_cookie_or_session，把同一次请求的 User-Agent 放入 user_agent。不要复制别人的 cookie，也不要记录密码、验证码或绕过挑战流程。",
+            ],
+            "paste": '{"grok_cookie_or_session":"cf_clearance=...; other_cookie=...","user_agent":"Mozilla/5.0 ..."}',
+            "connector": "Grok 主线填写 Web/Build cookie/session；执行器地址仅在外部 runner 明确要求时填写。",
         },
         "pollinations": {
             "title": "Pollinations fallback / Agent 后端",
@@ -12582,7 +12597,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         provider_hint_payload[provider.id]["input_requirements"] = requirements
         provider_hint_payload[provider.id]["user_actions"] = actions
         provider_hint_payload[provider.id]["accepted_resource_types"] = guide.get("accepted_resource_types", [])
-        provider_hint_payload[provider.id]["oauth"] = {
+        computed_oauth_guide = {
             "title": guide.get("title") or f"{provider.name} ({provider.id})",
             "credential_type": " / ".join(guide.get("recommended_auth_methods", [])) or "cookie_secret / agent_provider_credential",
             "primary_url": "",
@@ -12599,6 +12614,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             "input_requirements": requirements,
             "opensource_basis": basis,
         }
+        if provider.id in provider_oauth_guides:
+            computed_oauth_guide.update(provider_oauth_guides[provider.id])
+        provider_hint_payload[provider.id]["oauth"] = computed_oauth_guide
     def pill(value: Any) -> str:
         raw_value = "" if value is None else str(value)
         status_map = {
@@ -12728,7 +12746,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("audit", "审计"),
         ("delivery", "交付"),
     ]
-    nav = "".join(f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}">{admin_escape(label)}</button>' for tab_id, label in tabs)
+    nav = "".join(f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}" data-title="{admin_escape(label)}">{admin_escape(label)}</button>' for tab_id, label in tabs)
     return f"""
     <!doctype html>
     <html lang="zh-CN">
@@ -12737,33 +12755,39 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>media2api 管理后台</title>
       <style>
-        :root {{ color-scheme:dark; --bg:#06070a; --panel:rgba(20,22,27,.7); --panel2:rgba(31,33,39,.58); --line:rgba(255,255,255,.09); --text:#f5f5f6; --muted:#9ca3af; --soft:#d7dbe1; --white:#ffffff; }}
+        :root {{ color-scheme:light; --bg:#f4f6f8; --surface:#ffffff; --surface-2:#f8fafc; --surface-3:#edf2f7; --line:#d9e1ea; --line-strong:#b7c3d0; --text:#18202a; --muted:#657386; --soft:#334155; --accent:#0f766e; --accent-2:#4338ca; --amber:#b7791f; --green:#15803d; --red:#b42318; --blue:#2563eb; --shadow:0 10px 28px rgba(15,23,42,.08); }}
+        html {{ color-scheme:light !important; background:var(--bg); }}
         * {{ box-sizing:border-box; }}
-        body {{ margin:0; min-height:100vh; overflow:hidden; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:linear-gradient(145deg,#050608,#111318 45%,#050608); color:var(--text); }}
+        body {{ margin:0; min-height:100vh; overflow:hidden; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }}
+        button,input,select,textarea {{ font:inherit; color-scheme:light; }}
+        button {{ appearance:none; -webkit-appearance:none; color:var(--text); background:var(--surface); }}
         .app {{ display:grid; grid-template-columns:282px 1fr; height:100vh; }}
-        aside {{ padding:22px; border-right:1px solid var(--line); background:rgba(8,9,12,.72); backdrop-filter:blur(22px); box-shadow:20px 0 45px rgba(0,0,0,.35); overflow:auto; }}
+        aside {{ padding:20px; border-right:1px solid var(--line); background:#111827; color:#e5e7eb; overflow:auto; }}
         .brand {{ display:flex; gap:12px; align-items:center; margin-bottom:24px; }}
-        .logo {{ width:42px; height:42px; border-radius:15px; display:grid; place-items:center; font-weight:900; background:linear-gradient(145deg,#2a2d34,#090a0d); box-shadow:inset 5px 5px 12px rgba(0,0,0,.65), inset -4px -4px 10px rgba(255,255,255,.04); }}
+        .logo {{ width:42px; height:42px; border-radius:8px; display:grid; place-items:center; font-weight:900; background:#0f766e; color:#fff; }}
         .brand strong {{ display:block; letter-spacing:0; }}
-        .brand span {{ display:block; color:var(--muted); font-size:12px; margin-top:2px; }}
-        .nav-item {{ width:100%; height:42px; margin:4px 0; text-align:left; color:#cfd3da; border:1px solid transparent; border-radius:13px; padding:0 14px; background:transparent; cursor:pointer; }}
-        .nav-item:hover,.nav-item.active {{ background:linear-gradient(145deg, rgba(44,47,55,.86), rgba(14,15,18,.86)); border-color:rgba(255,255,255,.08); box-shadow:8px 8px 20px rgba(0,0,0,.35), -5px -5px 14px rgba(255,255,255,.025); color:white; }}
+        .brand span {{ display:block; color:#9ca3af; font-size:12px; margin-top:2px; }}
+        .nav-item {{ width:100%; height:40px; margin:3px 0; text-align:left; color:#cbd5e1; border:1px solid transparent; border-radius:8px; padding:0 12px; background:transparent; cursor:pointer; }}
+        .nav-item:hover,.nav-item.active {{ background:#263241; border-color:#374151; color:white; }}
         main {{ overflow:auto; padding:24px; }}
         header {{ min-height:72px; display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }}
         h1 {{ margin:0; font-size:28px; letter-spacing:0; }}
         h2 {{ margin:0 0 14px; font-size:18px; letter-spacing:0; }}
         .sub {{ color:var(--muted); margin-top:6px; }}
-        .logout {{ border:1px solid var(--line); border-radius:13px; height:38px; padding:0 14px; background:rgba(255,255,255,.05); color:white; cursor:pointer; }}
+        .logout {{ border:1px solid var(--line); border-radius:8px; min-height:38px; padding:0 14px; background:var(--surface) !important; color:var(--text) !important; cursor:pointer; }}
+        .logout:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
         .tab {{ display:none; }}
         .tab.active {{ display:block; }}
         .subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; }}
-        .subnav-item {{ border:1px solid #d4d8e1; background:#fff; border-radius:8px; padding:8px 12px; cursor:pointer; }}
-        .subnav-item.active {{ background:#111827; color:#fff; border-color:#111827; }}
+        .subnav-item {{ border:1px solid var(--line); background:var(--surface) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
+        .subnav-item:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
+        .subnav-item.active {{ background:var(--text) !important; color:#fff !important; border-color:var(--text); }}
         .subtab {{ display:none; }}
         .subtab.active {{ display:block; }}
         .session-subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 14px; }}
-        .session-subnav-button {{ border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.06); color:#f8fafc; border-radius:8px; padding:8px 12px; cursor:pointer; }}
-        .session-subnav-button.active {{ background:#e5e7eb; color:#08090b; border-color:#e5e7eb; font-weight:800; }}
+        .session-subnav-button {{ border:1px solid var(--line); background:var(--surface) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
+        .session-subnav-button:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
+        .session-subnav-button.active {{ background:var(--accent-2) !important; color:#fff !important; border-color:var(--accent-2); font-weight:800; }}
         .session-subtab {{ display:none; }}
         .session-subtab.active {{ display:block; }}
         .field-hidden {{ display:none !important; }}
@@ -12771,42 +12795,49 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .disabled-surface input, .disabled-surface textarea, .disabled-surface button {{ cursor:not-allowed; }}
         .guide-grid.compact {{ grid-template-columns:180px 1fr; margin-top:6px; }}
         .grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
-        .metric,.panel {{ border:1px solid var(--line); border-radius:20px; background:linear-gradient(145deg, rgba(34,36,43,.68), rgba(8,9,12,.72)); box-shadow:14px 14px 36px rgba(0,0,0,.42), -9px -9px 24px rgba(255,255,255,.025); backdrop-filter:blur(18px); }}
+        .metric,.panel {{ border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); }}
         .metric {{ min-height:118px; padding:18px; }}
-        .metric span,.eyebrow {{ color:var(--muted); font-size:12px; text-transform:uppercase; }}
+        .metric span,.eyebrow {{ color:var(--muted); font-size:12px; font-weight:700; }}
         .metric strong {{ display:block; font-size:30px; margin:10px 0 6px; }}
-        .metric small {{ color:#b5bac3; }}
+        .metric small {{ color:var(--muted); }}
         .panel {{ padding:18px; margin-top:14px; }}
         .two {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
         table {{ width:100%; border-collapse:collapse; font-size:13px; }}
-        th,td {{ padding:11px 10px; border-bottom:1px solid rgba(255,255,255,.06); text-align:left; vertical-align:top; }}
-        th {{ color:#b8bec8; font-weight:700; }}
-        td {{ color:#edf0f4; }}
-        .pill {{ display:inline-flex; min-height:24px; align-items:center; border-radius:999px; padding:3px 9px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.05); color:#cfd4dc; }}
-        .pill.ok {{ color:#dcfce7; background:rgba(22,101,52,.22); }}
-        .pill.warn {{ color:#fef3c7; background:rgba(146,64,14,.22); }}
+        th,td {{ padding:11px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }}
+        th {{ color:var(--soft); font-weight:800; background:var(--surface-2); }}
+        td {{ color:var(--text); }}
+        tbody tr:hover {{ background:#fbfdff; }}
+        .pill {{ display:inline-flex; min-height:24px; align-items:center; border-radius:999px; padding:3px 9px; border:1px solid var(--line); background:var(--surface-2); color:var(--muted); font-weight:700; }}
+        .pill.ok {{ color:var(--green); background:#ecfdf3; border-color:#b7e4c7; }}
+        .pill.warn {{ color:var(--amber); background:#fff8e6; border-color:#f3d18a; }}
+        .pill.muted {{ color:var(--muted); background:var(--surface-2); }}
         .ops {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }}
-        .op {{ min-height:40px; border:1px solid rgba(255,255,255,.1); border-radius:12px; background:rgba(255,255,255,.055); color:#f8fafc; cursor:pointer; text-align:left; padding:0 11px; }}
-        .op:hover {{ background:rgba(255,255,255,.11); }}
+        .op {{ min-height:40px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2) !important; color:var(--soft) !important; cursor:pointer; text-align:left; padding:0 11px; font-weight:700; }}
+        .op:hover {{ border-color:var(--line-strong); background:var(--surface-3); }}
         .formline {{ display:grid; grid-template-columns:1fr 1fr auto; gap:10px; align-items:end; }}
-        label {{ display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }}
-        input,select,textarea {{ width:100%; min-height:40px; border:1px solid rgba(255,255,255,.09); border-radius:12px; background:rgba(4,5,7,.72); color:white; padding:8px 10px; outline:none; }}
+        label {{ display:block; color:var(--soft); font-size:12px; font-weight:700; margin-bottom:6px; }}
+        input,select,textarea {{ width:100%; min-height:40px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); color:var(--text); padding:8px 10px; outline:none; }}
+        input:focus,select:focus,textarea:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(15,118,110,.14); background:#fff; }}
+        input[readonly] {{ color:var(--muted); background:#eef2f7; }}
         textarea {{ min-height:92px; resize:vertical; }}
-        .primary {{ min-height:40px; border:1px solid rgba(255,255,255,.2); border-radius:12px; background:#e5e7eb; color:#08090b; font-weight:800; padding:0 14px; cursor:pointer; }}
-        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:14px; background:rgba(0,0,0,.38); color:#e7eaf0; max-height:360px; overflow:auto; }}
-        .note {{ color:#aab0bb; line-height:1.55; }}
-        .modal-backdrop {{ display:none; position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.62); backdrop-filter:blur(12px); place-items:center; padding:18px; }}
+        .primary {{ min-height:40px; border:1px solid var(--accent); border-radius:8px; background:var(--accent) !important; color:#fff !important; font-weight:800; padding:0 14px; cursor:pointer; }}
+        .primary:hover {{ background:#115e59; }}
+        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:8px; border:1px solid var(--line); background:#0f172a; color:#dbeafe; max-height:360px; overflow:auto; }}
+        .note {{ color:var(--muted); line-height:1.55; }}
+        .modal-backdrop {{ display:none; position:fixed; inset:0; z-index:20; background:rgba(15,23,42,.46); backdrop-filter:blur(6px); place-items:center; padding:18px; }}
         .modal-backdrop.open {{ display:grid; }}
-        .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:22px; background:linear-gradient(145deg, rgba(32,34,40,.96), rgba(8,9,12,.96)); box-shadow:22px 22px 60px rgba(0,0,0,.58), -12px -12px 30px rgba(255,255,255,.035); padding:22px; }}
-        .modal.wide {{ width:min(980px, 100%); }}
-        .guide-card {{ margin-top:12px; padding:14px; border:1px solid rgba(255,255,255,.09); border-radius:16px; background:rgba(255,255,255,.045); }}
-        .guide-grid {{ display:grid; grid-template-columns:150px 1fr; gap:8px 12px; align-items:start; font-size:13px; line-height:1.55; }}
-        .guide-grid b {{ color:#ffffff; }}
-        .guide-grid span {{ color:#cfd4dc; }}
-        .guide-grid a {{ color:#ffffff; text-decoration:underline; text-underline-offset:3px; word-break:break-all; }}
+        .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:0 24px 70px rgba(15,23,42,.28); padding:22px; }}
+        .modal.wide {{ width:min(1120px, 100%); }}
+        .guide-card {{ margin-top:12px; padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); }}
+        .guide-grid {{ display:grid; grid-template-columns:minmax(190px, 28%) minmax(0, 1fr); gap:8px 12px; align-items:start; font-size:13px; line-height:1.55; }}
+        .guide-grid b {{ color:var(--text); }}
+        .guide-grid span {{ color:var(--soft); }}
+        .guide-grid b,.guide-grid span {{ min-width:0; overflow-wrap:anywhere; }}
+        .guide-grid a {{ color:var(--accent-2); text-decoration:underline; text-underline-offset:3px; word-break:break-all; }}
         .guide-json {{ margin-top:10px; min-height:0; max-height:132px; font-size:12px; }}
-        .steps {{ margin:0; padding-left:20px; color:#e7eaf0; line-height:1.7; }}
-        code {{ color:#fff; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.08); border-radius:7px; padding:1px 5px; }}
+        .steps {{ margin:0; padding-left:20px; color:var(--text); line-height:1.7; }}
+        .mini-steps {{ margin:0; padding-left:18px; color:var(--soft); line-height:1.7; }}
+        code {{ color:#1e293b; background:#e8eef6; border:1px solid var(--line); border-radius:6px; padding:1px 5px; }}
         @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline {{ grid-template-columns:1fr; }} main {{ padding:16px; }} }}
       </style>
     </head>
@@ -12818,7 +12849,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         </aside>
         <main>
           <header>
-            <div><h1>总览</h1><div class="sub">统一管理 t2i / t2v / i2v / 图片编辑反代服务。运行模式：{admin_escape(dashboard["runtime"]["queue_backend"])} · 资产存储：{admin_escape(dashboard["runtime"]["asset_store"])}</div></div>
+            <div><h1 id="page-title">总览</h1><div class="sub">统一管理 t2i / t2v / i2v / 图片编辑反代服务。运行模式：{admin_escape(dashboard["runtime"]["queue_backend"])} · 资产存储：{admin_escape(dashboard["runtime"]["asset_store"])}</div></div>
             <form method="post" action="/admin/logout"><button class="logout" type="submit">退出登录</button></form>
           </header>
 
@@ -13021,16 +13052,16 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <h2>如何导入 Web Cookie / Agent Provider</h2>
           <div class="guide-card">
             <div class="guide-grid">
-              <b>ChatGPT / Grok / Midjourney</b><span>仅当对应开源项目要求网页会话时导入本人已授权的 Web cookie/session；系统保存为 encrypted secret/ref。</span>
-              <b>Gemini / Qwen / Codex</b><span>登记 Agent profile、credential cache、MCP/agent runtime 引用；入库后统一为 Agent Provider。</span>
+              <b>ChatGPT / Grok / Midjourney</b><span>仅当对应开源项目要求网页会话时导入本人已授权的 Web cookie/session。Grok 对应 grok2api 的 <code>proxy.clearance.cf_cookies</code> 与 <code>user_agent</code>：在已登录浏览器 DevTools 的 Network 请求里复制 Cookie header 和同一次请求的 User-Agent。</span>
+              <b>Gemini / Qwen / Codex</b><span>登记本机 CLI/Agent 生成的 OAuth/profile JSON。例如 Gemini 通常读取 <code>%USERPROFILE%\\.gemini\\oauth_creds.json</code> 或 <code>~/.gemini/oauth_creds.json</code>，也可粘贴 geminicli2api 的 <code>GEMINI_CREDENTIALS</code> / <code>GOOGLE_APPLICATION_CREDENTIALS</code> 指向文件内容。</span>
               <b>Midjourney</b><span>按 midjourney-proxy 实际字段填写 Discord session、guild id、channel id；不额外要求通用 proxy/base_url。</span>
               <b>base_url</b><span>只在对应开源项目明确要求执行器/服务地址时填写，不作为所有平台的通用必填项。</span>
               <b>粘贴位置</b><span>Web Cookie 填到“Web Cookie”；Agent profile 填到“Agent Provider”；确有授权助手时才进入“授权会话”。</span>
             </div>
           </div>
           <ol class="steps">
-            <li>先确定平台对应的开源项目实际要求：cookie/session、guild/channel、Agent profile、credential cache、MCP config 或服务地址。</li>
-            <li>按该项目要求只填写相同字段；不额外强迫用户填写反常识的 base_url。</li>
+            <li>先确定平台对应的开源项目实际要求：Grok 这类 Web 方案拿浏览器 Cookie header/User-Agent；Gemini 这类 Agent 方案拿 CLI OAuth/profile JSON。</li>
+            <li>按该项目要求只填写相同字段；不额外强迫用户填写反常识的 base_url。Runtime endpoint 只有外部 wrapper 已部署且明确要求时才填写。</li>
             <li>明文 cookie、session、profile 只在提交瞬间出现，入库后转成 <code>secret://...</code> 或 <code>agent://...</code> 引用。</li>
             <li>如果执行器返回结构化授权结果，把它整理成 JSON，例如 <code>{{"credential_ref":"agent://providers/gemini/acct_01","expires_at":"2026-07-01T00:00:00Z"}}</code>。</li>
             <li>保存后运行账号验收，确认对应图片/视频模型真的可用。</li>
@@ -13057,12 +13088,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             guide.primary_url ? `<a href="${{escapeHtml(guide.primary_url)}}" target="_blank" rel="noreferrer">打开获取入口</a>` : '按平台资源指南导入',
             guide.console_url ? `<a href="${{escapeHtml(guide.console_url)}}" target="_blank" rel="noreferrer">连接器说明</a>` : '',
           ].filter(Boolean).join(' · ');
+          const sourceSteps = Array.isArray(guide.source_steps) ? guide.source_steps : [];
+          const sourceStepsHtml = sourceSteps.length
+            ? `<b>具体获取</b><span><ol class="mini-steps">${{sourceSteps.map(step => `<li>${{escapeHtml(step)}}</li>`).join('')}}</ol></span>`
+            : '';
           return `
             <div class="guide-grid">
               <b>平台</b><span>${{escapeHtml(guide.title || providerId)}}</span>
               <b>要拿什么</b><span>${{escapeHtml(guide.credential_type || 'Web Cookie / Agent Provider')}}</span>
               <b>去哪里拿</b><span>${{links}}</span>
               <b>具体步骤</b><span>${{escapeHtml(guide.where || '')}}</span>
+              ${{sourceStepsHtml}}
               <b>需要填写</b><span><div class="guide-grid compact">${{reqRows}}</div></span>
               <b>填到哪里</b><span>打开“添加平台账号”：Web Cookie 写入授权材料并加密成 secret；Agent Provider 写入 profile/runtime；base_url 只在执行器实际要求时填写。</span>
               <b>连接器建议</b><span>${{escapeHtml(guide.connector || '')}}</span>
@@ -13086,6 +13122,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
           button.classList.add('active');
           document.getElementById('tab-' + button.dataset.tab).classList.add('active');
+          const title = document.getElementById('page-title');
+          if (title) title.textContent = button.dataset.title || button.textContent.trim();
         }}));
         document.querySelectorAll('.subnav-item').forEach(button => button.addEventListener('click', () => {{
           const parent = button.closest('.tab');
@@ -13183,6 +13221,32 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               ? '用于当前平台开源项目要求的 Agent Provider credential/profile、API key/ref、MCP config 或授权 helper 输出。'
               : providerLabel + ' 当前复核不要求 Agent Provider；请使用 Web Cookie 或该平台指南列出的字段。';
           }}
+          const cookieLabel = document.getElementById('cookie-account-label');
+          const cookieDomain = document.getElementById('cookie-domain-scope');
+          if (cookieLabel) {{
+            cookieLabel.placeholder = providerId === 'grok'
+              ? 'Grok Web session 01'
+              : providerId === 'midjourney'
+                ? 'Midjourney Discord session 01'
+                : providerId === 'openai_image'
+                  ? 'ChatGPT cookie 01'
+                  : providerLabel + ' cookie 01';
+          }}
+          if (cookieDomain) {{
+            cookieDomain.placeholder = providerId === 'grok'
+              ? 'grok.com / x.ai'
+              : providerId === 'midjourney'
+                ? 'discord.com'
+                : providerId === 'openai_image'
+                  ? 'chatgpt.com'
+                  : '填写当前网页登录域名';
+          }}
+          const agentLabel = document.getElementById('agent-account-label');
+          if (agentLabel) {{
+            agentLabel.placeholder = providerId === 'gemini'
+              ? 'Gemini CLI profile 01'
+              : providerLabel + ' agent provider 01';
+          }}
         }}
         const runtimeEndpointNamesByScope = {{
           any: ['connector_base_url', 'agent_runtime_endpoint', 'runner_endpoint', 'channel_base_url', 'sdk_runtime_endpoint', 'self_hosted_endpoint'],
@@ -13261,6 +13325,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           }});
           return '按该开源项目字段粘贴明文、secret:// 或 JSON，例如 ' + JSON.stringify(sample);
         }}
+        function credentialSourceSummary(providerId) {{
+          const guide = (providerHints[providerId] || {{}}).oauth || {{}};
+          const steps = Array.isArray(guide.source_steps) ? guide.source_steps : [];
+          return steps.length ? '具体获取：' + steps.join(' ') : '';
+        }}
         function syncCredentialInputHint(labelId, hintId, textareaId, providerId, authMethod, fallbackLabel, fallbackPlaceholder) {{
           const fields = providerCredentialRequirements(providerId, authMethod);
           const label = document.getElementById(labelId);
@@ -13272,7 +13341,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           }}
           if (hint) {{
             const summary = credentialRequirementSummary(providerId, authMethod);
-            hint.textContent = summary || '按当前平台开源项目要求粘贴授权材料；保存后只保留加密引用。';
+            const source = credentialSourceSummary(providerId);
+            hint.textContent = [summary || '按当前平台开源项目要求粘贴授权材料；保存后只保留加密引用。', source].filter(Boolean).join('；');
           }}
           if (textarea) {{
             textarea.placeholder = credentialRequirementPlaceholder(providerId, authMethod, fallbackPlaceholder);
