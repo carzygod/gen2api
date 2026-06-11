@@ -4368,32 +4368,39 @@ def apply_config_import(db: Session, req: ConfigImportRequest) -> dict[str, Any]
                 continue
             credential_ref = str(item.get("credential_ref") or "")
             existing = db.get(models.AccountResource, item_id)
+            label = str(item.get("label") or item_id)
+            provider_id = str(item.get("provider_id") or "")
+            preserving_existing_credential_ref = False
             if is_redacted_value(credential_ref):
                 if existing:
                     credential_ref = existing.credential_ref
+                    preserving_existing_credential_ref = existing.provider_id == provider_id
                 else:
                     record_config_error(summary, "accounts", item_id, "REDACTED_CREDENTIAL_REF_CANNOT_CREATE_ACCOUNT")
                     continue
-            label = str(item.get("label") or item_id)
-            provider_id = str(item.get("provider_id") or "")
+            if existing and existing.provider_id == provider_id and credential_ref == existing.credential_ref:
+                preserving_existing_credential_ref = True
             if req.dry_run:
-                if inline_credential_parts(credential_ref) or credential_ref.startswith(LEGACY_ACCOUNT_REF_PREFIXES):
+                if preserving_existing_credential_ref:
+                    pass
+                elif inline_credential_parts(credential_ref) or credential_ref.startswith(LEGACY_ACCOUNT_REF_PREFIXES):
                     credential_ref = f"secret://secret_{item_id}"
                 elif not credential_ref.startswith(DIRECT_ACCOUNT_REF_PREFIXES):
                     record_config_error(summary, "accounts", item_id, "ACCOUNT_CREDENTIAL_REF_UNSUPPORTED")
                     continue
             else:
-                try:
-                    credential_ref, _ = normalize_account_credential_ref(
-                        db,
-                        account_id=item_id,
-                        provider_id=provider_id,
-                        label=label,
-                        credential_ref=credential_ref,
-                    )
-                except ValueError as exc:
-                    record_config_error(summary, "accounts", item_id, str(exc))
-                    continue
+                if not preserving_existing_credential_ref:
+                    try:
+                        credential_ref, _ = normalize_account_credential_ref(
+                            db,
+                            account_id=item_id,
+                            provider_id=provider_id,
+                            label=label,
+                            credential_ref=credential_ref,
+                        )
+                    except ValueError as exc:
+                        record_config_error(summary, "accounts", item_id, str(exc))
+                        continue
             resource_type = ""
             try:
                 resource_type = validate_provider_resource_type(
@@ -4401,19 +4408,20 @@ def apply_config_import(db: Session, req: ConfigImportRequest) -> dict[str, Any]
                     infer_account_resource_type(provider_id, "", str(item.get("resource_type") or "")),
                     credential_kind=str(item.get("credential_kind") or "custom"),
                 )
-                validate_required_platform_inputs(
-                    provider_id,
-                    auth_method="cookie_secret" if resource_type == "web_cookie_provider" else "agent_provider_credential",
-                    resource_type=resource_type,
-                    resource_profile=item.get("resource_profile") if isinstance(item.get("resource_profile"), dict) else {},
-                    credential_ref=credential_ref,
-                    credential_secret_id=str(item.get("credential_secret_id") or ""),
-                    db=db,
-                )
+                if not preserving_existing_credential_ref:
+                    validate_required_platform_inputs(
+                        provider_id,
+                        auth_method="cookie_secret" if resource_type == "web_cookie_provider" else "agent_provider_credential",
+                        resource_type=resource_type,
+                        resource_profile=item.get("resource_profile") if isinstance(item.get("resource_profile"), dict) else {},
+                        credential_ref=credential_ref,
+                        credential_secret_id=str(item.get("credential_secret_id") or ""),
+                        db=db,
+                    )
                 validate_credential_ref_resource_type(
                     provider_id,
                     resource_type,
-                    str(item.get("credential_ref") or ""),
+                    credential_ref,
                     credential_kind=str(item.get("credential_kind") or "custom"),
                     db=db,
                 )

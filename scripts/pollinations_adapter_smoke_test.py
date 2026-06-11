@@ -112,12 +112,31 @@ def configure_pollinations(client: TestClient, base_url: str) -> None:
     else:
         assert_ok(resp)
 
+    credential_value = json.dumps({"POLLINATIONS_KEY": POLLINATIONS_KEY})
+    secret_payload = {
+        "id": "secret_pollinations_smoke",
+        "name": "Pollinations Smoke Credential",
+        "value": credential_value,
+        "kind": "agent_provider",
+        "provider_id": "pollinations",
+        "account_id": "acct_pollinations_smoke",
+        "metadata": {"source": "pollinations_adapter_smoke_test"},
+        "status": "active",
+    }
+    resp = client.post("/v1/admin/credential-secrets", headers=HEADERS, json=secret_payload)
+    if resp.status_code == 409:
+        assert_ok(client.patch("/v1/admin/credential-secrets/secret_pollinations_smoke", headers=HEADERS, json=secret_payload))
+    else:
+        assert_ok(resp)
+
     account_payload = {
         "id": "acct_pollinations_smoke",
         "provider_id": "pollinations",
         "label": "Pollinations Smoke Account",
-        "credential_ref": f"plain://{POLLINATIONS_KEY}",
+        "resource_type": "agent_provider",
+        "credential_ref": "secret://secret_pollinations_smoke",
         "credential_secret_id": "secret_pollinations_smoke",
+        "credential_kind": "agent_provider",
         "supported_operations": ["text_to_image", "image_to_image"],
         "supported_provider_models": ["seedream"],
         "quota_buckets": [{"type": "external_account", "remaining_estimate": 100, "confidence": 1}],
