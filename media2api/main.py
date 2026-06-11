@@ -12738,6 +12738,67 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         f'<button class="op" data-method="{method}" data-path="{admin_escape(path)}">{admin_escape(label)}</button>'
         for label, method, path in operation_buttons
     )
+
+    def action_controls_for(paths: list[str]) -> str:
+        wanted = set(paths)
+        return "".join(
+            f'<button class="op" data-method="{method}" data-path="{admin_escape(path)}">{admin_escape(label)}</button>'
+            for label, method, path in operation_buttons
+            if path in wanted
+        )
+
+    overview_actions = action_controls_for([
+        "/v1/admin/readiness",
+        "/v1/admin/operator-workbench-report",
+        "/v1/admin/production-go-live-plan",
+        "/v1/admin/jobs?limit=5",
+    ])
+    connector_actions = action_controls_for([
+        "/v1/admin/connector-conformance-report",
+        "/v1/admin/external-connector-preflight",
+        "/v1/admin/connector-registry",
+        "/v1/admin/connector-registry/refresh",
+        "/v1/admin/account-guides",
+        "/v1/admin/account-onboarding/plan",
+        "/v1/admin/account-setup-quickstart",
+        "/v1/admin/external-connector-manifest-template?provider_id=jimeng",
+    ])
+    account_actions = action_controls_for([
+        "/v1/admin/account-guides",
+        "/v1/admin/account-onboarding/plan",
+        "/v1/admin/account-setup-quickstart",
+        "/v1/admin/account-acceptance-suite",
+        "/v1/admin/account-leases/self-test-expiry",
+    ])
+    provider_actions = action_controls_for([
+        "/v1/admin/provider-templates/gemini/activate",
+        "/v1/admin/provider-templates/pollinations/external-acceptance",
+        "/v1/admin/provider-contract-suite",
+        "/v1/admin/providers/gemini/sync-capabilities",
+    ])
+    job_actions = action_controls_for([
+        "/v1/admin/jobs?limit=5",
+        "/v1/admin/media-jobs/self-test-stalled-recovery",
+        "/v1/admin/media-jobs/recover-stalled",
+        "/v1/admin/fallback/self-test",
+    ])
+    asset_actions = action_controls_for([
+        "/v1/admin/assets/self-test-storage",
+    ])
+    audit_actions = action_controls_for([
+        "/v1/admin/acceptance-report",
+        "/v1/admin/operator-workbench-report",
+        "/v1/admin/connector-conformance-report",
+        "/v1/admin/external-connector-preflight",
+    ])
+    delivery_actions = action_controls_for([
+        "/v1/admin/system-requirements-report",
+        "/v1/admin/final-acceptance-matrix",
+        "/v1/admin/delivery-package",
+        "/v1/admin/config-export",
+        "/v1/admin/config-import",
+    ])
+    all_action_controls = operation_controls
     tabs = [
         ("overview", "总览"),
         ("users", "用户与鉴权"),
@@ -12792,6 +12853,19 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .subnav-item.active {{ background:var(--text) !important; color:#fff !important; border-color:var(--text); }}
         .subtab {{ display:none; }}
         .subtab.active {{ display:block; }}
+        .page-intro {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:14px; }}
+        .page-intro .note {{ max-width:780px; margin:0; }}
+        .section-tabs {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--surface); }}
+        .section-tabs .subnav-item {{ margin:0; }}
+        .action-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
+        .action-cluster {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:var(--surface-2); }}
+        .action-cluster h3 {{ margin:0 0 6px; font-size:14px; letter-spacing:0; }}
+        .action-cluster p {{ margin:0 0 10px; color:var(--muted); font-size:12px; line-height:1.5; }}
+        .action-cluster .ops {{ grid-template-columns:1fr; }}
+        .table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); }}
+        .table-wrap table {{ min-width:760px; }}
+        .result-dock {{ margin:18px 0 0; position:sticky; bottom:0; z-index:2; box-shadow:0 -12px 28px rgba(15,23,42,.08); }}
+        .result-dock pre {{ max-height:260px; }}
         .session-subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 14px; }}
         .session-subnav-button {{ border:1px solid var(--line); background:var(--surface) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
         .session-subnav-button:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
@@ -12846,7 +12920,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .steps {{ margin:0; padding-left:20px; color:var(--text); line-height:1.7; }}
         .mini-steps {{ margin:0; padding-left:18px; color:var(--soft); line-height:1.7; }}
         code {{ color:#1e293b; background:#e8eef6; border:1px solid var(--line); border-radius:6px; padding:1px 5px; }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline {{ grid-template-columns:1fr; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -12863,9 +12937,20 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
 
           <section id="tab-overview" class="tab active">
             <div class="grid">{metric_cards}</div>
-            <div class="panel"><h2>操作</h2><div class="eyebrow">真实平台运维 · /v1/media-jobs · 管理动作</div><div class="ops" style="margin-top:12px">{operation_controls}</div></div>
-            <div class="panel"><h2>就绪状态</h2><table><thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead><tbody>{check_rows}</tbody></table></div>
-            <div class="panel"><h2>返回结果</h2><pre id="result">选择一个操作后在这里查看真实接口返回。</pre></div>
+            <div class="panel">
+              <div class="page-intro">
+                <div>
+                  <h2>今日值班视图</h2>
+                  <p class="note">先看服务是否可用、队列是否积压、账号和告警是否异常；更细的账号接入、连接器、任务和交付检查已经拆到对应页面。</p>
+                </div>
+              </div>
+              <div class="action-grid">
+                <div class="action-cluster"><h3>健康巡检</h3><p>确认 API、数据库、队列、外部账号覆盖是否满足当前上线要求。</p><div class="ops">{overview_actions}</div></div>
+                <div class="action-cluster"><h3>快速入口</h3><p>常用接入工作转到专门页面，避免在总览里堆满低频按钮。</p><div class="ops"><button class="op" type="button" id="overview-open-account-wizard">添加平台账号</button><button class="op" type="button" data-jump-tab="connectors">打开连接器</button><button class="op" type="button" data-jump-tab="jobs">查看任务</button><button class="op" type="button" data-jump-tab="delivery">交付检查</button></div></div>
+                <div class="action-cluster"><h3>操作分流</h3><p>验收、配置导出、合同测试、资产自检等低频动作已按使用场景分类。</p><div class="ops"><button class="op" type="button" data-jump-tab="audit">审计报告</button><button class="op" type="button" data-jump-tab="providers">平台运维</button><button class="op" type="button" data-jump-tab="assets">资产检查</button><button class="op" type="button" data-jump-tab="accounts">账号验收</button></div></div>
+              </div>
+            </div>
+            <div class="panel"><h2>就绪状态</h2><div class="table-wrap"><table><thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead><tbody>{check_rows}</tbody></table></div></div>
           </section>
 
           <section id="tab-users" class="tab">
@@ -13006,16 +13091,58 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             </div>
           </section>
 
-          <section id="tab-models" class="tab"><div class="panel"><h2>模型</h2><table><thead><tr><th>ID</th><th>名称</th><th>操作</th><th>计费类</th><th>启用</th></tr></thead><tbody>{model_rows}</tbody></table></div><div class="panel"><h2>模型映射</h2><table><thead><tr><th>逻辑模型</th><th>平台</th><th>平台模型</th><th>操作</th><th>优先级</th><th>启用</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></section>
-          <section id="tab-providers" class="tab"><div class="panel"><h2>平台</h2><p class="note">此处只展示真实平台，测试平台不进入管理台视图。真实平台在启动和页面加载时会统一保持已启用。</p><table><thead><tr><th>ID</th><th>名称</th><th>适配器</th><th>状态</th></tr></thead><tbody>{provider_rows}</tbody></table></div></section>
-          <section id="tab-accounts" class="tab"><div class="panel"><h2>账号池</h2><div class="ops"><button class="primary" type="button" id="open-account-wizard-accounts">添加平台账号</button><button class="op" type="button" data-method="POST" data-path="/v1/admin/account-acceptance-suite">运行账号验收套件</button></div><table style="margin-top:14px"><thead><tr><th>ID</th><th>平台</th><th>标签</th><th>凭据引用</th><th>状态</th><th>租约</th></tr></thead><tbody>{account_rows}</tbody></table></div></section>
-          <section id="tab-jobs" class="tab"><div class="panel"><h2>任务</h2><table><thead><tr><th>ID</th><th>操作</th><th>模型</th><th>平台</th><th>状态</th></tr></thead><tbody>{job_rows}</tbody></table></div></section>
-          <section id="tab-assets" class="tab"><div class="panel"><h2>资产</h2><table><thead><tr><th>ID</th><th>类型</th><th>MIME</th><th>用途</th><th>字节</th></tr></thead><tbody>{asset_rows}</tbody></table></div></section>
-          <section id="tab-billing" class="tab"><div class="panel"><h2>计费</h2><div class="grid">{metric_cards}</div></div></section>
-          <section id="tab-alerts" class="tab"><div class="panel"><h2>告警</h2><table><thead><tr><th>ID</th><th>级别</th><th>标题</th><th>状态</th></tr></thead><tbody>{alert_rows}</tbody></table></div></section>
-          <section id="tab-webhooks" class="tab"><div class="panel"><h2>回调</h2><table><thead><tr><th>ID</th><th>任务</th><th>URL</th><th>状态</th></tr></thead><tbody>{webhook_rows}</tbody></table></div></section>
-          <section id="tab-audit" class="tab"><div class="panel"><h2>审计</h2><p class="note">请求日志、安全事件、连接器合同和验收报告都通过操作区读取真实接口结果。真实平台上线前请先跑连接器一致性和真实平台合同套件。</p></div></section>
-          <section id="tab-delivery" class="tab"><div class="panel"><h2>交付</h2><p class="note">交付包、最终验收矩阵、系统要求报告和配置快照用于发布评审与交接。</p></div></section>
+          <section id="tab-models" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="models-list-pane">逻辑模型</button><button class="subnav-item" type="button" data-subtab="models-mapping-pane">模型映射</button></div>
+            <div class="panel subtab active" id="models-list-pane"><h2>逻辑模型</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>操作</th><th>计费类</th><th>启用</th></tr></thead><tbody>{model_rows}</tbody></table></div></div>
+            <div class="panel subtab" id="models-mapping-pane"><h2>模型映射</h2><p class="note">按优先级查看逻辑模型到真实平台模型的路由关系。</p><div class="table-wrap"><table><thead><tr><th>逻辑模型</th><th>平台</th><th>平台模型</th><th>操作</th><th>优先级</th><th>启用</th></tr></thead><tbody>{mapping_rows}</tbody></table></div></div>
+          </section>
+          <section id="tab-providers" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="providers-list-pane">平台列表</button><button class="subnav-item" type="button" data-subtab="providers-actions-pane">平台操作</button></div>
+            <div class="panel subtab active" id="providers-list-pane"><h2>平台</h2><p class="note">此处只展示真实平台，测试平台不进入管理台视图。真实平台在启动和页面加载时会统一保持已启用。</p><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>适配器</th><th>状态</th></tr></thead><tbody>{provider_rows}</tbody></table></div></div>
+            <div class="panel subtab" id="providers-actions-pane"><h2>平台操作</h2><p class="note">用于模板启用、能力同步、合同套件和真实平台外部验收。</p><div class="ops">{provider_actions}</div></div>
+          </section>
+          <section id="tab-accounts" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="accounts-list-pane">账号池</button><button class="subnav-item" type="button" data-subtab="accounts-actions-pane">验收与租约</button></div>
+            <div class="panel subtab active" id="accounts-list-pane"><h2>账号池</h2><div class="ops"><button class="primary" type="button" id="open-account-wizard-accounts">添加平台账号</button></div><div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>ID</th><th>平台</th><th>标签</th><th>凭据引用</th><th>状态</th><th>租约</th></tr></thead><tbody>{account_rows}</tbody></table></div></div>
+            <div class="panel subtab" id="accounts-actions-pane"><h2>验收与租约</h2><p class="note">保存账号后在这里运行验收、租约自检和账号接入计划，确认它真的能被路由和调用。</p><div class="ops">{account_actions}</div></div>
+          </section>
+          <section id="tab-jobs" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="jobs-list-pane">最近任务</button><button class="subnav-item" type="button" data-subtab="jobs-actions-pane">恢复与诊断</button></div>
+            <div class="panel subtab active" id="jobs-list-pane"><h2>任务</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>操作</th><th>模型</th><th>平台</th><th>状态</th></tr></thead><tbody>{job_rows}</tbody></table></div></div>
+            <div class="panel subtab" id="jobs-actions-pane"><h2>恢复与诊断</h2><p class="note">用于查看任务、恢复停滞任务和验证 fallback 机制。</p><div class="ops">{job_actions}</div></div>
+          </section>
+          <section id="tab-assets" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="assets-list-pane">最近资产</button><button class="subnav-item" type="button" data-subtab="assets-actions-pane">存储自检</button></div>
+            <div class="panel subtab active" id="assets-list-pane"><h2>资产</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>类型</th><th>MIME</th><th>用途</th><th>字节</th></tr></thead><tbody>{asset_rows}</tbody></table></div></div>
+            <div class="panel subtab" id="assets-actions-pane"><h2>存储自检</h2><p class="note">验证本地或 S3 资产写入、读取、签名下载等路径。</p><div class="ops">{asset_actions}</div></div>
+          </section>
+          <section id="tab-billing" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="billing-summary-pane">计费概览</button><button class="subnav-item" type="button" data-subtab="billing-notes-pane">使用说明</button></div>
+            <div class="panel subtab active" id="billing-summary-pane"><h2>计费</h2><div class="grid">{metric_cards}</div></div>
+            <div class="panel subtab" id="billing-notes-pane"><h2>使用说明</h2><p class="note">计费由任务预扣、完成结算、失败退款、provider 成本记录和发票接口组成。详细账单请通过计费接口或导出报告查看。</p></div>
+          </section>
+          <section id="tab-alerts" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="alerts-list-pane">打开告警</button><button class="subnav-item" type="button" data-subtab="alerts-actions-pane">处理建议</button></div>
+            <div class="panel subtab active" id="alerts-list-pane"><h2>告警</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>级别</th><th>标题</th><th>状态</th></tr></thead><tbody>{alert_rows}</tbody></table></div></div>
+            <div class="panel subtab" id="alerts-actions-pane"><h2>处理建议</h2><p class="note">优先处理 auth_required、quota_exhausted、provider health failed 和 circuit open。处理完成后在告警接口中关闭或确认。</p></div>
+          </section>
+          <section id="tab-webhooks" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="webhooks-list-pane">投递记录</button><button class="subnav-item" type="button" data-subtab="webhooks-notes-pane">重试说明</button></div>
+            <div class="panel subtab active" id="webhooks-list-pane"><h2>回调</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>任务</th><th>URL</th><th>状态</th></tr></thead><tbody>{webhook_rows}</tbody></table></div></div>
+            <div class="panel subtab" id="webhooks-notes-pane"><h2>重试说明</h2><p class="note">失败回调可通过 webhook retry 接口重试；生产环境请确认目标 URL allowlist、超时、签名和幂等处理。</p></div>
+          </section>
+          <section id="tab-audit" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="audit-reports-pane">报告</button><button class="subnav-item" type="button" data-subtab="audit-guidance-pane">上线关注点</button></div>
+            <div class="panel subtab active" id="audit-reports-pane"><h2>审计报告</h2><p class="note">请求日志、安全事件、连接器合同和验收报告都通过操作区读取真实接口结果。真实平台上线前请先跑连接器一致性和真实平台合同套件。</p><div class="ops">{audit_actions}</div></div>
+            <div class="panel subtab" id="audit-guidance-pane"><h2>上线关注点</h2><p class="note">关注数据库后端、worker 队列、资产签名密钥、凭据加密密钥、真实 provider 覆盖、账号验收和请求审计是否完整。</p></div>
+          </section>
+          <section id="tab-delivery" class="tab">
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="delivery-package-pane">交付检查</button><button class="subnav-item" type="button" data-subtab="delivery-config-pane">配置快照</button><button class="subnav-item" type="button" data-subtab="delivery-all-actions-pane">全部操作</button></div>
+            <div class="panel subtab active" id="delivery-package-pane"><h2>交付</h2><p class="note">交付包、最终验收矩阵、系统要求报告和配置快照用于发布评审与交接。</p><div class="ops">{delivery_actions}</div></div>
+            <div class="panel subtab" id="delivery-config-pane"><h2>配置快照</h2><p class="note">导出配置用于审计和迁移；导入配置建议先 dry-run，确认不会覆盖生产账号和密钥引用。</p><div class="ops">{action_controls_for(["/v1/admin/config-export", "/v1/admin/config-import"])}</div></div>
+            <div class="panel subtab" id="delivery-all-actions-pane"><h2>全部管理动作</h2><p class="note">完整按钮保留在这里，方便高级运维一次性查找；日常使用建议优先从对应业务页进入。</p><div class="ops">{all_action_controls}</div></div>
+          </section>
+          <div class="panel result-dock"><h2>返回结果</h2><pre id="result">选择一个操作后在这里查看真实接口返回。</pre></div>
         </main>
       </div>
       <div class="modal-backdrop" id="account-wizard">
@@ -13132,6 +13259,21 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           document.getElementById('tab-' + button.dataset.tab).classList.add('active');
           const title = document.getElementById('page-title');
           if (title) title.textContent = button.dataset.title || button.textContent.trim();
+        }}));
+        function activateMainTab(tabId) {{
+          const navButton = document.querySelector('.nav-item[data-tab="' + tabId + '"]');
+          const target = document.getElementById('tab-' + tabId);
+          if (!navButton || !target) return;
+          document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+          document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
+          navButton.classList.add('active');
+          target.classList.add('active');
+          const title = document.getElementById('page-title');
+          if (title) title.textContent = navButton.dataset.title || navButton.textContent.trim();
+          target.scrollIntoView({{ block: 'start' }});
+        }}
+        document.querySelectorAll('[data-jump-tab]').forEach(button => button.addEventListener('click', () => {{
+          activateMainTab(button.dataset.jumpTab);
         }}));
         document.querySelectorAll('.subnav-item').forEach(button => button.addEventListener('click', () => {{
           const parent = button.closest('.tab');
@@ -13571,6 +13713,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           syncRuntimeEndpointFields();
         }});
         document.getElementById('open-account-wizard-from-guide')?.addEventListener('click', openAccountWizard);
+        document.getElementById('overview-open-account-wizard')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard-accounts')?.addEventListener('click', openAccountWizard);
         function selectedProviderId() {{
