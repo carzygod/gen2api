@@ -116,6 +116,62 @@ Production-ready external operation coverage is validated at runtime by:
 - `GET /v1/admin/external-connector-preflight`
 - `GET /v1/admin/final-acceptance-matrix`
 
+## Finalized Reverse Proxy Kernel Scope
+
+The first production connector phase is based on reverse-proxy, Web session,
+CLI OAuth/session, local client credential, and subscription-to-API style
+kernels. Official SDK/API-key-only routes are out of scope for this phase.
+
+Runtime boundaries:
+
+1. The platform must not embed and host third-party reverse-proxy projects as
+   long-running public services.
+2. Selected Go/Node/Python projects may be used as fixed-version,
+   fixed-hash, loopback-only binary/subprocess executors for controlled
+   validation or adapter operation.
+3. The first delivery priority is `/v1/images/*` and `/v1/videos/*`, not text
+   chat, embeddings, or generic agent features.
+
+Selected kernel references:
+
+| Selection | Provider target | Repository | First-phase role |
+|---|---|---|---|
+| `OAI-WEB-01` | `openai_web_session` | `basketikun/chatgpt2api` | ChatGPT Web session image generation/editing |
+| `OAI-CODEX-04` | `openai_codex` | `cnlimiter/codex-manager` | Codex account control and GPT Image 2 validation |
+| `GEM-CLI-02` | `gemini_cli_oauth` | `router-for-me/CLIProxyAPI` | Gemini CLI OAuth plus image/video validation |
+| `GEM-WEB-01` | `gemini_web_session` | `HanaokaYuzu/Gemini-API` | Gemini Web session image/video wrapper |
+| `AG-01` | `antigravity` | `ink1ing/anti-api` | Antigravity account, proxy, and health validation |
+| `GROK-01` | `grok` | `chenyme/grok2api` | Grok Web/session image and video execution |
+| `JM-01` | `jimeng_web_session` | `iptag/jimeng-api` | Jimeng/Dreamina image reverse-proxy path |
+| `DOUBAO-WEB-01` | `doubao_web_session` | `wangchuxiaoji-oss/doubao2api` | Doubao image/video path, separate from Jimeng quotas |
+| `KLING-WEB-01` | `kling_web_session` | `yihong0618/klingCreator` | Kling Web/session video execution |
+| `LUMA-WEB-01` | `luma_web_session` | `yihong0618/LumaDreamCreator` | Luma Web cookie video execution |
+| `MID-01` | `midjourney_discord_session` | `trueai-org/midjourney-proxy` | Midjourney Discord/session task channel |
+| `QWEN-AI-01` | `qwen_ai_web_session` | `Rfym21/Qwen2API` | `qwen.ai` / `chat.qwen.ai` image/video path |
+| `QIANWEN-WEB-01` | `qianwen_web_session` | `kao0312/qianwen2api` | `qianwen.com` / Tongyi Qianwen web path |
+
+Explicit first-phase exclusions:
+
+- `WENXIN`: no selected usable Web/session media kernel in this phase.
+- `SELF`: no self-hosted worker/model route in this phase.
+- `EX`: official SDK/API-key-only and public aggregator API routes are not
+  selected.
+
+Provider split required by the finalized scope:
+
+- `openai_web_session` and `openai_codex` must remain separate.
+- `gemini_cli_oauth`, `gemini_web_session`, and `antigravity` must remain
+  separate.
+- `doubao_web_session` must not share account pools, daily quota accounting, or
+  health state with `jimeng_web_session`.
+- `qwen_ai_web_session` and `qianwen_web_session` must remain separate because
+  `qwen.ai` and `qianwen.com` are different web product entry points.
+
+Detailed selection documents:
+
+- [Reverse proxy kernel selection](docs/反代内核开源仓库选型.md)
+- [Finalized reverse proxy kernel selection](docs/反代内核仓库选型定型文档.md)
+
 ## Local Development
 
 ```powershell
