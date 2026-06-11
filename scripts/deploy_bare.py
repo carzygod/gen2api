@@ -58,13 +58,14 @@ def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def deploy(host: str, user: str, password: str, port: int, remote_dir: str, public_port: int, api_key: str) -> None:
+def deploy(host: str, user: str, password: str, port: int, remote_dir: str, public_port: int, api_key: str, seed_defaults: bool) -> None:
     tarball = make_tarball()
     client = connect(host, user, password, port)
     app_dir = posixpath.join(remote_dir, "media2api")
     data_dir = posixpath.join(remote_dir, "var")
     db_url = "postgresql+psycopg://media2api:media2api@127.0.0.1:5432/media2api"
     redis_url = "__MEDIA2API_REDIS_URL__"
+    seed_defaults_value = "true" if seed_defaults else "false"
     service = f"""[Unit]
 Description=media2api unified media gateway
 After=network.target postgresql.service redis-server.service
@@ -81,6 +82,7 @@ Environment=MEDIA2API_ADMIN_TOKEN=admin-token-{int(time.time())}
 Environment=REDIS_URL={redis_url}
 Environment=MEDIA2API_INLINE_ASYNC=false
 Environment=MEDIA2API_WORKER_CONCURRENCY=2
+Environment=MEDIA2API_SEED_DEFAULTS={seed_defaults_value}
 ExecStart={app_dir}/.venv/bin/python -m uvicorn media2api.main:app --host 0.0.0.0 --port {public_port}
 Restart=always
 RestartSec=3
@@ -104,6 +106,7 @@ Environment=MEDIA2API_ADMIN_TOKEN=admin-token-{int(time.time())}
 Environment=REDIS_URL={redis_url}
 Environment=MEDIA2API_INLINE_ASYNC=false
 Environment=MEDIA2API_WORKER_CONCURRENCY=2
+Environment=MEDIA2API_SEED_DEFAULTS={seed_defaults_value}
 ExecStart={app_dir}/.venv/bin/python -m media2api.worker
 Restart=always
 RestartSec=3
@@ -205,10 +208,11 @@ def main() -> None:
     parser.add_argument("--remote-dir", default=os.getenv("DEPLOY_REMOTE_DIR", "/opt/media2api"))
     parser.add_argument("--public-port", type=int, default=int(os.getenv("MEDIA2API_PORT", "8080")))
     parser.add_argument("--api-key", default=os.getenv("MEDIA2API_BOOTSTRAP_KEY", "dev-admin-key"))
+    parser.add_argument("--seed-defaults", action=argparse.BooleanOptionalAction, default=os.getenv("MEDIA2API_SEED_DEFAULTS", "true").lower() == "true")
     args = parser.parse_args()
     if not args.password:
         parser.error("--password or DEPLOY_PASSWORD is required")
-    deploy(args.host, args.user, args.password, args.port, args.remote_dir, args.public_port, args.api_key)
+    deploy(args.host, args.user, args.password, args.port, args.remote_dir, args.public_port, args.api_key, args.seed_defaults)
 
 
 if __name__ == "__main__":

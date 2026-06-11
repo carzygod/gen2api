@@ -56,7 +56,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
     init_db()
     with SessionLocal() as db:
-        seed_defaults(db)
+        if settings.seed_defaults_enabled:
+            seed_defaults(db)
     concurrency = max(1, settings.worker_concurrency)
     log_event("worker_pool_started", concurrency=concurrency, poll_interval_seconds=settings.worker_poll_interval_seconds)
     if concurrency == 1:

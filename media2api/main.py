@@ -1326,7 +1326,8 @@ def startup() -> None:
     if last_error is not None:
         raise last_error
     with SessionLocal() as db:
-        seed_defaults(db)
+        if settings.seed_defaults_enabled:
+            seed_defaults(db)
         migrate_inline_account_credentials(db)
         scrub_existing_request_audit_queries(db)
 
