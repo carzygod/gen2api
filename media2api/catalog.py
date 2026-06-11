@@ -165,7 +165,7 @@ USER_LIMIT_POLICIES = [
 ]
 
 
-def seed_defaults(db: Session) -> None:
+def ensure_bootstrap_admin(db: Session) -> None:
     user = db.get(models.User, "usr_admin")
     if not user:
         user = models.User(id="usr_admin", email=settings.default_user_email, tier="admin", wallet_balance=100000)
@@ -178,6 +178,13 @@ def seed_defaults(db: Session) -> None:
     api_key = db.query(models.ApiKey).filter(models.ApiKey.key_hash == key_hash).first()
     if not api_key:
         db.add(models.ApiKey(id="key_admin", user_id="usr_admin", name="bootstrap", key_hash=key_hash))
+    else:
+        api_key.user_id = "usr_admin"
+        api_key.status = "active"
+
+
+def seed_defaults(db: Session) -> None:
+    ensure_bootstrap_admin(db)
 
     for model_id, display, operations, billing_class in LOGICAL_MODELS:
         item = db.get(models.LogicalModel, model_id)

@@ -25,7 +25,7 @@ from sqlalchemy import case, func, or_, text
 from sqlalchemy.orm import Session
 
 from . import models
-from .catalog import LOGICAL_MODELS, TARGET_MODEL_TABLE, seed_defaults
+from .catalog import LOGICAL_MODELS, TARGET_MODEL_TABLE, ensure_bootstrap_admin, seed_defaults
 from .config import settings
 from .database import SessionLocal, get_db, init_db
 from .security import AuthContext, extract_api_key, hash_api_key, is_admin_user, require_admin, require_auth
@@ -1326,6 +1326,8 @@ def startup() -> None:
     if last_error is not None:
         raise last_error
     with SessionLocal() as db:
+        ensure_bootstrap_admin(db)
+        db.commit()
         if settings.seed_defaults_enabled:
             seed_defaults(db)
         migrate_inline_account_credentials(db)
