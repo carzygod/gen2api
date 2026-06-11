@@ -171,6 +171,7 @@ Detailed selection documents:
 
 - [Reverse proxy kernel selection](docs/反代内核开源仓库选型.md)
 - [Finalized reverse proxy kernel selection](docs/反代内核仓库选型定型文档.md)
+- [Reverse proxy kernel runtime guide](docs/反代内核运行时接入指南.md)
 
 ## Local Development
 

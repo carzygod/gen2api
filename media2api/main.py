@@ -38,6 +38,7 @@ from .services_connector_registry import ACCOUNT_RESOURCE_TYPES, ConnectorRegist
 from .services_core import ACTIVE_ATTEMPT_STATUSES, JobRuntime, UNLEASED_STALLED_JOB_STATUSES, account_credential_available, quota_remaining
 from .services_governance import GovernanceService
 from .services_oauth_sessions import ConnectorOAuthSessionService
+from .services_proxy_kernels import ProxyKernelRuntimeService
 from .services_secrets import SecretService, serialize_secret
 from .services_webhooks import WebhookService
 from .providers import ASSET_PAYLOAD_FIELDS, CONNECTOR_REFERENCE_PREFIXES, DEFAULT_OUTPUT_PATHS, DEFAULT_STATUS_PATHS, DEFAULT_TASK_ID_PATHS, ProviderContext, connector_reference_only, get_provider
@@ -56,6 +57,7 @@ webhook_service = WebhookService()
 connector_registry_service = ConnectorRegistryService()
 account_import_service = AccountSubscriptionImportService(REFERENCE_AUTH_TYPES)
 oauth_session_service = ConnectorOAuthSessionService()
+proxy_kernel_service = ProxyKernelRuntimeService()
 
 EXTERNAL_ACCEPTANCE_REFERENCE_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNkaGAAAAACAAH0nWNTAAAAAElFTkSuQmCC"
@@ -1199,6 +1201,22 @@ class ContractSuiteRequest(BaseModel):
 class ProviderCapabilitySyncRequest(BaseModel):
     endpoint: str | None = None
     timeout_seconds: float | None = None
+
+
+class ProxyKernelReleaseInstallRequest(BaseModel):
+    expected_sha256: str = ""
+    asset_name: str | None = None
+    tag_name: str | None = None
+    force: bool = False
+
+
+class ProxyKernelRuntimeRegisterRequest(BaseModel):
+    base_url: str
+    version: str = ""
+    binary_path: str = ""
+    sha256: str = ""
+    notes: str = ""
+    update_provider_base_url: bool = True
 
 
 class TemplateInstallRequest(BaseModel):
@@ -7223,6 +7241,12 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/connector-registry/refresh"),
     ("GET", "/v1/admin/connector-registry/{project_id}/blueprint"),
     ("POST", "/v1/admin/connector-registry/{project_id}/blueprint/apply"),
+    ("GET", "/v1/admin/proxy-kernels"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
     ("GET", "/v1/admin/account-guides"),
     ("GET", "/v1/admin/account-guides/{provider_id}"),
     ("POST", "/v1/admin/account-onboarding/plan"),
@@ -7440,6 +7464,20 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 "blueprint_contract": "project -> provider manifest -> authorized resource import/session capture -> production preflight commands",
             },
             action_items=[] if connector_project_count else [{"check": "connector_registry_scan", "detail": {"message": "Run /v1/admin/connector-registry/refresh after cloning res-repo."}}],
+        ),
+        module_row(
+            "ProxyKernels",
+            "Track finalized reverse-proxy kernels, release binaries, hash verification, loopback runtime registration, and direct-use blockers.",
+            [
+                ("GET", "/v1/admin/proxy-kernels"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
+            ],
+            proxy_kernel_service.list_kernels(db)["summary"],
+            action_items=[{"check": "proxy_kernel_runtime", "detail": {"message": "Import real accounts and register verified loopback runtimes before marking providers production usable."}}],
         ),
         module_row(
             "AccountSetupWorkflows",
@@ -13154,6 +13192,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("外部连接器预检", "GET", "/v1/admin/external-connector-preflight"),
         ("开源连接器清单", "GET", "/v1/admin/connector-registry"),
         ("刷新开源连接器清单", "POST", "/v1/admin/connector-registry/refresh"),
+        ("反代内核清单", "GET", "/v1/admin/proxy-kernels"),
+        ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
+        ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("账号添加指南", "GET", "/v1/admin/account-guides"),
         ("平台输入要求", "GET", "/v1/admin/platform-input-requirements"),
         ("生成接入计划", "POST", "/v1/admin/account-onboarding/plan"),
@@ -13204,6 +13245,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/external-connector-preflight",
         "/v1/admin/connector-registry",
         "/v1/admin/connector-registry/refresh",
+        "/v1/admin/proxy-kernels",
+        "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/account-guides",
         "/v1/admin/platform-input-requirements",
         "/v1/admin/account-onboarding/plan",
@@ -13225,6 +13268,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/account-guides/doubao_web_session",
         "/v1/admin/account-guides/qwen_ai_web_session",
         "/v1/admin/account-guides/qianwen_web_session",
+        "/v1/admin/proxy-kernels",
+        "/v1/admin/proxy-kernels/openai_web_session/release-probe",
+        "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/provider-contract-suite",
         "/v1/admin/account-acceptance-suite",
     ])
@@ -18238,6 +18284,100 @@ def admin_provider_connector_runtime(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return build_connector_runtime_diagnostics(db, provider_id, account_id=account_id)
+
+
+@app.get("/v1/admin/proxy-kernels")
+def admin_proxy_kernels(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return proxy_kernel_service.list_kernels(db)
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}")
+def admin_proxy_kernel(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.kernel_summary(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/release-probe")
+def admin_proxy_kernel_release_probe(provider_id: str, ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.probe_release(provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/install-release")
+def admin_proxy_kernel_install_release(
+    provider_id: str,
+    req: ProxyKernelReleaseInstallRequest,
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.install_release(
+            provider_id=provider_id,
+            expected_sha256=req.expected_sha256,
+            asset_name=req.asset_name,
+            tag_name=req.tag_name,
+            force=req.force,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "hash_policy": "expected_sha256 is mandatory for managed release artifacts"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/register-runtime")
+def admin_proxy_kernel_register_runtime(
+    provider_id: str,
+    req: ProxyKernelRuntimeRegisterRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = proxy_kernel_service.register_runtime(
+            provider_id=provider_id,
+            base_url=req.base_url,
+            version=req.version,
+            binary_path=req.binary_path,
+            sha256=req.sha256,
+            notes=req.notes,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "managed runtime endpoints must be http(s) loopback only"}) from exc
+
+    if req.update_provider_base_url:
+        provider = db.get(models.Provider, provider_id) or ensure_provider_from_template(db, provider_id, status="disabled")
+        if not provider:
+            raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
+        config = provider_runtime_config(provider_id, loads(provider.base_config_json, {}))
+        config["base_url"] = validate_provider_base_url_input(provider_id, req.base_url)
+        provider.base_config_json = dumps(config)
+        db.commit()
+        result["provider"] = serialize_provider(provider)
+    return result
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/clear-runtime")
+def admin_proxy_kernel_clear_runtime(
+    provider_id: str,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = proxy_kernel_service.clear_runtime(provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    provider = db.get(models.Provider, provider_id)
+    if provider:
+        config = provider_runtime_config(provider_id, loads(provider.base_config_json, {}))
+        config.pop("base_url", None)
+        provider.base_config_json = dumps(config)
+        db.commit()
+        result["provider"] = serialize_provider(provider)
+    return result
 
 
 @app.post("/v1/admin/providers/{provider_id}/sync-quotas")

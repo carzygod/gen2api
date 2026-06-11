@@ -916,7 +916,41 @@ print(job["outputs"][0]["url"])
 - OpenAI Images API reference: https://developers.openai.com/api/reference/resources/images/methods/generate/
 - OpenAI GPT Image 2 model page: https://developers.openai.com/api/docs/models/gpt-image-2
 
-## 11. 生产可用性检查
+## 11. 反代内核运行时
+
+定型 provider 需要同时满足账号、执行内核和真实样本验收。管理员可先查看内核状态：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+探测某个定型仓库是否有 GitHub release：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/release-probe" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+下载 release 必须带 `expected_sha256`：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/install-release" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"asset_name":"example-linux-amd64.tar.gz","expected_sha256":"64位十六进制sha256"}'
+```
+
+启动已校验的执行器后，只能登记 loopback 地址：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/register-runtime" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"base_url":"http://127.0.0.1:19081","version":"vX.Y.Z","sha256":"64位十六进制sha256"}'
+```
+
+## 12. 生产可用性检查
 
 调用真实外部 provider 前，建议管理员先检查：
 
@@ -942,9 +976,9 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 
 如果 `core_ready=true` 但 `production_ready=false`，说明系统框架、队列、资产、账单、审计等核心链路可用，但真实外部生成账号或 connector 尚未覆盖生产要求。
 
-## 12. 接口速查表
+## 13. 接口速查表
 
-### 12.1 公开/用户侧
+### 13.1 公开/用户侧
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -978,7 +1012,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | `GET` | `/v1/request-logs` | 请求日志 |
 | `GET` | `/v1/governance/limits` | 治理限制 |
 
-### 12.2 管理员侧
+### 13.2 管理员侧
 
 管理员侧接口较多，按模块使用：
 
@@ -987,6 +1021,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |
