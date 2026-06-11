@@ -12323,21 +12323,21 @@ def admin_login_html(error: str = "") -> str:
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>media2api 管理后台</title>
       <style>
-        :root {{ color-scheme: light; --bg:#f4f6f8; --surface:#ffffff; --surface-2:#f8fafc; --line:#d9e1ea; --line-strong:#b7c3d0; --text:#18202a; --muted:#647284; --soft:#334155; --accent:#0f766e; --accent-2:#4338ca; --danger:#b42318; --shadow:0 18px 42px rgba(15,23,42,.12); }}
-        html {{ color-scheme:light !important; background:var(--bg); }}
+        :root {{ color-scheme: dark; --bg:#07090d; --surface:#11151c; --surface-2:#171c25; --line:#2b3444; --line-strong:#455165; --text:#f4f7fb; --muted:#93a0b3; --soft:#cbd5e1; --accent:#36c6a1; --accent-2:#8aa4ff; --danger:#ff7b72; --shadow:0 24px 70px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03); }}
+        html {{ color-scheme:dark !important; background:var(--bg); }}
         * {{ box-sizing:border-box; }}
-        body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }}
-        button,input,select,textarea {{ font:inherit; color-scheme:light; }}
+        body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:radial-gradient(circle at 18% 0%, rgba(54,198,161,.12), transparent 30%), linear-gradient(135deg,#050608,#0a0d13 52%,#0d1118); color:var(--text); }}
+        button,input,select,textarea {{ font:inherit; color-scheme:dark; }}
         .shell {{ width:min(430px, calc(100vw - 32px)); padding:28px; border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); }}
-        .mark {{ width:46px; height:46px; border-radius:8px; background:var(--text); color:#fff; display:grid; place-items:center; margin-bottom:18px; font-weight:800; }}
+        .mark {{ width:46px; height:46px; border-radius:8px; background:linear-gradient(145deg,#1f3a36,#0e151d); border:1px solid #2b554c; color:#fff; display:grid; place-items:center; margin-bottom:18px; font-weight:800; }}
         h1 {{ margin:0; font-size:26px; letter-spacing:0; }}
         p {{ margin:8px 0 22px; color:var(--muted); line-height:1.55; }}
         label {{ display:block; margin:14px 0 7px; font-size:12px; color:var(--soft); font-weight:700; }}
-        input {{ width:100%; height:46px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); color:var(--text); padding:0 14px; outline:none; }}
-        input:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(15,118,110,.14); background:#fff; }}
-        button {{ width:100%; height:46px; margin-top:20px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; font-weight:800; cursor:pointer; appearance:none; -webkit-appearance:none; }}
-        button:hover {{ background:#115e59; }}
-        .error {{ margin:14px 0 4px; padding:10px 12px; border-radius:8px; border:1px solid #f3b4ad; background:#fff1f0; color:var(--danger); }}
+        input {{ width:100%; height:46px; border:1px solid var(--line); border-radius:8px; background:#0d1118; color:var(--text); padding:0 14px; outline:none; }}
+        input:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(54,198,161,.14); background:#101721; }}
+        button {{ width:100%; height:46px; margin-top:20px; border:1px solid rgba(54,198,161,.55); border-radius:8px; background:linear-gradient(145deg,#2ab38f,#1b806f); color:#06110f; font-weight:900; cursor:pointer; appearance:none; -webkit-appearance:none; }}
+        button:hover {{ background:#36c6a1; }}
+        .error {{ margin:14px 0 4px; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,123,114,.42); background:rgba(255,123,114,.1); color:var(--danger); }}
         .hint {{ margin-top:16px; color:var(--muted); font-size:12px; }}
       </style>
     </head>
@@ -12366,6 +12366,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     dashboard = admin_dashboard_snapshot(db)
     readiness = build_readiness_snapshot(db)
     users = db.query(models.User).order_by(models.User.created_at.desc()).limit(8).all()
+    api_keys = db.query(models.ApiKey).order_by(models.ApiKey.created_at.desc()).limit(12).all()
     providers = db.query(models.Provider).filter(models.Provider.id != "mock").order_by(models.Provider.id.asc()).limit(20).all()
     accounts = db.query(models.AccountResource).filter(models.AccountResource.provider_id != "mock").order_by(models.AccountResource.provider_id.asc(), models.AccountResource.id.asc()).limit(20).all()
     models_rows = db.query(models.LogicalModel).order_by(models.LogicalModel.id.asc()).limit(10).all()
@@ -12658,6 +12659,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ]
     )
     user_rows = "".join(f"<tr><td>{admin_escape(user.id)}</td><td>{admin_escape(user.email)}</td><td>{pill(user.status)}</td><td>{admin_escape(user.tier)}</td><td>{admin_escape(user.wallet_balance)}</td></tr>" for user in users)
+    api_key_rows = "".join(
+        f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.user_id)}</td><td>{admin_escape(item.name)}</td><td>{pill(item.status)}</td><td>{admin_escape(item.created_at.isoformat() + 'Z' if item.created_at else '-')}</td></tr>"
+        for item in api_keys
+    )
+    if not api_key_rows:
+        api_key_rows = '<tr><td colspan="5">暂无调用密钥。创建用户后在“创建密钥”页签里生成下游 API Key。</td></tr>'
     provider_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.name)}</td><td>{admin_escape(item.adapter_type)}</td><td>{pill(item.status)}</td></tr>" for item in providers)
     account_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.label)}</td><td>{admin_escape(item.credential_ref)}</td><td>{pill(item.status)}</td><td>{admin_escape(item.current_leases)}/{admin_escape(item.concurrency_limit)}</td></tr>" for item in accounts)
     model_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.display_name)}</td><td>{admin_escape(item.operations_json)}</td><td>{admin_escape(item.billing_class)}</td><td>{pill('enabled' if item.enabled else 'disabled')}</td></tr>" for item in models_rows)
@@ -12824,52 +12831,52 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>media2api 管理后台</title>
       <style>
-        :root {{ color-scheme:light; --bg:#f4f6f8; --surface:#ffffff; --surface-2:#f8fafc; --surface-3:#edf2f7; --line:#d9e1ea; --line-strong:#b7c3d0; --text:#18202a; --muted:#657386; --soft:#334155; --accent:#0f766e; --accent-2:#4338ca; --amber:#b7791f; --green:#15803d; --red:#b42318; --blue:#2563eb; --shadow:0 10px 28px rgba(15,23,42,.08); }}
-        html {{ color-scheme:light !important; background:var(--bg); }}
+        :root {{ color-scheme:dark; --bg:#07090d; --surface:#11151c; --surface-2:#171c25; --surface-3:#202735; --surface-raised:#151a23; --line:#2b3444; --line-strong:#455165; --text:#f4f7fb; --muted:#93a0b3; --soft:#cbd5e1; --accent:#36c6a1; --accent-2:#8aa4ff; --amber:#f4bf63; --green:#66d484; --red:#ff7b72; --blue:#7aa2ff; --shadow:0 18px 38px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.03); --shadow-soft:10px 10px 24px rgba(0,0,0,.28), -8px -8px 18px rgba(255,255,255,.025); }}
+        html {{ color-scheme:dark !important; background:var(--bg); }}
         * {{ box-sizing:border-box; }}
-        body {{ margin:0; min-height:100vh; overflow:hidden; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }}
-        button,input,select,textarea {{ font:inherit; color-scheme:light; }}
+        body {{ margin:0; min-height:100vh; overflow:hidden; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:radial-gradient(circle at 14% 0%, rgba(54,198,161,.08), transparent 30%), linear-gradient(135deg,#050608,#0a0d13 52%,#0d1118); color:var(--text); }}
+        button,input,select,textarea {{ font:inherit; color-scheme:dark; }}
         button {{ appearance:none; -webkit-appearance:none; color:var(--text); background:var(--surface); }}
         .app {{ display:grid; grid-template-columns:282px 1fr; height:100vh; }}
-        aside {{ padding:20px; border-right:1px solid var(--line); background:#111827; color:#e5e7eb; overflow:auto; }}
+        aside {{ padding:20px; border-right:1px solid var(--line); background:linear-gradient(180deg,#0a0d13,#11151d); color:#e5e7eb; overflow:auto; box-shadow:inset -1px 0 0 rgba(255,255,255,.02); }}
         .brand {{ display:flex; gap:12px; align-items:center; margin-bottom:24px; }}
-        .logo {{ width:42px; height:42px; border-radius:8px; display:grid; place-items:center; font-weight:900; background:#0f766e; color:#fff; }}
+        .logo {{ width:42px; height:42px; border-radius:8px; display:grid; place-items:center; font-weight:900; background:linear-gradient(145deg,#1f3a36,#0e151d); color:#fff; border:1px solid #2b554c; box-shadow:var(--shadow-soft); }}
         .brand strong {{ display:block; letter-spacing:0; }}
-        .brand span {{ display:block; color:#9ca3af; font-size:12px; margin-top:2px; }}
-        .nav-item {{ width:100%; height:40px; margin:3px 0; text-align:left; color:#cbd5e1; border:1px solid transparent; border-radius:8px; padding:0 12px; background:transparent; cursor:pointer; }}
-        .nav-item:hover,.nav-item.active {{ background:#263241; border-color:#374151; color:white; }}
+        .brand span {{ display:block; color:var(--muted); font-size:12px; margin-top:2px; }}
+        .nav-item {{ width:100%; height:40px; margin:3px 0; text-align:left; color:#aeb8c8; border:1px solid transparent; border-radius:8px; padding:0 12px; background:transparent; cursor:pointer; }}
+        .nav-item:hover,.nav-item.active {{ background:#1b222e; border-color:#2e3a4d; color:white; box-shadow:inset 0 1px 0 rgba(255,255,255,.04); }}
         main {{ overflow:auto; padding:24px; }}
         header {{ min-height:72px; display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }}
         h1 {{ margin:0; font-size:28px; letter-spacing:0; }}
         h2 {{ margin:0 0 14px; font-size:18px; letter-spacing:0; }}
         .sub {{ color:var(--muted); margin-top:6px; }}
-        .logout {{ border:1px solid var(--line); border-radius:8px; min-height:38px; padding:0 14px; background:var(--surface) !important; color:var(--text) !important; cursor:pointer; }}
-        .logout:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
+        .logout {{ border:1px solid var(--line); border-radius:8px; min-height:38px; padding:0 14px; background:var(--surface-2) !important; color:var(--text) !important; cursor:pointer; box-shadow:var(--shadow); }}
+        .logout:hover {{ border-color:var(--line-strong); background:var(--surface-3); }}
         .tab {{ display:none; }}
         .tab.active {{ display:block; }}
         .subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; }}
-        .subnav-item {{ border:1px solid var(--line); background:var(--surface) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
+        .subnav-item {{ border:1px solid var(--line); background:var(--surface-2) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
         .subnav-item:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
-        .subnav-item.active {{ background:var(--text) !important; color:#fff !important; border-color:var(--text); }}
+        .subnav-item.active {{ background:#eef3f8 !important; color:#111827 !important; border-color:#f8fafc; }}
         .subtab {{ display:none; }}
         .subtab.active {{ display:block; }}
         .page-intro {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:14px; }}
         .page-intro .note {{ max-width:780px; margin:0; }}
-        .section-tabs {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--surface); }}
+        .section-tabs {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; padding:8px; border:1px solid var(--line); border-radius:8px; background:rgba(17,21,28,.82); box-shadow:var(--shadow); }}
         .section-tabs .subnav-item {{ margin:0; }}
         .action-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
-        .action-cluster {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:var(--surface-2); }}
+        .action-cluster {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:linear-gradient(145deg,#171c25,#11161f); box-shadow:var(--shadow-soft); }}
         .action-cluster h3 {{ margin:0 0 6px; font-size:14px; letter-spacing:0; }}
         .action-cluster p {{ margin:0 0 10px; color:var(--muted); font-size:12px; line-height:1.5; }}
         .action-cluster .ops {{ grid-template-columns:1fr; }}
         .table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); }}
         .table-wrap table {{ min-width:760px; }}
-        .result-dock {{ margin:18px 0 0; position:sticky; bottom:0; z-index:2; box-shadow:0 -12px 28px rgba(15,23,42,.08); }}
+        .result-dock {{ margin:18px 0 0; position:sticky; bottom:0; z-index:2; box-shadow:0 -16px 38px rgba(0,0,0,.38); }}
         .result-dock pre {{ max-height:260px; }}
         .session-subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 14px; }}
-        .session-subnav-button {{ border:1px solid var(--line); background:var(--surface) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
+        .session-subnav-button {{ border:1px solid var(--line); background:var(--surface-2) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
         .session-subnav-button:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
-        .session-subnav-button.active {{ background:var(--accent-2) !important; color:#fff !important; border-color:var(--accent-2); font-weight:800; }}
+        .session-subnav-button.active {{ background:#eef3f8 !important; color:#111827 !important; border-color:#f8fafc; font-weight:800; }}
         .session-subtab {{ display:none; }}
         .session-subtab.active {{ display:block; }}
         .field-hidden {{ display:none !important; }}
@@ -12877,7 +12884,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .disabled-surface input, .disabled-surface textarea, .disabled-surface button {{ cursor:not-allowed; }}
         .guide-grid.compact {{ grid-template-columns:180px 1fr; margin-top:6px; }}
         .grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
-        .metric,.panel {{ border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); }}
+        .metric,.panel {{ border:1px solid var(--line); border-radius:8px; background:rgba(17,21,28,.92); box-shadow:var(--shadow); }}
         .metric {{ min-height:118px; padding:18px; }}
         .metric span,.eyebrow {{ color:var(--muted); font-size:12px; font-weight:700; }}
         .metric strong {{ display:block; font-size:30px; margin:10px 0 6px; }}
@@ -12886,31 +12893,31 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .two {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
         table {{ width:100%; border-collapse:collapse; font-size:13px; }}
         th,td {{ padding:11px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }}
-        th {{ color:var(--soft); font-weight:800; background:var(--surface-2); }}
+        th {{ color:var(--soft); font-weight:800; background:#161b24; }}
         td {{ color:var(--text); }}
-        tbody tr:hover {{ background:#fbfdff; }}
+        tbody tr:hover {{ background:#171d28; }}
         .pill {{ display:inline-flex; min-height:24px; align-items:center; border-radius:999px; padding:3px 9px; border:1px solid var(--line); background:var(--surface-2); color:var(--muted); font-weight:700; }}
-        .pill.ok {{ color:var(--green); background:#ecfdf3; border-color:#b7e4c7; }}
-        .pill.warn {{ color:var(--amber); background:#fff8e6; border-color:#f3d18a; }}
+        .pill.ok {{ color:var(--green); background:rgba(102,212,132,.12); border-color:rgba(102,212,132,.34); }}
+        .pill.warn {{ color:var(--amber); background:rgba(244,191,99,.12); border-color:rgba(244,191,99,.34); }}
         .pill.muted {{ color:var(--muted); background:var(--surface-2); }}
         .ops {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }}
-        .op {{ min-height:40px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2) !important; color:var(--soft) !important; cursor:pointer; text-align:left; padding:0 11px; font-weight:700; }}
-        .op:hover {{ border-color:var(--line-strong); background:var(--surface-3); }}
+        .op {{ min-height:40px; border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#1a202b,#131820) !important; color:var(--soft) !important; cursor:pointer; text-align:left; padding:0 11px; font-weight:700; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }}
+        .op:hover {{ border-color:var(--line-strong); background:var(--surface-3) !important; }}
         .formline {{ display:grid; grid-template-columns:1fr 1fr auto; gap:10px; align-items:end; }}
         label {{ display:block; color:var(--soft); font-size:12px; font-weight:700; margin-bottom:6px; }}
-        input,select,textarea {{ width:100%; min-height:40px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); color:var(--text); padding:8px 10px; outline:none; }}
-        input:focus,select:focus,textarea:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(15,118,110,.14); background:#fff; }}
-        input[readonly] {{ color:var(--muted); background:#eef2f7; }}
+        input,select,textarea {{ width:100%; min-height:40px; border:1px solid var(--line); border-radius:8px; background:#0d1118; color:var(--text); padding:8px 10px; outline:none; }}
+        input:focus,select:focus,textarea:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(54,198,161,.14); background:#101721; }}
+        input[readonly] {{ color:var(--muted); background:#0a0e14; }}
         textarea {{ min-height:92px; resize:vertical; }}
-        .primary {{ min-height:40px; border:1px solid var(--accent); border-radius:8px; background:var(--accent) !important; color:#fff !important; font-weight:800; padding:0 14px; cursor:pointer; }}
-        .primary:hover {{ background:#115e59; }}
-        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:8px; border:1px solid var(--line); background:#0f172a; color:#dbeafe; max-height:360px; overflow:auto; }}
+        .primary {{ min-height:40px; border:1px solid rgba(54,198,161,.55); border-radius:8px; background:linear-gradient(145deg,#2ab38f,#1b806f) !important; color:#06110f !important; font-weight:900; padding:0 14px; cursor:pointer; box-shadow:0 12px 26px rgba(54,198,161,.12); }}
+        .primary:hover {{ background:#36c6a1 !important; }}
+        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:8px; border:1px solid var(--line); background:#05070b; color:#dbeafe; max-height:360px; overflow:auto; }}
         .note {{ color:var(--muted); line-height:1.55; }}
-        .modal-backdrop {{ display:none; position:fixed; inset:0; z-index:20; background:rgba(15,23,42,.46); backdrop-filter:blur(6px); place-items:center; padding:18px; }}
+        .modal-backdrop {{ display:none; position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.62); backdrop-filter:blur(8px); place-items:center; padding:18px; }}
         .modal-backdrop.open {{ display:grid; }}
-        .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:0 24px 70px rgba(15,23,42,.28); padding:22px; }}
+        .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:0 24px 70px rgba(0,0,0,.58); padding:22px; }}
         .modal.wide {{ width:min(1120px, 100%); }}
-        .guide-card {{ margin-top:12px; padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); }}
+        .guide-card {{ margin-top:12px; padding:14px; border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#171c25,#11161f); box-shadow:var(--shadow-soft); }}
         .guide-grid {{ display:grid; grid-template-columns:minmax(190px, 28%) minmax(0, 1fr); gap:8px 12px; align-items:start; font-size:13px; line-height:1.55; }}
         .guide-grid b {{ color:var(--text); }}
         .guide-grid span {{ color:var(--soft); }}
@@ -12919,8 +12926,20 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .guide-json {{ margin-top:10px; min-height:0; max-height:132px; font-size:12px; }}
         .steps {{ margin:0; padding-left:20px; color:var(--text); line-height:1.7; }}
         .mini-steps {{ margin:0; padding-left:18px; color:var(--soft); line-height:1.7; }}
-        code {{ color:#1e293b; background:#e8eef6; border:1px solid var(--line); border-radius:6px; padding:1px 5px; }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        code {{ color:#e2e8f0; background:#0b1017; border:1px solid var(--line); border-radius:6px; padding:1px 5px; }}
+        a {{ color:var(--accent-2); }}
+        .product-flow {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:14px 0; }}
+        .step-card {{ border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#161b24,#10151d); padding:14px; min-height:132px; box-shadow:var(--shadow-soft); }}
+        .step-card b {{ display:flex; align-items:center; gap:8px; color:var(--text); }}
+        .step-card b span {{ width:26px; height:26px; display:grid; place-items:center; border-radius:8px; background:#eef3f8; color:#111827; font-size:12px; }}
+        .step-card p {{ margin:8px 0 0; color:var(--muted); line-height:1.55; font-size:13px; }}
+        .info-panel {{ border:1px solid var(--line); border-radius:8px; background:#0d1118; padding:14px; }}
+        .info-panel h3 {{ margin:0 0 8px; font-size:14px; }}
+        .shortcut-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+        .status-strip {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }}
+        .status-strip div {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#0d1118; }}
+        .status-strip b {{ display:block; font-size:18px; margin-top:4px; }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -12941,8 +12960,14 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <div class="page-intro">
                 <div>
                   <h2>今日值班视图</h2>
-                  <p class="note">先看服务是否可用、队列是否积压、账号和告警是否异常；更细的账号接入、连接器、任务和交付检查已经拆到对应页面。</p>
+                  <p class="note">按 sub2api 类后台的运营思路，总览只回答四件事：系统活着吗、账号够用吗、用户能不能调用、哪里需要处理。细节进入对应页签。</p>
                 </div>
+              </div>
+              <div class="product-flow">
+                <div class="step-card"><b><span>1</span>导入上游账号</b><p>进入“授权资源”选择平台，按字段指南保存 Web Cookie 或 Agent Provider，再到“账号池”验收。</p></div>
+                <div class="step-card"><b><span>2</span>发放用户 API Key</b><p>进入“用户与鉴权”，先创建用户，再给调用方创建独立 API Key。</p></div>
+                <div class="step-card"><b><span>3</span>确认模型路由</b><p>进入“模型”查看逻辑模型和 provider 模型映射，确保 `gpt-image-2` 等目标模型有可用账号。</p></div>
+                <div class="step-card"><b><span>4</span>监控任务与账单</b><p>进入“任务”“计费”“告警”查看生成结果、成本、失败和回调状态。</p></div>
               </div>
               <div class="action-grid">
                 <div class="action-cluster"><h3>健康巡检</h3><p>确认 API、数据库、队列、外部账号覆盖是否满足当前上线要求。</p><div class="ops">{overview_actions}</div></div>
@@ -12954,9 +12979,68 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           </section>
 
           <section id="tab-users" class="tab">
-            <div class="two">
-              <div class="panel"><h2>用户</h2><p class="note">密码登录只用于管理后台。平台调用通过用户绑定的调用密钥管理。</p><table><thead><tr><th>用户 ID</th><th>邮箱</th><th>状态</th><th>等级</th><th>余额</th></tr></thead><tbody>{user_rows}</tbody></table></div>
-              <div class="panel"><h2>调用密钥</h2><p class="note">总数：{api_key_count}。启用中：{active_key_count}。上游账号授权最终应沉淀为 credential_ref 或账号绑定，不把浏览器令牌暴露在页面。</p><div class="formline"><div><label>用户 ID</label><input id="key-user" value="usr_admin" /></div><div><label>名称</label><input id="key-name" placeholder="输入真实用途名称" /></div><button class="primary" id="create-key" type="button">创建调用密钥</button></div></div>
+            <div class="section-tabs">
+              <button class="subnav-item active" type="button" data-subtab="users-list-pane">用户列表</button>
+              <button class="subnav-item" type="button" data-subtab="users-keys-pane">API Key</button>
+              <button class="subnav-item" type="button" data-subtab="users-create-pane">创建与发放</button>
+              <button class="subnav-item" type="button" data-subtab="users-guide-pane">使用说明</button>
+            </div>
+            <div class="panel subtab active" id="users-list-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>用户列表</h2>
+                  <p class="note">用户是下游调用方或内部业务线，余额、等级和状态决定它能否继续发起生成任务。</p>
+                </div>
+                <button class="op" type="button" data-jump-tab="billing">查看计费</button>
+              </div>
+              <div class="table-wrap"><table><thead><tr><th>用户 ID</th><th>邮箱</th><th>状态</th><th>等级</th><th>余额</th></tr></thead><tbody>{user_rows}</tbody></table></div>
+            </div>
+            <div class="panel subtab" id="users-keys-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>API Key（下游调用密钥）</h2>
+                  <p class="note">这里管理的是给客户或业务系统调用 `/v1/images/*`、`/v1/videos/*`、`/v1/media-jobs` 的密钥，不是上游平台账号凭据。</p>
+                </div>
+                <div class="status-strip" style="min-width:320px;margin-top:0"><div><span class="eyebrow">总数</span><b>{api_key_count}</b></div><div><span class="eyebrow">启用中</span><b>{active_key_count}</b></div></div>
+              </div>
+              <div class="table-wrap"><table><thead><tr><th>Key ID</th><th>用户 ID</th><th>名称</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{api_key_rows}</tbody></table></div>
+            </div>
+            <div class="panel subtab" id="users-create-pane">
+              <h2>创建用户与发放 API Key</h2>
+              <p class="note">推荐流程：先创建用户，再给该用户创建专用 API Key。返回结果里会出现明文 key，请只复制给对应调用方一次。</p>
+              <div class="two">
+                <div class="info-panel">
+                  <h3>1. 创建用户</h3>
+                  <div class="formline">
+                    <div><label>用户 ID</label><input id="create-user-id" placeholder="留空自动生成" /></div>
+                    <div><label>邮箱</label><input id="create-user-email" placeholder="client@example.com" /></div>
+                    <button class="primary" id="create-user" type="button">创建用户</button>
+                  </div>
+                  <div class="formline" style="margin-top:10px">
+                    <div><label>等级</label><input id="create-user-tier" value="default" /></div>
+                    <div><label>初始余额</label><input id="create-user-balance" value="100000" /></div>
+                    <div></div>
+                  </div>
+                </div>
+                <div class="info-panel">
+                  <h3>2. 创建 API Key</h3>
+                  <div class="formline">
+                    <div><label>用户 ID</label><input id="key-user" value="usr_admin" /></div>
+                    <div><label>名称</label><input id="key-name" placeholder="client-production-key" /></div>
+                    <button class="primary" id="create-key" type="button">创建调用密钥</button>
+                  </div>
+                  <p class="note">每个客户、环境、自动化任务建议使用独立 Key，后续可以单独停用，不影响其他调用方。</p>
+                </div>
+              </div>
+            </div>
+            <div class="panel subtab" id="users-guide-pane">
+              <h2>密钥和账号的区别</h2>
+              <div class="product-flow">
+                <div class="step-card"><b><span>1</span>用户</b><p>代表一个客户、业务线或调用方，拥有余额、等级和治理策略。</p></div>
+                <div class="step-card"><b><span>2</span>API Key</b><p>发给下游系统调用 media2api。它不能直接代表 OpenAI、Gemini、Grok 等上游平台账号。</p></div>
+                <div class="step-card"><b><span>3</span>平台账号</b><p>在“授权资源/账号池”里导入，用于真实上游生成。账号凭据保存为 `secret://` 或 `agent://`。</p></div>
+                <div class="step-card"><b><span>4</span>模型路由</b><p>下游请求模型后，系统按模型映射、账号池、配额、健康度选择可用平台。</p></div>
+              </div>
             </div>
           </section>
 
@@ -13102,8 +13186,32 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div class="panel subtab" id="providers-actions-pane"><h2>平台操作</h2><p class="note">用于模板启用、能力同步、合同套件和真实平台外部验收。</p><div class="ops">{provider_actions}</div></div>
           </section>
           <section id="tab-accounts" class="tab">
-            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="accounts-list-pane">账号池</button><button class="subnav-item" type="button" data-subtab="accounts-actions-pane">验收与租约</button></div>
-            <div class="panel subtab active" id="accounts-list-pane"><h2>账号池</h2><div class="ops"><button class="primary" type="button" id="open-account-wizard-accounts">添加平台账号</button></div><div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>ID</th><th>平台</th><th>标签</th><th>凭据引用</th><th>状态</th><th>租约</th></tr></thead><tbody>{account_rows}</tbody></table></div></div>
+            <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="accounts-list-pane">账号池</button><button class="subnav-item" type="button" data-subtab="accounts-guide-pane">接入路径</button><button class="subnav-item" type="button" data-subtab="accounts-actions-pane">验收与租约</button></div>
+            <div class="panel subtab active" id="accounts-list-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>账号池</h2>
+                  <p class="note">账号池只展示可被路由使用的上游资源。凭据应显示为 `secret://`、`agent://` 或托管引用，不在表格里暴露明文。</p>
+                </div>
+                <button class="primary" type="button" id="open-account-wizard-accounts">添加平台账号</button>
+              </div>
+              <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>ID</th><th>平台</th><th>标签</th><th>凭据引用</th><th>状态</th><th>租约</th></tr></thead><tbody>{account_rows}</tbody></table></div>
+            </div>
+            <div class="panel subtab" id="accounts-guide-pane">
+              <h2>如何把账号导入到可调用状态</h2>
+              <div class="product-flow">
+                <div class="step-card"><b><span>1</span>选平台</b><p>到“授权资源 / 对照指南”选择 OpenAI、Gemini、Grok、Midjourney 等平台，确认需要 Cookie 还是 Agent Profile。</p></div>
+                <div class="step-card"><b><span>2</span>保存凭据</b><p>用“Web Cookie”或“Agent Provider”表单保存授权材料，系统会生成 `secret://` 或 `agent://` 引用。</p></div>
+                <div class="step-card"><b><span>3</span>入账号池</b><p>点击“添加平台账号”，绑定平台、模型、操作、并发和凭据引用。</p></div>
+                <div class="step-card"><b><span>4</span>验收路由</b><p>运行账号验收和连接器一致性，确认 text_to_image、image_edit 或视频能力真的可用。</p></div>
+              </div>
+              <div class="shortcut-grid">
+                <button class="op" type="button" data-jump-tab="oauth">打开授权资源</button>
+                <button class="op" type="button" data-jump-tab="connectors">查看连接器蓝图</button>
+                <button class="op" type="button" id="open-account-wizard-accounts-guide">添加平台账号</button>
+                <button class="op" type="button" data-jump-tab="models">查看模型映射</button>
+              </div>
+            </div>
             <div class="panel subtab" id="accounts-actions-pane"><h2>验收与租约</h2><p class="note">保存账号后在这里运行验收、租约自检和账号接入计划，确认它真的能被路由和调用。</p><div class="ops">{account_actions}</div></div>
           </section>
           <section id="tab-jobs" class="tab">
@@ -13716,6 +13824,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('overview-open-account-wizard')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard-accounts')?.addEventListener('click', openAccountWizard);
+        document.getElementById('open-account-wizard-accounts-guide')?.addEventListener('click', openAccountWizard);
         function selectedProviderId() {{
           return document.getElementById('oauth-guide-provider')?.value || document.getElementById('wizard-provider')?.value || 'openai_image';
         }}
@@ -14126,6 +14235,14 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('create-key')?.addEventListener('click', async () => {{
           await callAdmin('/v1/admin/api-keys', 'POST', {{ user_id: document.getElementById('key-user').value, name: document.getElementById('key-name').value }});
+        }});
+        document.getElementById('create-user')?.addEventListener('click', async () => {{
+          await callAdmin('/v1/admin/users', 'POST', {{
+            id: document.getElementById('create-user-id')?.value.trim() || null,
+            email: document.getElementById('create-user-email')?.value.trim() || '',
+            tier: document.getElementById('create-user-tier')?.value.trim() || 'default',
+            wallet_balance: Number(document.getElementById('create-user-balance')?.value || 100000),
+          }});
         }});
         document.getElementById('save-secret')?.addEventListener('click', async () => {{
           await callAdmin('/v1/admin/credential-secrets', 'POST', {{ id: 'secret_' + Date.now(), name: '管理台保存凭据', kind: 'session', provider_id: document.getElementById('secret-provider').value, account_id: document.getElementById('secret-account').value, value: document.getElementById('secret-value').value, metadata: {{ source: 'admin_dashboard' }} }});
