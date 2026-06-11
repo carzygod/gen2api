@@ -12319,9 +12319,10 @@ def setup_status_payload() -> dict[str, Any]:
     uses_default_sqlite = settings.database_url == default_sqlite_url
     uses_default_bootstrap = settings.bootstrap_api_key == default_bootstrap_key
     admin_password_configured = bool(settings.admin_password)
+    setup_required = (not admin_password_configured) or not bool(settings.database_url)
     return {
         "object": "media2api.setup_status",
-        "needs_setup": (not admin_password_configured) or uses_default_bootstrap or uses_default_sqlite,
+        "needs_setup": setup_required,
         "checks": [
             {
                 "name": "DATABASE_URL",
