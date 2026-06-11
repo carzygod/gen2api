@@ -61,14 +61,26 @@ RUNTIME_BASE_URL_FIELD_NAMES = RUNTIME_BASE_URL_INPUT_NAMES | {
 
 PROVIDER_KEYWORDS: dict[str, list[str]] = {
     "openai_image": ["openai", "chatgpt", "codex", "gpt-image", "gpt_image", "gpt image"],
+    "openai_web_session": ["openai", "chatgpt", "chatgpt2api", "gpt-image", "gpt image"],
+    "openai_codex": ["codex", "codex-manager", "gpt-image", "gpt image", "codex image"],
     "gemini": ["gemini", "antigravity", "veo", "nano banana", "nanobanana", "imagen"],
+    "gemini_cli_oauth": ["gemini cli", "cliproxyapi", "cli oauth", "veo", "nano banana", "nanobanana"],
+    "gemini_web_session": ["gemini web", "gemini-api", "gemini session", "veo", "nano banana", "nanobanana", "imagen"],
+    "antigravity": ["antigravity", "anti-api", "cloud code"],
     "grok": ["grok", "xai", "imagine"],
     "qwen": ["qwen", "tongyi", "wan2", "wan ", "dashscope"],
-    "jimeng": ["jimeng", "dreamina", "seedream", "seedance", "doubao"],
+    "qwen_ai_web_session": ["qwen.ai", "chat.qwen.ai", "portal.qwen.ai", "qwen2api"],
+    "qianwen_web_session": ["qianwen.com", "tongyi", "qianwen2api", "通义千问"],
+    "jimeng": ["jimeng", "dreamina", "seedream", "seedance"],
+    "jimeng_web_session": ["jimeng", "dreamina", "jimeng-api"],
+    "doubao_web_session": ["doubao", "doubao2api", "豆包"],
     "kling": ["kling", "klingai"],
+    "kling_web_session": ["kling", "klingcreator", "kling web", "kuaishou"],
     "luma": ["luma", "dream machine"],
+    "luma_web_session": ["luma", "dream machine", "lumadreamcreator"],
     "runway": ["runway", "gen-3", "gen-4"],
     "midjourney": ["midjourney", "mj-", "niji", "discord"],
+    "midjourney_discord_session": ["midjourney", "mj-", "niji", "discord"],
     "pollinations": ["pollinations"],
     "openrouter_image": ["openrouter"],
     "fal_replicate": ["fal", "replicate"],
@@ -91,14 +103,26 @@ AUTH_HINTS: dict[str, list[str]] = {
 
 PROVIDER_RESOURCE_DEFAULTS: dict[str, str] = {
     "openai_image": "web_cookie_provider",
+    "openai_web_session": "web_cookie_provider",
+    "openai_codex": "agent_provider",
     "gemini": "agent_provider",
+    "gemini_cli_oauth": "agent_provider",
+    "gemini_web_session": "web_cookie_provider",
+    "antigravity": "agent_provider",
     "grok": "web_cookie_provider",
     "qwen": "agent_provider",
+    "qwen_ai_web_session": "web_cookie_provider",
+    "qianwen_web_session": "web_cookie_provider",
     "jimeng": "agent_provider",
+    "jimeng_web_session": "web_cookie_provider",
+    "doubao_web_session": "web_cookie_provider",
     "kling": "agent_provider",
+    "kling_web_session": "web_cookie_provider",
     "luma": "agent_provider",
+    "luma_web_session": "web_cookie_provider",
     "runway": "agent_provider",
     "midjourney": "web_cookie_provider",
+    "midjourney_discord_session": "web_cookie_provider",
     "pollinations": "agent_provider",
     "openrouter_image": "agent_provider",
     "fal_replicate": "agent_provider",
@@ -119,6 +143,26 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
         ],
         "user_actions": ["导入本人已登录的 ChatGPT cookie/session", "或选择 Codex Agent profile", "运行图片生成/编辑样本验收"],
     },
+    "openai_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["OAI-WEB-01", "basketikun/chatgpt2api"],
+        "user_inputs": [
+            {"name": "chatgpt_cookie_or_session", "label": "ChatGPT Web cookie/header 或 session jar", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret", "evidence": "OAI-WEB-01 chatgpt2api uses ChatGPT Web session material for GPT Image 2."},
+            {"name": "connector_base_url", "label": "受控执行器地址", "required": False, "when": "使用 chatgpt2api release/binary/sidecar 时填写，只允许 loopback 或内网受控地址。"},
+        ],
+        "user_actions": ["导入本人已授权 ChatGPT Web session。", "运行 gpt-image-2 图片生成与图片编辑验收。", "不得把 Codex OAuth/profile 填入本 provider。"],
+    },
+    "openai_codex": {
+        "primary_resource_type": "agent_provider",
+        "accepted_resource_types": ["agent_provider"],
+        "opensource_basis": ["OAI-CODEX-04", "cnlimiter/codex-manager"],
+        "user_inputs": [
+            {"name": "codex_account_export", "label": "Codex account export / auth profile", "required": True, "auth_method": "agent_provider_credential", "store_as": "encrypted_secret_or_agent_ref", "evidence": "OAI-CODEX-04 codex-manager manages Codex accounts, refresh, validation, exports, and GPT Image 2 path."},
+            {"name": "agent_runtime_endpoint", "label": "Codex runner / manager endpoint", "required": False, "when": "使用受控 codex-manager binary/subprocess 或外部内网 runner 时填写。"},
+        ],
+        "user_actions": ["导入 Codex OAuth/profile/account export。", "验收账号刷新、健康检查和 gpt-image-2 生图。", "不得把 ChatGPT Web cookie 填入本 provider。"],
+    },
     "gemini": {
         "primary_resource_type": "agent_provider",
         "accepted_resource_types": ["agent_provider"],
@@ -138,6 +182,38 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
             "只有 wrapper 要求 --project-id/GEMINI_PROJECT_ID 时才补充 Google Cloud project id，然后运行 Nano Banana / Veo 样本验收。",
         ],
     },
+    "gemini_cli_oauth": {
+        "primary_resource_type": "agent_provider",
+        "accepted_resource_types": ["agent_provider"],
+        "opensource_basis": ["GEM-CLI-02", "router-for-me/CLIProxyAPI", "geminicli2api", "CliRelay"],
+        "user_inputs": [
+            {"name": "gemini_oauth_creds_file", "label": "~/.gemini/oauth_creds.json / --gemini-oauth-creds-file", "required": True, "any_of_group": "gemini_cli_oauth_material", "auth_method": "agent_provider_credential", "store_as": "encrypted_secret_or_agent_ref"},
+            {"name": "gemini_oauth_creds_base64", "label": "--gemini-oauth-creds-base64", "required": True, "any_of_group": "gemini_cli_oauth_material", "auth_method": "agent_provider_credential", "store_as": "encrypted_secret_or_agent_ref"},
+            {"name": "gemini_project_id", "label": "Gemini project id / --project-id", "required": False, "auth_method": "agent_provider_credential", "store_as": "encrypted_secret_or_agent_ref"},
+            {"name": "agent_runtime_endpoint", "label": "CLIProxyAPI / Gemini CLI runner endpoint", "required": False, "when": "使用受控 CLIProxyAPI/CliRelay/geminicli2api runtime 时填写。"},
+        ],
+        "user_actions": ["导入 Gemini CLI OAuth/profile。", "验收 Nano Banana 图片和 Veo 视频。", "不得把 Gemini Web cookie/session 填入本 provider。"],
+    },
+    "gemini_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["GEM-WEB-01", "HanaokaYuzu/Gemini-API"],
+        "user_inputs": [
+            {"name": "gemini_web_cookie_or_session", "label": "Gemini Web cookie/session", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "connector_base_url", "label": "Gemini Web runner endpoint", "required": False, "when": "使用受控 Gemini Web wrapper runtime 时填写。"},
+        ],
+        "user_actions": ["导入本人已授权 Gemini Web session。", "验收 Gemini Web 图片和视频输出并转存资产。", "不得和 Gemini CLI OAuth profile 共用账号材料。"],
+    },
+    "antigravity": {
+        "primary_resource_type": "agent_provider",
+        "accepted_resource_types": ["agent_provider"],
+        "opensource_basis": ["AG-01", "ink1ing/anti-api"],
+        "user_inputs": [
+            {"name": "antigravity_profile", "label": "Antigravity OAuth/profile/local DB reference", "required": True, "auth_method": "agent_provider_credential", "store_as": "encrypted_secret_or_agent_ref"},
+            {"name": "agent_runtime_endpoint", "label": "anti-api / Antigravity runner endpoint", "required": False, "when": "使用受控 anti-api runtime 时填写。"},
+        ],
+        "user_actions": ["导入 Antigravity profile/local session。", "先验收账号、代理和 health check。", "不得和 Gemini CLI/Gemini Web 账号混用。"],
+    },
     "qwen": {
         "primary_resource_type": "agent_provider",
         "accepted_resource_types": ["agent_provider"],
@@ -149,6 +225,26 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
             {"name": "agent_runtime_endpoint", "label": "Agent runtime / relay 服务地址", "required": False, "when": "使用 CliRelay/CLIProxyAPI 时填写", "evidence": "kittors__CliRelay/README_CN.md: unified endpoint http://localhost:8317 and base_url http://localhost:8317/v1"},
         ],
         "user_actions": ["登记 Qwen Code 授权 profile", "绑定可执行 runtime", "验收 qwen-image-edit 或 Wan 视频能力"],
+    },
+    "qwen_ai_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["QWEN-AI-01", "Rfym21/Qwen2API"],
+        "user_inputs": [
+            {"name": "qwen_ai_cookie_or_session", "label": "qwen.ai / chat.qwen.ai / portal.qwen.ai session", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "connector_base_url", "label": "Qwen2API runner endpoint", "required": False, "when": "使用受控 Qwen2API release/binary/runtime 时填写。"},
+        ],
+        "user_actions": ["导入 qwen.ai/chat.qwen.ai/portal.qwen.ai Web session。", "验收图片生成/编辑和视频生成。", "不得与 qianwen.com 共用账号池。"],
+    },
+    "qianwen_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["QIANWEN-WEB-01", "kao0312/qianwen2api"],
+        "user_inputs": [
+            {"name": "qianwen_cookie_or_session", "label": "qianwen.com / 通义千问 Web session", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "connector_base_url", "label": "qianwen2api runner endpoint", "required": False, "when": "使用受控 qianwen2api runtime 时填写。"},
+        ],
+        "user_actions": ["导入 qianwen.com Web session。", "先验收账号与基础代理，再单独验收图片/视频端点。", "不得与 qwen.ai 共用账号池。"],
     },
     "grok": {
         "primary_resource_type": "web_cookie_provider",
@@ -175,6 +271,26 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
         ],
         "user_actions": ["按 ComfyUI-Jimeng-API 的 api_keys.json/apiKey 或 seedance-api 的 api_key 提交托管凭据。", "配置并发和额度限制。", "验收图片/视频任务与资产转存。"],
     },
+    "jimeng_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["JM-01", "iptag/jimeng-api"],
+        "user_inputs": [
+            {"name": "jimeng_cookie_or_session", "label": "Jimeng/Dreamina Web cookie/session", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "connector_base_url", "label": "jimeng-api runner endpoint", "required": False, "when": "使用受控 jimeng-api runtime 时填写。"},
+        ],
+        "user_actions": ["导入 Jimeng/Dreamina Web session。", "验收图片生成和编辑。", "不得与 Doubao 账号池或日配额统计混用。"],
+    },
+    "doubao_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["DOUBAO-WEB-01", "wangchuxiaoji-oss/doubao2api"],
+        "user_inputs": [
+            {"name": "doubao_cookie_or_session", "label": "Doubao Web cookie/session", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "connector_base_url", "label": "doubao2api runner endpoint", "required": False, "when": "使用受控 doubao2api release/binary/runtime 时填写。"},
+        ],
+        "user_actions": ["导入 Doubao Web session。", "验收图片和视频任务。", "豆包账号、日配额、并发和 health check 必须独立于 Jimeng。"],
+    },
     "kling": {
         "primary_resource_type": "agent_provider",
         "accepted_resource_types": ["agent_provider"],
@@ -185,6 +301,16 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
             {"name": "mcp_agent_config_ref", "label": "Kling MCP/Agent config ref", "required": False, "auth_method": "agent_provider_credential", "store_as": "agent_ref_or_config", "when": "Use this only when an external MCP/Agent profile already contains both Kling keys", "evidence": "199-mcp__mcp-kling/README.md uses MCP config/env to hold KLING_ACCESS_KEY and KLING_SECRET_KEY"},
         ],
         "user_actions": ["Register KLING_ACCESS_KEY and KLING_SECRET_KEY, or an MCP/agent profile that contains them.", "Bind video duration/concurrency limits.", "Validate t2v/i2v/extend."],
+    },
+    "kling_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["KLING-WEB-01", "yihong0618/klingCreator"],
+        "user_inputs": [
+            {"name": "kling_cookie_or_session", "label": "Kling Web cookie/session", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "connector_base_url", "label": "klingCreator runner endpoint", "required": False, "when": "使用受控 Kling Web runtime 时填写。"},
+        ],
+        "user_actions": ["导入 Kling Web session。", "验收 text_to_video、image_to_video 和 extend。", "本阶段不要求 KLING_ACCESS_KEY。"],
     },
     "midjourney": {
         "primary_resource_type": "web_cookie_provider",
@@ -201,6 +327,18 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
             {"name": "discord_wss", "label": "Discord gateway WSS reverse endpoint", "required": False, "when": "the selected Midjourney bridge explicitly exposes a Discord gateway reverse endpoint", "evidence": "midjourney-proxy reverse settings are bridge-specific; not a gen2api account base_url"},
         ],
         "user_actions": ["按 midjourney-proxy 的字段绑定 guild/channel/session", "并发默认 1", "验收 imagine/upscale/variation"],
+    },
+    "midjourney_discord_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["MID-01", "trueai-org/midjourney-proxy"],
+        "user_inputs": [
+            {"name": "discord_session_or_user_token", "label": "Discord/Midjourney session 或 user token", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "guild_id", "label": "Discord guild/server id", "required": True},
+            {"name": "channel_id", "label": "Discord channel id", "required": True},
+            {"name": "connector_base_url", "label": "midjourney-proxy runner endpoint", "required": False, "when": "使用受控 Midjourney proxy runtime 时填写。"},
+        ],
+        "user_actions": ["绑定 Discord/Midjourney session、guild、channel。", "并发默认 1。", "验收 imagine、variation 和 upscale。"],
     },
     "seedream_proxy": {
         "primary_resource_type": "agent_provider",
@@ -219,6 +357,16 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
             {"name": "luma_api_key", "label": "LUMA_API_KEY / --api-key", "required": True, "auth_method": "agent_provider_credential", "store_as": "encrypted_secret_or_agent_ref", "require_named_field": True, "aliases": ["LUMA_API_KEY", "api-key"], "evidence": "bobtista__luma-ai-mcp-server/src/luma_ai_mcp_server/__init__.py uses click --api-key with envvar LUMA_API_KEY; server.py raises when LUMA_API_KEY is missing"},
         ],
         "user_actions": ["按 luma-ai-mcp-server 的 LUMA_API_KEY/--api-key 提交托管凭据。", "验收 Dream Machine 视频任务。"],
+    },
+    "luma_web_session": {
+        "primary_resource_type": "web_cookie_provider",
+        "accepted_resource_types": ["web_cookie_provider"],
+        "opensource_basis": ["LUMA-WEB-01", "yihong0618/LumaDreamCreator"],
+        "user_inputs": [
+            {"name": "luma_cookie_or_session", "label": "Luma Web cookie/session", "required": True, "auth_method": "cookie_secret", "store_as": "encrypted_secret"},
+            {"name": "connector_base_url", "label": "LumaDreamCreator runner endpoint", "required": False, "when": "使用受控 Luma Web runtime 时填写。"},
+        ],
+        "user_actions": ["导入 Luma Web cookie/session。", "验收 text_to_video、image_to_video 和 extend。", "本阶段不要求 LUMA_API_KEY。"],
     },
     "runway": {
         "primary_resource_type": "agent_provider",
@@ -292,6 +440,28 @@ PLATFORM_INPUT_REQUIREMENTS: dict[str, dict[str, Any]] = {
 }
 
 PROVIDER_GUIDE_OVERRIDES: dict[str, dict[str, Any]] = {
+    "openai_web_session": {
+        "title": "ChatGPT Web Session 图像资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/openai_web_session/chatgpt_cookie_01",
+        "base_url_example": "",
+        "steps": [
+            "导入本人已授权 ChatGPT Web cookie/session。",
+            "使用 OAI-WEB-01 对应受控 runner 时才填写执行器地址。",
+            "保存后验收 gpt-image-2 图片生成和图片编辑。",
+        ],
+    },
+    "openai_codex": {
+        "title": "Codex GPT Image 2 账号资源接入",
+        "recommended_auth_methods": ["agent_provider_credential"],
+        "credential_ref_example": "agent://providers/openai_codex/acct_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 Codex OAuth/profile/account export。",
+            "使用 OAI-CODEX-04 对应受控 runner 时才填写执行器地址。",
+            "保存后验收账号刷新、健康检查和 gpt-image-2 生图。",
+        ],
+    },
     "openai_image": {
         "title": "ChatGPT Web Cookie / Codex Agent 图像资源接入",
         "recommended_auth_methods": ["cookie_secret", "agent_provider_credential"],
@@ -302,6 +472,39 @@ PROVIDER_GUIDE_OVERRIDES: dict[str, dict[str, Any]] = {
             "如果使用 chatgpt2api/codex-proxy sidecar，再填写该 sidecar 的执行地址；不使用 sidecar 时不要求 base_url。",
             "平台把 cookie/session 或 agent profile 转成 encrypted secret/ref，并绑定账号池。",
             "保存后运行健康检查、能力同步和 text_to_image/image_edit 样本验收。",
+        ],
+    },
+    "gemini_cli_oauth": {
+        "title": "Gemini CLI OAuth 图像/视频资源接入",
+        "recommended_auth_methods": ["agent_provider_credential"],
+        "credential_ref_example": "agent://providers/gemini_cli_oauth/acct_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 Gemini CLI OAuth/profile，例如 ~/.gemini/oauth_creds.json。",
+            "使用 GEM-CLI-02 对应受控 CLIProxyAPI runtime 时才填写执行器地址。",
+            "保存后验收 Nano Banana 图片和 Veo 视频。",
+        ],
+    },
+    "gemini_web_session": {
+        "title": "Gemini Web Session 图像/视频资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/gemini_web_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入本人已授权 Gemini Web cookie/session。",
+            "使用 GEM-WEB-01 对应受控 runner 时才填写执行器地址。",
+            "保存后验收 Gemini Web 图片和视频输出。",
+        ],
+    },
+    "antigravity": {
+        "title": "Antigravity Agent 资源接入",
+        "recommended_auth_methods": ["agent_provider_credential"],
+        "credential_ref_example": "agent://providers/antigravity/acct_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 Antigravity OAuth/profile/local session。",
+            "使用 AG-01 对应受控 anti-api runtime 时才填写执行器地址。",
+            "保存后先验收账号、代理和 health check。",
         ],
     },
     "gemini": {
@@ -327,6 +530,94 @@ PROVIDER_GUIDE_OVERRIDES: dict[str, dict[str, Any]] = {
             "gen2api 的账号资源只登记频道、会话和可选 bot/reverse 字段；proxy 服务地址属于具体执行器部署，不作为 Midjourney 账号字段暴露。",
             "在 gen2api 中选择 midjourney，绑定频道资源和并发 1。",
             "运行 imagine、variation 或 upscale 样本验收，确认结果已转存为 MediaAsset。",
+        ],
+    },
+    "midjourney_discord_session": {
+        "title": "Midjourney Discord Session 任务通道接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/midjourney_discord_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "登记 Discord/Midjourney session、guild_id、channel_id。",
+            "使用 MID-01 对应受控 runner 时才填写执行器地址。",
+            "保存后验收 imagine、variation 和 upscale。",
+        ],
+    },
+    "grok": {
+        "title": "Grok Web Session 图像/视频资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/grok/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入本人已授权 Grok Web/Build cookie/session。",
+            "按 GROK-01 runner 要求填写同一浏览器请求的 User-Agent。",
+            "保存后验收 Grok Imagine 图片和视频。",
+        ],
+    },
+    "jimeng_web_session": {
+        "title": "即梦 / Dreamina Web Session 图像资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/jimeng_web_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 Jimeng/Dreamina Web cookie/session。",
+            "使用 JM-01 对应受控 runner 时才填写执行器地址。",
+            "不得与 Doubao 账号池或日配额统计混用。",
+        ],
+    },
+    "doubao_web_session": {
+        "title": "豆包 Web Session 图像/视频资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/doubao_web_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 Doubao Web cookie/session。",
+            "使用 DOUBAO-WEB-01 对应受控 doubao2api runtime 时才填写执行器地址。",
+            "豆包账号、日配额、并发和 health check 独立于即梦。",
+        ],
+    },
+    "qwen_ai_web_session": {
+        "title": "Qwen.ai Web Session 图像/视频资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/qwen_ai_web_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 qwen.ai/chat.qwen.ai/portal.qwen.ai Web session。",
+            "使用 QWEN-AI-01 对应受控 Qwen2API runtime 时才填写执行器地址。",
+            "不得与 qianwen.com 账号池混用。",
+        ],
+    },
+    "qianwen_web_session": {
+        "title": "通义千问 qianwen.com Web Session 接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/qianwen_web_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 qianwen.com/通义千问 Web session。",
+            "使用 QIANWEN-WEB-01 对应受控 qianwen2api runtime 时才填写执行器地址。",
+            "先验收账号和基础代理，再验收媒体端点。",
+        ],
+    },
+    "kling_web_session": {
+        "title": "Kling Web Session 视频资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/kling_web_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 Kling Web cookie/session。",
+            "使用 KLING-WEB-01 对应受控 runner 时才填写执行器地址。",
+            "保存后验收 text_to_video、image_to_video 和 extend。",
+        ],
+    },
+    "luma_web_session": {
+        "title": "Luma Web Session 视频资源接入",
+        "recommended_auth_methods": ["cookie_secret"],
+        "credential_ref_example": "secret://providers/luma_web_session/session_01",
+        "base_url_example": "",
+        "steps": [
+            "导入 Luma Web cookie/session。",
+            "使用 LUMA-WEB-01 对应受控 runner 时才填写执行器地址。",
+            "保存后验收 text_to_video、image_to_video 和 extend。",
         ],
     },
     "kling": {
@@ -794,14 +1085,26 @@ class ConnectorRegistryService:
     def _infer_platforms(self, provider_ids: list[str], corpus: str) -> list[str]:
         labels = {
             "openai_image": "ChatGPT/Codex",
+            "openai_web_session": "ChatGPT Web",
+            "openai_codex": "OpenAI Codex",
             "gemini": "Gemini/Veo",
+            "gemini_cli_oauth": "Gemini CLI/Veo",
+            "gemini_web_session": "Gemini Web/Veo",
+            "antigravity": "Antigravity",
             "grok": "Grok",
             "qwen": "Qwen/Wan",
+            "qwen_ai_web_session": "Qwen.ai",
+            "qianwen_web_session": "Qianwen.com",
             "jimeng": "Jimeng/Seedream/Seedance",
+            "jimeng_web_session": "Jimeng/Dreamina",
+            "doubao_web_session": "Doubao",
             "kling": "Kling",
+            "kling_web_session": "Kling Web",
             "luma": "Luma",
+            "luma_web_session": "Luma Web",
             "runway": "Runway",
             "midjourney": "Midjourney",
+            "midjourney_discord_session": "Midjourney",
             "pollinations": "Pollinations",
             "openrouter_image": "OpenRouter",
             "fal_replicate": "fal/Replicate",
@@ -822,7 +1125,7 @@ class ConnectorRegistryService:
             target = next((row for row in TARGET_MODEL_TABLE if row[0] == provider_id), None)
             if target:
                 models_.update(str(item) for item in target[1])
-        for token in ["gpt-image-2", "nano-banana", "veo", "seedream", "seedance", "qwen-image", "wan", "flux", "sdxl", "kling", "runway", "luma"]:
+        for token in ["gpt-image-2", "nano-banana", "veo", "seedream", "seedance", "qwen-image", "qwen-video", "qianwen", "doubao", "wan", "flux", "sdxl", "kling", "runway", "luma"]:
             if token in corpus:
                 models_.add(token)
         return sorted(model for model in models_ if model)

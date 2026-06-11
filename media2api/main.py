@@ -41,7 +41,7 @@ from .services_oauth_sessions import ConnectorOAuthSessionService
 from .services_secrets import SecretService, serialize_secret
 from .services_webhooks import WebhookService
 from .providers import ASSET_PAYLOAD_FIELDS, CONNECTOR_REFERENCE_PREFIXES, DEFAULT_OUTPUT_PATHS, DEFAULT_STATUS_PATHS, DEFAULT_TASK_ID_PATHS, ProviderContext, connector_reference_only, get_provider
-from .provider_templates import PROVIDER_TEMPLATES, template_as_dict
+from .provider_templates import FINALIZED_PROVIDER_IDS, PROVIDER_TEMPLATES, template_as_dict
 from .utils import DomainError, dumps, is_sensitive_key, loads, new_id
 
 app = FastAPI(title="media2api", version="0.1.0")
@@ -1603,16 +1603,28 @@ def infer_account_resource_type(provider_id: str, auth_method: str, requested: s
         return "agent_provider"
     return {
         "openai_image": "web_cookie_provider",
+        "openai_web_session": "web_cookie_provider",
+        "openai_codex": "agent_provider",
+        "gemini_cli_oauth": "agent_provider",
+        "gemini_web_session": "web_cookie_provider",
+        "antigravity": "agent_provider",
         "grok": "web_cookie_provider",
         "jimeng": "agent_provider",
+        "jimeng_web_session": "web_cookie_provider",
+        "doubao_web_session": "web_cookie_provider",
         "kling": "agent_provider",
+        "kling_web_session": "web_cookie_provider",
         "midjourney": "web_cookie_provider",
+        "midjourney_discord_session": "web_cookie_provider",
         "seedream_proxy": "agent_provider",
         "runway": "agent_provider",
         "gemini": "agent_provider",
         "qwen": "agent_provider",
+        "qwen_ai_web_session": "web_cookie_provider",
+        "qianwen_web_session": "web_cookie_provider",
         "amux_qwen": "agent_provider",
         "luma": "agent_provider",
+        "luma_web_session": "web_cookie_provider",
         "pollinations": "agent_provider",
         "openrouter_image": "agent_provider",
         "fal_replicate": "agent_provider",
@@ -2482,6 +2494,25 @@ def provider_template_default_config(provider_id: str, config: dict[str, Any] | 
         value = deepcopy(value)
         value.pop("base_url", None)
     return value
+
+
+def ensure_provider_from_template(db: Session, provider_id: str, status: str = "disabled") -> models.Provider | None:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        return None
+    provider = db.get(models.Provider, template.id)
+    if provider:
+        return provider
+    provider = models.Provider(
+        id=template.id,
+        name=template.name,
+        adapter_type=template.adapter_type,
+        status=status,
+        base_config_json=dumps(provider_template_default_config(template.id, template.default_config)),
+        notes=template.notes,
+    )
+    db.add(provider)
+    return provider
 
 
 def provider_template_payload(template: Any) -> dict[str, Any]:
@@ -12711,7 +12742,29 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     connector_project_count = db.query(models.OpenSourceConnectorProject).count()
     api_key_count = db.query(models.ApiKey).count()
     active_key_count = db.query(models.ApiKey).filter(models.ApiKey.status == "active").count()
-    provider_options = "".join(f'<option value="{admin_escape(item.id)}">{admin_escape(item.name)} ({admin_escape(item.id)})</option>' for item in providers)
+    provider_lookup = {item.id: item for item in providers}
+    provider_option_ids: list[str] = []
+    for provider_id in [*FINALIZED_PROVIDER_IDS, *(item.id for item in providers)]:
+        if provider_id == "mock" or provider_id in provider_option_ids:
+            continue
+        if provider_id in provider_lookup or provider_id in PROVIDER_TEMPLATES:
+            provider_option_ids.append(provider_id)
+
+    def provider_ui_name(provider_id: str) -> str:
+        provider = provider_lookup.get(provider_id)
+        if provider:
+            return provider.name
+        template = PROVIDER_TEMPLATES.get(provider_id)
+        return template.name if template else provider_id
+
+    def provider_ui_status(provider_id: str) -> str:
+        provider = provider_lookup.get(provider_id)
+        return provider.status if provider else "template"
+
+    provider_options = "".join(
+        f'<option value="{admin_escape(provider_id)}">{admin_escape(provider_ui_name(provider_id))} ({admin_escape(provider_id)} · {admin_escape(provider_ui_status(provider_id))})</option>'
+        for provider_id in provider_option_ids
+    )
     auth_method_labels = {
         "cookie_secret": "Web Cookie 加密托管",
         "agent_provider_credential": "Agent Provider 凭据",
@@ -12721,29 +12774,41 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         for method in REFERENCE_AUTH_TYPES
     )
     provider_hint_text = {
-        "gemini": "Gemini / Veo / Nano Banana：从 Gemini CLI/Antigravity 的 OAuth 凭据文件或 geminicli2api 的 GEMINI_CREDENTIALS/GOOGLE_APPLICATION_CREDENTIALS 取得授权 JSON；只有使用外部 wrapper 时才填写 runtime/base_url。",
+        "openai_web_session": "OpenAI Web Session：使用 OAI-WEB-01，导入本人 ChatGPT Web cookie/session；不要和 Codex 账号混用。",
+        "openai_codex": "OpenAI Codex：使用 OAI-CODEX-04，导入 Codex OAuth/profile/account export；GPT Image 2 走独立 Codex 反代内核。",
+        "gemini_cli_oauth": "Gemini CLI OAuth：使用 GEM-CLI-02，导入 Gemini CLI OAuth/profile/credential cache；与 Gemini Web Session、Antigravity 分开管理。",
+        "gemini_web_session": "Gemini Web Session：使用 GEM-WEB-01，导入 Gemini 网页 cookie/session；不要和 CLI OAuth profile 混用。",
+        "antigravity": "Antigravity：使用 AG-01，导入 Antigravity profile/runtime 材料；与 Gemini CLI/Web 分开。",
+        "qwen_ai_web_session": "Qwen.ai：使用 QWEN-AI-01，导入 qwen.ai/chat.qwen.ai/portal.qwen.ai 网页 session；与 qianwen.com 分开。",
+        "qianwen_web_session": "Qianwen.com：使用 QIANWEN-WEB-01，导入 qianwen.com 网页 session；媒体能力需真实账号验收后再放量。",
+        "jimeng_web_session": "即梦：使用 JM-01，导入即梦网页 session；不要和豆包账号配额混用。",
+        "doubao_web_session": "豆包：使用 DOUBAO-WEB-01，导入豆包网页 session；和即梦账号独立计量、独立验收。",
+        "kling_web_session": "可灵：使用 KLING-WEB-01，导入可灵 Web session，并优先验收视频生成/续写能力。",
+        "luma_web_session": "Luma：使用 luma_web_session，导入 Luma Web session，并优先验收视频生成/续写能力。",
+        "midjourney_discord_session": "Midjourney：使用 MID-01，导入 Discord/Midjourney session、guild_id 和 channel_id。",
+        "gemini": "Gemini / Veo / Nano Banana：历史兼容项；第一阶段优先使用 gemini_cli_oauth 或 gemini_web_session。",
         "kling": "可灵：按 kling-api/mcp-kling/ComfyUI-KLingAI-API 类项目填写 Access Key + Secret Key 或 MCP/Agent config；不要求 Web cookie/JWT。",
         "jimeng": "即梦 / Seedream / Seedance：按 ComfyUI-Jimeng-API/seedance-api 填写 Ark/API key/ref 或 Agent profile；不要求 Web cookie 或通用 base_url。",
-        "qwen": "千问 / Qwen：填写 Qwen Code Agent profile/credential cache；使用 CliRelay/CLIProxyAPI 时才填写 runtime/base_url。",
+        "qwen": "千问 / Qwen：历史兼容项；第一阶段已拆分为 qwen_ai_web_session 与 qianwen_web_session。",
         "grok": "Grok Imagine：从已登录的 grok.com/Grok Build 浏览器会话复制 Cookie header 和同一次请求的 User-Agent；执行器地址不是资源本体。",
         "pollinations": "Pollinations：非首期核心，作为 fallback/Agent 后端时填写 Agent Provider 引用或项目要求的执行端配置。",
-        "openai_image": "OpenAI 图像模型：首选 ChatGPT Web cookie/session 或 Codex Agent profile；使用 chatgpt2api/codex-proxy 时才填写执行器地址。",
-        "midjourney": "Midjourney：按 midjourney-proxy 字段填写 Discord session、guild、channel；gen2api 账号资源不要求通用 proxy/base_url。",
+        "openai_image": "OpenAI 图像模型：历史兼容项；第一阶段已拆分为 openai_web_session 与 openai_codex。",
+        "midjourney": "Midjourney：历史兼容项；第一阶段优先使用 midjourney_discord_session。",
         "runway": "Runway：按 n8n-nodes-useapi/useapi 或授权 helper 结果填写托管 credential/ref 或 Agent profile；不在主账号表单收集密码、cookie 或通用 base_url。",
         "seedream_proxy": "Seedream / Seedance：按 ComfyUI-Jimeng-API/seedance-api 填写 API key/ref 或 Agent profile；不要求 Web cookie 或通用 base_url。",
     }
-    provider_guides_for_ui = {item.id: connector_registry_service.provider_guide(db, item.id) for item in providers}
+    provider_guides_for_ui = {provider_id: connector_registry_service.provider_guide(db, provider_id) for provider_id in provider_option_ids}
     provider_hint_payload = {
-        item.id: {
-            "models": provider_default_operations_and_models(item.id)[1],
-            "operations": provider_default_operations_and_models(item.id)[0],
-            "auth_methods": provider_guides_for_ui.get(item.id, {}).get("recommended_auth_methods", ["agent_provider_credential"]),
-            "resource_type": provider_guides_for_ui.get(item.id, {}).get("resource_type", ""),
-            "base_url_example": provider_guides_for_ui.get(item.id, {}).get("base_url_example", ""),
-            "credential_ref_example": provider_guides_for_ui.get(item.id, {}).get("credential_ref_example", ""),
-            "help": provider_hint_text.get(item.id, f"{item.name}：选择 Web Cookie/session 或 Agent Provider profile；执行器地址只在对应开源项目明确要求服务地址时填写。"),
+        provider_id: {
+            "models": provider_default_operations_and_models(provider_id)[1],
+            "operations": provider_default_operations_and_models(provider_id)[0],
+            "auth_methods": provider_guides_for_ui.get(provider_id, {}).get("recommended_auth_methods", ["agent_provider_credential"]),
+            "resource_type": provider_guides_for_ui.get(provider_id, {}).get("resource_type", ""),
+            "base_url_example": provider_guides_for_ui.get(provider_id, {}).get("base_url_example", ""),
+            "credential_ref_example": provider_guides_for_ui.get(provider_id, {}).get("credential_ref_example", ""),
+            "help": provider_hint_text.get(provider_id, f"{provider_ui_name(provider_id)}：选择 Web Cookie/session 或 Agent Provider profile；执行器地址只在对应开源项目明确要求服务地址时填写。"),
         }
-        for item in providers
+        for provider_id in provider_option_ids
     }
     provider_oauth_guides = {
         "gemini": {
@@ -12894,38 +12959,38 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             "connector": "AMux/Qwen 主线归入 Agent Provider；服务地址只在对应 wrapper 要求时填写。",
         },
     }
-    def connector_oauth_guide(provider: models.Provider) -> dict[str, str]:
-        title = f"{provider.name} ({provider.id})"
+    def connector_oauth_guide(provider_id: str) -> dict[str, str]:
+        title = f"{provider_ui_name(provider_id)} ({provider_id})"
         return {
             "title": title,
-            "credential_type": f"{provider.id} Web Cookie 或 Agent Provider 凭据",
+            "credential_type": f"{provider_id} Web Cookie 或 Agent Provider 凭据",
             "primary_url": "",
             "console_url": "",
             "where": f"当前选择的是 {title}。按该项目实际要求登记 Web Cookie/session 或 Agent Provider profile；执行器地址只在项目明确要求时填写。",
-            "paste": f'{{"credential_ref":"secret://providers/{provider.id}/cookie_01","resource_type":"web_cookie_provider"}}',
-            "connector": f"按 {provider.id} 对应项目实际字段填写；base_url 只在该项目确实要求执行器/服务地址时填写。",
+            "paste": f'{{"credential_ref":"secret://providers/{provider_id}/cookie_01","resource_type":"web_cookie_provider"}}',
+            "connector": f"按 {provider_id} 对应项目实际字段填写；base_url 只在该项目确实要求执行器/服务地址时填写。",
         }
     for provider_id, guide in provider_oauth_guides.items():
         if provider_id in provider_hint_payload:
             provider_hint_payload[provider_id]["oauth"] = guide
-    for provider in providers:
-        provider_hint_payload[provider.id].setdefault("oauth", connector_oauth_guide(provider))
-    for provider in providers:
-        guide = provider_guides_for_ui.get(provider.id, {})
+    for provider_id in provider_option_ids:
+        provider_hint_payload[provider_id].setdefault("oauth", connector_oauth_guide(provider_id))
+    for provider_id in provider_option_ids:
+        guide = provider_guides_for_ui.get(provider_id, {})
         requirements = guide.get("input_requirements", [])
         actions = guide.get("user_actions", [])
         basis = guide.get("opensource_basis", [])
-        provider_hint_payload[provider.id]["input_requirements"] = requirements
-        provider_hint_payload[provider.id]["user_actions"] = actions
-        provider_hint_payload[provider.id]["accepted_resource_types"] = guide.get("accepted_resource_types", [])
+        provider_hint_payload[provider_id]["input_requirements"] = requirements
+        provider_hint_payload[provider_id]["user_actions"] = actions
+        provider_hint_payload[provider_id]["accepted_resource_types"] = guide.get("accepted_resource_types", [])
         computed_oauth_guide = {
-            "title": guide.get("title") or f"{provider.name} ({provider.id})",
+            "title": guide.get("title") or f"{provider_ui_name(provider_id)} ({provider_id})",
             "credential_type": " / ".join(guide.get("recommended_auth_methods", [])) or "cookie_secret / agent_provider_credential",
             "primary_url": "",
             "console_url": "",
             "where": "；".join(actions) or "按该平台对应开源项目的字段要求导入 Web Cookie/session 或 Agent Provider profile。",
             "paste": dumps({
-                "provider_id": provider.id,
+                "provider_id": provider_id,
                 "resource_type": guide.get("resource_type"),
                 "auth_method": (guide.get("recommended_auth_methods") or ["cookie_secret"])[0],
                 "credential_ref": guide.get("credential_ref_example"),
@@ -12935,9 +13000,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             "input_requirements": requirements,
             "opensource_basis": basis,
         }
-        if provider.id in provider_oauth_guides:
-            computed_oauth_guide.update(provider_oauth_guides[provider.id])
-        provider_hint_payload[provider.id]["oauth"] = computed_oauth_guide
+        if provider_id in provider_oauth_guides:
+            computed_oauth_guide.update(provider_oauth_guides[provider_id])
+        provider_hint_payload[provider_id]["oauth"] = computed_oauth_guide
     def pill(value: Any) -> str:
         raw_value = "" if value is None else str(value)
         status_map = {
@@ -13031,7 +13096,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     if not api_key_rows:
         api_key_rows = '<tr><td colspan="5">暂无调用密钥。创建用户后在“创建密钥”页签里生成下游 API Key。</td></tr>'
     provider_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.name)}</td><td>{admin_escape(item.adapter_type)}</td><td>{pill(item.status)}</td></tr>" for item in providers)
+    if not provider_rows:
+        provider_rows = '<tr><td colspan="4">暂无已安装平台。请先在“授权资源”选择定型模板并导入真实账号；保存账号时会自动初始化 provider。</td></tr>'
     account_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.label)}</td><td>{admin_escape(item.credential_ref)}</td><td>{pill(item.status)}</td><td>{admin_escape(item.current_leases)}/{admin_escape(item.concurrency_limit)}</td></tr>" for item in accounts)
+    if not account_rows:
+        account_rows = '<tr><td colspan="6">暂无账号。请从“授权资源”导入 Web Cookie/session 或 Agent Provider profile 后再运行验收。</td></tr>'
     model_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.display_name)}</td><td>{admin_escape(item.operations_json)}</td><td>{admin_escape(item.billing_class)}</td><td>{pill('enabled' if item.enabled else 'disabled')}</td></tr>" for item in models_rows)
     mapping_rows = "".join(f"<tr><td>{admin_escape(item.logical_model)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.provider_model)}</td><td>{admin_escape(item.operations_json)}</td><td>{admin_escape(item.priority)}</td><td>{pill('enabled' if item.enabled else 'disabled')}</td></tr>" for item in mappings)
     secret_rows = "".join(f"<tr><td>{admin_escape(item.id)}</td><td>{admin_escape(item.kind)}</td><td>{admin_escape(item.provider_id)}</td><td>{admin_escape(item.account_id)}</td><td>{admin_escape(item.preview)}</td><td>{pill(item.status)}</td></tr>" for item in secrets)
@@ -13084,18 +13153,22 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("开源连接器清单", "GET", "/v1/admin/connector-registry"),
         ("刷新开源连接器清单", "POST", "/v1/admin/connector-registry/refresh"),
         ("账号添加指南", "GET", "/v1/admin/account-guides"),
+        ("平台输入要求", "GET", "/v1/admin/platform-input-requirements"),
         ("生成接入计划", "POST", "/v1/admin/account-onboarding/plan"),
         ("一键准备账号", "POST", "/v1/admin/account-setup-quickstart"),
-        ("连接器清单模板", "GET", "/v1/admin/external-connector-manifest-template?provider_id=jimeng"),
+        ("连接器清单模板", "GET", "/v1/admin/external-connector-manifest-template?provider_id=openai_web_session"),
         ("系统要求报告", "GET", "/v1/admin/system-requirements-report"),
         ("最终验收矩阵", "GET", "/v1/admin/final-acceptance-matrix"),
         ("交付包", "GET", "/v1/admin/delivery-package"),
         ("配置快照", "GET", "/v1/admin/config-export"),
         ("导出配置", "GET", "/v1/admin/config-export"),
         ("试运行导入", "POST", "/v1/admin/config-import"),
-        ("启用 Gemini 模板", "POST", "/v1/admin/provider-templates/gemini/activate"),
-        ("试运行启用模板", "POST", "/v1/admin/provider-templates/gemini/activate"),
-        ("真实平台外部验收", "POST", "/v1/admin/provider-templates/pollinations/external-acceptance"),
+        ("OpenAI Web 指南", "GET", "/v1/admin/account-guides/openai_web_session"),
+        ("Codex 图像指南", "GET", "/v1/admin/account-guides/openai_codex"),
+        ("Gemini CLI 指南", "GET", "/v1/admin/account-guides/gemini_cli_oauth"),
+        ("豆包指南", "GET", "/v1/admin/account-guides/doubao_web_session"),
+        ("Qwen.ai 指南", "GET", "/v1/admin/account-guides/qwen_ai_web_session"),
+        ("Qianwen 指南", "GET", "/v1/admin/account-guides/qianwen_web_session"),
         ("账号验收套件", "POST", "/v1/admin/account-acceptance-suite"),
         ("任务诊断", "GET", "/v1/admin/jobs?limit=5"),
         ("租约自检", "POST", "/v1/admin/account-leases/self-test-expiry"),
@@ -13104,7 +13177,6 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("资产存储测试", "POST", "/v1/admin/assets/self-test-storage"),
         ("故障转移自检", "POST", "/v1/admin/fallback/self-test"),
         ("真实平台合同套件", "POST", "/v1/admin/provider-contract-suite"),
-        ("同步 Gemini 能力", "POST", "/v1/admin/providers/gemini/sync-capabilities"),
     ]
     operation_controls = "".join(
         operation_button_html(label, method, path)
@@ -13131,9 +13203,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/connector-registry",
         "/v1/admin/connector-registry/refresh",
         "/v1/admin/account-guides",
+        "/v1/admin/platform-input-requirements",
         "/v1/admin/account-onboarding/plan",
         "/v1/admin/account-setup-quickstart",
-        "/v1/admin/external-connector-manifest-template?provider_id=jimeng",
+        "/v1/admin/external-connector-manifest-template?provider_id=openai_web_session",
     ])
     account_actions = action_controls_for([
         "/v1/admin/account-guides",
@@ -13143,10 +13216,15 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/account-leases/self-test-expiry",
     ])
     provider_actions = action_controls_for([
-        "/v1/admin/provider-templates/gemini/activate",
-        "/v1/admin/provider-templates/pollinations/external-acceptance",
+        "/v1/admin/platform-input-requirements",
+        "/v1/admin/account-guides/openai_web_session",
+        "/v1/admin/account-guides/openai_codex",
+        "/v1/admin/account-guides/gemini_cli_oauth",
+        "/v1/admin/account-guides/doubao_web_session",
+        "/v1/admin/account-guides/qwen_ai_web_session",
+        "/v1/admin/account-guides/qianwen_web_session",
         "/v1/admin/provider-contract-suite",
-        "/v1/admin/providers/gemini/sync-capabilities",
+        "/v1/admin/account-acceptance-suite",
     ])
     job_actions = action_controls_for([
         "/v1/admin/jobs?limit=5",
@@ -13483,10 +13561,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             </div>
             <div class="panel subtab" id="oauth-agent-pane">
               <h2>Agent Provider</h2>
-              <p class="note" id="agent-provider-note">用于 Gemini CLI、Codex CLI、Qwen Code、Antigravity、Jimeng/Seedream API key/ref、Kling Access Key/MCP、Runway UseAPI/ref、MCP 等 agent/runtime 资源。</p>
+              <p class="note" id="agent-provider-note">用于 Gemini CLI OAuth、OpenAI Codex、Antigravity 等 Agent Provider 资源；Web session 类平台请使用左侧 Web Cookie 表单。</p>
               <div class="formline">
                 <div><label>账号 ID</label><input id="agent-account-id" placeholder="留空自动生成" /></div>
-                <div><label>账号标签</label><input id="agent-account-label" placeholder="Gemini agent 01" /></div>
+                <div><label>账号标签</label><input id="agent-account-label" placeholder="Gemini CLI OAuth profile 01" /></div>
                 <div class="field-hidden"><label>Runtime endpoint</label><input id="agent-runtime-endpoint" placeholder="仅 CLIProxyAPI/CliRelay 等要求服务地址时填写" /></div>
                 <button class="primary" type="button" id="save-agent-provider">保存 Agent Provider</button>
               </div>
@@ -13540,7 +13618,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <table style="margin-top:14px"><thead><tr><th>凭据</th><th>类型</th><th>平台</th><th>账号</th><th>预览</th><th>状态</th></tr></thead><tbody>{secret_rows}</tbody></table>
               </div>
             </div>
-            <div class="panel subtab" id="oauth-bulk-pane"><h2>批量导入账号</h2><p class="note">支持 connector/sub2api/CLIProxy/AIClient2API 风格 JSON；会自动识别 cookie/session/agent profile/guild/channel/runner base_url 等字段，并统一生成 Web Cookie 或 Agent Provider 资源画像。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>资源类型</label><select id="bulk-auth-method">{auth_method_options}</select></div><button class="primary" type="button" id="bulk-import">批量导入 JSONL</button></div><div class="formline" style="margin-top:10px"><div><label>资源清单 URL</label><input id="bulk-subscription-url" placeholder="https://resource-list.example/accounts.json" /></div><div class="field-hidden"><label>可选执行器 Base URL</label><input id="bulk-base-url" placeholder="仅对应项目要求时填写" /></div><button class="op" type="button" id="bulk-preview-subscription">预览资源清单</button></div><div class="formline" style="margin-top:10px"><div><label>默认区域/套餐</label><input id="bulk-region-plan" placeholder="global/pro" /></div><div><label>导入上限</label><input id="bulk-max-items" value="200" /></div><div><label>自动映射</label><select id="bulk-auto-mappings"><option value="true">开启</option><option value="false">关闭</option></select></div><button class="primary" type="button" id="bulk-import-subscription">导入资源账号</button></div><div class="formline" style="margin-top:10px"><div><label>资源清单源名称</label><input id="bulk-source-name" placeholder="Gemini resource list pool" /></div><div><label>资源清单源 ID</label><input id="bulk-source-id" placeholder="创建后返回，或粘贴已有 source_id" /></div><button class="op" type="button" id="bulk-create-source">创建资源清单源</button></div><div class="formline" style="margin-top:10px"><div><label>同步模式</label><select id="bulk-source-sync-mode"><option value="preview">预览同步</option><option value="sync">正式同步</option></select></div><div><label>保存本地内容</label><select id="bulk-source-persist"><option value="false">不保存粘贴内容</option><option value="true">保存粘贴内容</option></select></div><button class="primary" type="button" id="bulk-sync-source">同步资源清单源</button></div><div class="formline" style="margin-top:10px"><div><label>生产检查</label><select id="bulk-production-run-acceptance"><option value="false">只做预检和额度</option><option value="true">运行账号验收</option></select></div><div><label>真实样本</label><select id="bulk-production-run-samples"><option value="false">不跑样本</option><option value="true">跑 1 条样本</option></select></div><button class="op" type="button" id="bulk-production-source">生产化预检</button></div><label style="margin-top:10px">账号 JSON / JSONL</label><textarea id="bulk-jsonl" placeholder='{{"accounts":{{"gpt_cookie_01":{{"auth":{{"type":"cookie_secret","cookie_header":"..."}},"resource_profile":{{"domain":"chatgpt.com"}},"models":[{{"id":"gpt-image-2","operations":["t2i","edit"]}}]}}}}}}'></textarea><table style="margin-top:14px"><thead><tr><th>源 ID</th><th>平台</th><th>名称</th><th>资源</th><th>状态</th><th>同步</th><th>时间</th></tr></thead><tbody>{subscription_source_rows}</tbody></table></div>
+            <div class="panel subtab" id="oauth-bulk-pane"><h2>批量导入账号</h2><p class="note">支持 connector/sub2api/CLIProxy/AIClient2API 风格 JSON；会自动识别 cookie/session/agent profile/guild/channel/runner base_url 等字段，并统一生成 Web Cookie 或 Agent Provider 资源画像。</p><div class="formline"><div><label>平台</label><select id="bulk-provider">{provider_options}</select></div><div><label>资源类型</label><select id="bulk-auth-method">{auth_method_options}</select></div><button class="primary" type="button" id="bulk-import">批量导入 JSONL</button></div><div class="formline" style="margin-top:10px"><div><label>资源清单 URL</label><input id="bulk-subscription-url" placeholder="https://resource-list.example/accounts.json" /></div><div class="field-hidden"><label>可选执行器 Base URL</label><input id="bulk-base-url" placeholder="仅对应项目要求时填写" /></div><button class="op" type="button" id="bulk-preview-subscription">预览资源清单</button></div><div class="formline" style="margin-top:10px"><div><label>默认区域/套餐</label><input id="bulk-region-plan" placeholder="global/pro" /></div><div><label>导入上限</label><input id="bulk-max-items" value="200" /></div><div><label>自动映射</label><select id="bulk-auto-mappings"><option value="true">开启</option><option value="false">关闭</option></select></div><button class="primary" type="button" id="bulk-import-subscription">导入资源账号</button></div><div class="formline" style="margin-top:10px"><div><label>资源清单源名称</label><input id="bulk-source-name" placeholder="Gemini CLI OAuth resource pool" /></div><div><label>资源清单源 ID</label><input id="bulk-source-id" placeholder="创建后返回，或粘贴已有 source_id" /></div><button class="op" type="button" id="bulk-create-source">创建资源清单源</button></div><div class="formline" style="margin-top:10px"><div><label>同步模式</label><select id="bulk-source-sync-mode"><option value="preview">预览同步</option><option value="sync">正式同步</option></select></div><div><label>保存本地内容</label><select id="bulk-source-persist"><option value="false">不保存粘贴内容</option><option value="true">保存粘贴内容</option></select></div><button class="primary" type="button" id="bulk-sync-source">同步资源清单源</button></div><div class="formline" style="margin-top:10px"><div><label>生产检查</label><select id="bulk-production-run-acceptance"><option value="false">只做预检和额度</option><option value="true">运行账号验收</option></select></div><div><label>真实样本</label><select id="bulk-production-run-samples"><option value="false">不跑样本</option><option value="true">跑 1 条样本</option></select></div><button class="op" type="button" id="bulk-production-source">生产化预检</button></div><label style="margin-top:10px">账号 JSON / JSONL</label><textarea id="bulk-jsonl" placeholder='{{"accounts":{{"gpt_cookie_01":{{"auth":{{"type":"cookie_secret","cookie_header":"..."}},"resource_profile":{{"domain":"chatgpt.com"}},"models":[{{"id":"gpt-image-2","operations":["t2i","edit"]}}]}}}}}}'></textarea><table style="margin-top:14px"><thead><tr><th>源 ID</th><th>平台</th><th>名称</th><th>资源</th><th>状态</th><th>同步</th><th>时间</th></tr></thead><tbody>{subscription_source_rows}</tbody></table></div>
           </section>
 
           <section id="tab-connectors" class="tab">
@@ -13558,7 +13636,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               </div>
               <div class="formline" style="margin-top:10px">
                 <div class="field-hidden"><label>可选执行器 Base URL</label><input id="connector-base-url" placeholder="仅对应项目要求服务地址时填写" /></div>
-                <div><label id="connector-credential-label">Credential Ref</label><input id="connector-credential-ref" placeholder="agent://providers/gemini/acct_01" /><p class="note" id="connector-credential-hint"></p></div>
+                <div><label id="connector-credential-label">Credential Ref</label><input id="connector-credential-ref" placeholder="agent://providers/gemini_cli_oauth/acct_01" /><p class="note" id="connector-credential-hint"></p></div>
                 <div><label>资源清单 URL</label><input id="connector-subscription-url" placeholder="https://resource-list.example/accounts.json" /></div>
                 <button class="primary" type="button" id="build-project-blueprint">生成项目蓝图</button>
                 <button class="op" type="button" id="apply-project-blueprint">应用项目蓝图</button>
@@ -13583,7 +13661,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <section id="tab-providers" class="tab">
             <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="providers-list-pane">平台列表</button><button class="subnav-item" type="button" data-subtab="providers-actions-pane">平台操作</button></div>
             <div class="panel subtab active" id="providers-list-pane"><h2>平台</h2><p class="note">此处只展示真实平台，测试平台不进入管理台视图。真实平台在启动和页面加载时会统一保持已启用。</p><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>适配器</th><th>状态</th></tr></thead><tbody>{provider_rows}</tbody></table></div></div>
-            <div class="panel subtab" id="providers-actions-pane"><h2>平台操作</h2><p class="note">用于模板启用、能力同步、合同套件和真实平台外部验收。</p><div class="ops">{provider_actions}</div></div>
+            <div class="panel subtab" id="providers-actions-pane"><h2>平台操作</h2><p class="note">先看定型 provider 的输入要求和账号指南；导入真实账号后再运行合同套件与账号验收。</p><div class="ops">{provider_actions}</div></div>
           </section>
           <section id="tab-accounts" class="tab">
             <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="accounts-list-pane">账号池</button><button class="subnav-item" type="button" data-subtab="accounts-guide-pane">接入路径</button><button class="subnav-item" type="button" data-subtab="accounts-actions-pane">验收与租约</button></div>
@@ -13600,7 +13678,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div class="panel subtab" id="accounts-guide-pane">
               <h2>如何把账号导入到可调用状态</h2>
               <div class="product-flow">
-                <div class="step-card"><b><span>1</span>选平台</b><p>到“授权资源 / 对照指南”选择 OpenAI、Gemini、Grok、Midjourney 等平台，确认需要 Cookie 还是 Agent Profile。</p></div>
+                <div class="step-card"><b><span>1</span>选平台</b><p>到“授权资源 / 对照指南”选择 OpenAI Web、Codex、Gemini CLI、豆包、Qwen.ai 等定型平台，确认需要 Cookie 还是 Agent Profile。</p></div>
                 <div class="step-card"><b><span>2</span>保存凭据</b><p>用“Web Cookie”或“Agent Provider”表单保存授权材料，系统会生成 `secret://` 或 `agent://` 引用。</p></div>
                 <div class="step-card"><b><span>3</span>入账号池</b><p>点击“添加平台账号”，绑定平台、模型、操作、并发和凭据引用。</p></div>
                 <div class="step-card"><b><span>4</span>验收路由</b><p>运行账号验收和连接器一致性，确认 text_to_image、image_edit 或视频能力真的可用。</p></div>
@@ -13765,9 +13843,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <li>先确定平台对应的开源项目实际要求：Grok 这类 Web 方案拿浏览器 Cookie header/User-Agent；Gemini 这类 Agent 方案拿 CLI OAuth/profile JSON。</li>
             <li>按该项目要求只填写相同字段；不额外强迫用户填写反常识的 base_url。Runtime endpoint 只有外部 wrapper 已部署且明确要求时才填写。</li>
             <li>明文 cookie、session、profile 只在提交瞬间出现，入库后转成 <code>secret://...</code> 或 <code>agent://...</code> 引用。</li>
-            <li>如果执行器返回结构化授权结果，把它整理成 JSON，例如 <code>{{"credential_ref":"agent://providers/gemini/acct_01","expires_at":"2026-07-01T00:00:00Z"}}</code>。</li>
+            <li>如果执行器返回结构化授权结果，把它整理成 JSON，例如 <code>{{"credential_ref":"agent://providers/gemini_cli_oauth/acct_01","expires_at":"2026-07-01T00:00:00Z"}}</code>。</li>
             <li>保存后运行账号验收，确认对应图片/视频模型真的可用。</li>
-            <li>到“账号池”模块创建或更新账号，让账号的 <code>credential_ref</code> 指向刚保存的引用，然后运行“同步 Gemini 能力”“真实平台外部验收”或“账号验收套件”。</li>
+            <li>到“账号池”模块创建或更新账号，让账号的 <code>credential_ref</code> 指向刚保存的引用，然后运行“平台合同套件”或“账号验收套件”。</li>
           </ol>
           <p class="note">只导入你有权使用的账号材料；不要沉淀账号密码、验证码处理、风控规避或批量账号获取流程。</p>
           <button class="primary" type="button" id="close-oauth-guide">知道了</button>
@@ -14048,25 +14126,27 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (cookieLabel) {{
             cookieLabel.placeholder = providerId === 'grok'
               ? 'Grok Web session 01'
-              : providerId === 'midjourney'
+              : providerId === 'midjourney' || providerId === 'midjourney_discord_session'
                 ? 'Midjourney Discord session 01'
-                : providerId === 'openai_image'
+                : providerId === 'openai_image' || providerId === 'openai_web_session'
                   ? 'ChatGPT cookie 01'
                   : providerLabel + ' cookie 01';
           }}
           if (cookieDomain) {{
             cookieDomain.placeholder = providerId === 'grok'
               ? 'grok.com / x.ai'
-              : providerId === 'midjourney'
+              : providerId === 'midjourney' || providerId === 'midjourney_discord_session'
                 ? 'discord.com'
-                : providerId === 'openai_image'
+                : providerId === 'openai_image' || providerId === 'openai_web_session'
                   ? 'chatgpt.com'
                   : '填写当前网页登录域名';
           }}
           const agentLabel = document.getElementById('agent-account-label');
           if (agentLabel) {{
-            agentLabel.placeholder = providerId === 'gemini'
+            agentLabel.placeholder = providerId === 'gemini' || providerId === 'gemini_cli_oauth'
               ? 'Gemini CLI profile 01'
+              : providerId === 'openai_codex'
+                ? 'Codex profile 01'
               : providerLabel + ' agent provider 01';
           }}
         }}
@@ -14290,7 +14370,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const path = button.dataset.path;
           const method = button.dataset.method;
           if (!path || !method) return;
-          const selectedProvider = document.getElementById('connector-provider')?.value || document.getElementById('oauth-guide-provider')?.value || 'gemini';
+          const selectedProvider = document.getElementById('connector-provider')?.value || document.getElementById('oauth-guide-provider')?.value || 'openai_web_session';
           const body = method === 'POST'
             ? (label === '试运行导入'
               ? {{ snapshot: {{}}, dry_run: true }}
@@ -14390,7 +14470,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('open-account-wizard-accounts')?.addEventListener('click', openAccountWizard);
         document.getElementById('open-account-wizard-accounts-guide')?.addEventListener('click', openAccountWizard);
         function selectedProviderId() {{
-          return document.getElementById('oauth-guide-provider')?.value || document.getElementById('wizard-provider')?.value || 'openai_image';
+          return document.getElementById('oauth-guide-provider')?.value || document.getElementById('wizard-provider')?.value || 'openai_web_session';
         }}
         function providerHint(providerId) {{
           return providerHints[providerId] || {{ operations: [], models: [] }};
@@ -18479,6 +18559,8 @@ def apply_account_onboarding(db: Session, req: AccountOnboardingRequest) -> dict
             },
         )
     provider = db.get(models.Provider, req.provider_id)
+    if not provider:
+        provider = ensure_provider_from_template(db, req.provider_id, status="active")
     if not provider:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_NOT_FOUND"})
     if provider.id == "mock":

@@ -95,7 +95,20 @@ def normalize_account_subscription_source_auth_methods(tables: set[str]) -> None
                 """
                 UPDATE account_subscription_sources
                 SET auth_method = CASE
-                    WHEN provider_id IN ('openai_image', 'grok', 'midjourney') THEN 'cookie_secret'
+                    WHEN provider_id IN (
+                        'openai_image',
+                        'openai_web_session',
+                        'gemini_web_session',
+                        'grok',
+                        'qwen_ai_web_session',
+                        'qianwen_web_session',
+                        'jimeng_web_session',
+                        'doubao_web_session',
+                        'kling_web_session',
+                        'luma_web_session',
+                        'midjourney',
+                        'midjourney_discord_session'
+                    ) THEN 'cookie_secret'
                     ELSE 'agent_provider_credential'
                 END
                 WHERE auth_method IS NULL
