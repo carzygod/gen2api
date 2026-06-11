@@ -12313,6 +12313,281 @@ def admin_escape(value: Any) -> str:
     return html.escape("" if value is None else str(value))
 
 
+def setup_status_payload() -> dict[str, Any]:
+    default_sqlite_url = "sqlite:///./var/media2api.db"
+    default_bootstrap_key = "dev-admin-key"
+    uses_default_sqlite = settings.database_url == default_sqlite_url
+    uses_default_bootstrap = settings.bootstrap_api_key == default_bootstrap_key
+    admin_password_configured = bool(settings.admin_password)
+    return {
+        "object": "media2api.setup_status",
+        "needs_setup": (not admin_password_configured) or uses_default_bootstrap or uses_default_sqlite,
+        "checks": [
+            {
+                "name": "DATABASE_URL",
+                "configured": bool(settings.database_url),
+                "ready_for_production": not uses_default_sqlite,
+                "detail": "PostgreSQL recommended for production." if uses_default_sqlite else "Database URL is configured.",
+            },
+            {
+                "name": "REDIS_URL",
+                "configured": bool(settings.redis_url),
+                "ready_for_production": bool(settings.redis_url),
+                "detail": "Redis enables worker queues, rate limits, and runtime coordination." if not settings.redis_url else "Redis URL is configured.",
+            },
+            {
+                "name": "MEDIA2API_ADMIN_PASSWORD",
+                "configured": admin_password_configured,
+                "ready_for_production": admin_password_configured,
+                "detail": "Set a dedicated admin password before production use." if not admin_password_configured else "Admin password is configured.",
+            },
+            {
+                "name": "MEDIA2API_BOOTSTRAP_KEY",
+                "configured": bool(settings.bootstrap_api_key),
+                "ready_for_production": not uses_default_bootstrap,
+                "detail": "Replace the default bootstrap API key before production use." if uses_default_bootstrap else "Bootstrap key is configured.",
+            },
+        ],
+        "public_base_url": settings.public_base_url,
+        "database_backend": settings.database_url.split(":", 1)[0],
+        "redis_configured": bool(settings.redis_url),
+        "admin_password_configured": admin_password_configured,
+        "bootstrap_key_is_default": uses_default_bootstrap,
+    }
+
+
+def setup_wizard_html() -> str:
+    status = setup_status_payload()
+    status_json = json.dumps(status, ensure_ascii=False)
+    return f"""
+    <!doctype html>
+    <html lang="zh-CN">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>media2api 自部署配置向导</title>
+      <style>
+        :root {{ color-scheme:dark; --bg:#07090d; --surface:#11151c; --surface-2:#171c25; --surface-3:#202735; --line:#2b3444; --text:#f4f7fb; --muted:#93a0b3; --soft:#cbd5e1; --accent:#36c6a1; --blue:#8aa4ff; --warn:#f4bf63; --shadow:0 18px 48px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03); }}
+        * {{ box-sizing:border-box; }}
+        body {{ margin:0; min-height:100vh; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:radial-gradient(circle at 14% 0%, rgba(54,198,161,.1), transparent 31%), linear-gradient(135deg,#050608,#0a0d13 55%,#0d1118); color:var(--text); }}
+        button,input,select,textarea {{ font:inherit; color-scheme:dark; }}
+        .shell {{ width:min(1120px, calc(100vw - 28px)); margin:0 auto; padding:28px 0 40px; }}
+        header {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; }}
+        .brand {{ display:flex; gap:12px; align-items:center; }}
+        .logo,.step-dot,.icon {{ width:40px; height:40px; border-radius:8px; display:grid; place-items:center; border:1px solid #2b554c; background:linear-gradient(145deg,#1f3a36,#0e151d); color:#fff; font-weight:900; box-shadow:var(--shadow); }}
+        h1 {{ margin:0; font-size:28px; letter-spacing:0; }}
+        h2 {{ margin:0 0 12px; font-size:18px; letter-spacing:0; }}
+        p {{ color:var(--muted); line-height:1.6; }}
+        a {{ color:var(--blue); }}
+        .status {{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }}
+        .pill {{ border:1px solid var(--line); border-radius:999px; padding:6px 10px; background:var(--surface-2); color:var(--soft); font-size:12px; font-weight:800; }}
+        .pill.ok {{ color:#66d484; border-color:rgba(102,212,132,.34); background:rgba(102,212,132,.1); }}
+        .pill.warn {{ color:var(--warn); border-color:rgba(244,191,99,.34); background:rgba(244,191,99,.1); }}
+        .layout {{ display:grid; grid-template-columns:270px 1fr; gap:16px; align-items:start; }}
+        .steps,.panel {{ border:1px solid var(--line); border-radius:8px; background:rgba(17,21,28,.93); box-shadow:var(--shadow); }}
+        .steps {{ padding:12px; position:sticky; top:16px; }}
+        .step-button {{ width:100%; display:flex; gap:10px; align-items:center; min-height:52px; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--soft); text-align:left; padding:8px; cursor:pointer; }}
+        .step-button.active,.step-button:hover {{ background:#1b222e; border-color:#2e3a4d; color:#fff; }}
+        .step-button small {{ display:block; color:var(--muted); margin-top:2px; }}
+        .panel {{ padding:20px; display:none; }}
+        .panel.active {{ display:block; }}
+        .grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
+        .field {{ margin-bottom:12px; }}
+        label {{ display:block; margin-bottom:6px; font-size:12px; color:var(--soft); font-weight:800; }}
+        input,select,textarea {{ width:100%; min-height:42px; border:1px solid var(--line); border-radius:8px; background:#0d1118; color:var(--text); padding:8px 10px; outline:none; }}
+        input:focus,select:focus,textarea:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(54,198,161,.14); }}
+        textarea {{ min-height:180px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; resize:vertical; }}
+        .actions {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }}
+        button.primary,button.secondary {{ min-height:42px; border-radius:8px; padding:0 14px; font-weight:900; cursor:pointer; }}
+        button.primary {{ border:1px solid rgba(54,198,161,.55); background:linear-gradient(145deg,#2ab38f,#1b806f); color:#06110f; }}
+        button.secondary {{ border:1px solid var(--line); background:var(--surface-2); color:var(--soft); }}
+        .cards {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:14px 0; }}
+        .card {{ border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#171c25,#11161f); padding:14px; min-height:128px; }}
+        .card b {{ display:flex; align-items:center; gap:8px; }}
+        .card p {{ margin:8px 0 0; font-size:13px; }}
+        .checklist {{ display:grid; gap:8px; }}
+        .check {{ display:flex; gap:10px; align-items:flex-start; border:1px solid var(--line); border-radius:8px; padding:12px; background:#0d1118; }}
+        .check .icon {{ width:28px; height:28px; font-size:12px; }}
+        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border:1px solid var(--line); border-radius:8px; background:#05070b; color:#dbeafe; max-height:360px; overflow:auto; }}
+        @media (max-width:900px) {{ .layout,.grid,.cards {{ grid-template-columns:1fr; }} header {{ display:block; }} .status {{ justify-content:flex-start; margin-top:12px; }} .steps {{ position:static; }} }}
+      </style>
+    </head>
+    <body>
+      <div class="shell" data-setup-wizard>
+        <header>
+          <div class="brand"><div class="logo">M2</div><div><h1>media2api 自部署配置向导</h1><p>按 sub2api 的首次 Setup Wizard 思路，先填数据库、Redis、初始管理员和公开地址，再生成可执行部署配置。</p></div></div>
+          <div class="status" id="setup-status-pills"></div>
+        </header>
+        <div class="layout">
+          <nav class="steps">
+            <button class="step-button active" type="button" data-step="database"><span class="step-dot">DB</span><span>数据库<small>PostgreSQL / SQLite</small></span></button>
+            <button class="step-button" type="button" data-step="redis"><span class="step-dot">RQ</span><span>Redis<small>队列、限流、worker</small></span></button>
+            <button class="step-button" type="button" data-step="admin"><span class="step-dot">AK</span><span>管理员与 Key<small>首个管理员和 bootstrap key</small></span></button>
+            <button class="step-button" type="button" data-step="deploy"><span class="step-dot">RUN</span><span>生成部署<small>.env、命令和检查清单</small></span></button>
+          </nav>
+          <main>
+            <section class="panel active" id="setup-step-database">
+              <h2>1. 数据库</h2>
+              <p>生产环境建议使用 PostgreSQL。SQLite 只适合本地试用或临时验证。</p>
+              <div class="grid">
+                <div class="field"><label>数据库类型</label><select id="setup-db-type"><option value="postgres">PostgreSQL</option><option value="sqlite">SQLite</option></select></div>
+                <div class="field"><label>主机</label><input id="setup-db-host" value="127.0.0.1" /></div>
+                <div class="field"><label>端口</label><input id="setup-db-port" value="5432" /></div>
+                <div class="field"><label>数据库名</label><input id="setup-db-name" value="media2api" /></div>
+                <div class="field"><label>用户名</label><input id="setup-db-user" value="media2api" /></div>
+                <div class="field"><label>密码</label><input id="setup-db-password" type="password" placeholder="数据库密码" /></div>
+                <div class="field"><label>SSL 模式</label><select id="setup-db-ssl"><option value="">不追加</option><option value="require">require</option><option value="verify-full">verify-full</option></select></div>
+                <div class="field"><label>SQLite 文件</label><input id="setup-sqlite-path" value="./var/media2api.db" /></div>
+              </div>
+              <div class="actions"><button class="primary" type="button" data-next-step="redis">下一步：Redis</button><button class="secondary" type="button" id="setup-generate-from-db">刷新配置预览</button></div>
+            </section>
+            <section class="panel" id="setup-step-redis">
+              <h2>2. Redis</h2>
+              <p>Redis 用于 database-worker 队列、速率桶、租约和运行时协调。生产环境建议开启。</p>
+              <div class="grid">
+                <div class="field"><label>启用 Redis</label><select id="setup-redis-enabled"><option value="true">启用</option><option value="false">暂不启用</option></select></div>
+                <div class="field"><label>主机</label><input id="setup-redis-host" value="127.0.0.1" /></div>
+                <div class="field"><label>端口</label><input id="setup-redis-port" value="6379" /></div>
+                <div class="field"><label>DB</label><input id="setup-redis-db" value="0" /></div>
+                <div class="field"><label>密码</label><input id="setup-redis-password" type="password" placeholder="可留空" /></div>
+                <div class="field"><label>TLS</label><select id="setup-redis-tls"><option value="false">关闭</option><option value="true">开启</option></select></div>
+              </div>
+              <div class="actions"><button class="secondary" type="button" data-next-step="database">上一步</button><button class="primary" type="button" data-next-step="admin">下一步：管理员</button></div>
+            </section>
+            <section class="panel" id="setup-step-admin">
+              <h2>3. 初始管理员与调用密钥</h2>
+              <p>管理员密码用于登录后台；bootstrap API Key 用于系统初始化和首个管理员调用密钥。生产环境不要使用默认值。</p>
+              <div class="grid">
+                <div class="field"><label>管理员邮箱</label><input id="setup-admin-email" value="admin@media2api.local" /></div>
+                <div class="field"><label>管理员登录密码</label><input id="setup-admin-password" type="password" placeholder="至少 12 位" /></div>
+                <div class="field"><label>Bootstrap API Key</label><input id="setup-bootstrap-key" type="password" placeholder="点击生成强随机 key" /></div>
+                <div class="field"><label>公开访问地址</label><input id="setup-public-base-url" value="http://localhost:8080" /></div>
+                <div class="field"><label>监听端口</label><input id="setup-port" value="8080" /></div>
+                <div class="field"><label>Worker 并发</label><input id="setup-worker-concurrency" value="2" /></div>
+              </div>
+              <div class="actions"><button class="secondary" type="button" data-next-step="redis">上一步</button><button class="secondary" type="button" id="setup-random-key">生成 bootstrap key</button><button class="primary" type="button" data-next-step="deploy">下一步：生成部署</button></div>
+            </section>
+            <section class="panel" id="setup-step-deploy">
+              <h2>4. 生成部署配置</h2>
+              <div class="cards">
+                <div class="card"><b><span class="icon">ENV</span>写入 .env</b><p>复制下方环境变量到服务器的 `.env` 或 systemd Environment。</p></div>
+                <div class="card"><b><span class="icon">DB</span>准备数据库</b><p>PostgreSQL 先创建用户和库，再启动迁移/初始化。</p></div>
+                <div class="card"><b><span class="icon">RUN</span>启动 API 与 worker</b><p>API 负责请求，worker 负责异步生成任务。</p></div>
+                <div class="card"><b><span class="icon">OK</span>完成验收</b><p>访问 `/health`、`/admin`，再导入上游账号和发放用户 API Key。</p></div>
+              </div>
+              <div class="grid">
+                <div><label>.env 配置</label><textarea id="setup-env-output" readonly></textarea></div>
+                <div><label>Linux 启动命令</label><textarea id="setup-command-output" readonly></textarea></div>
+              </div>
+              <div class="actions"><button class="secondary" type="button" data-next-step="admin">上一步</button><button class="primary" type="button" id="setup-build-output">重新生成</button><a class="pill" href="/admin">进入管理后台</a><a class="pill" href="/health">健康检查</a></div>
+              <div class="checklist" id="setup-checklist" style="margin-top:14px"></div>
+            </section>
+          </main>
+        </div>
+      </div>
+      <script>
+        const initialStatus = {status_json};
+        const generatedInstallSecrets = {{}};
+        const qs = id => document.getElementById(id);
+        function showStep(step) {{
+          document.querySelectorAll('.step-button').forEach(item => item.classList.toggle('active', item.dataset.step === step));
+          document.querySelectorAll('.panel').forEach(item => item.classList.toggle('active', item.id === 'setup-step-' + step));
+          buildOutput();
+        }}
+        function strongRandom(prefix) {{
+          const bytes = new Uint8Array(24);
+          crypto.getRandomValues(bytes);
+          return prefix + Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+        }}
+        function installSecret(name, prefix) {{
+          if (!generatedInstallSecrets[name]) generatedInstallSecrets[name] = strongRandom(prefix);
+          return generatedInstallSecrets[name];
+        }}
+        function dbUrl() {{
+          if (qs('setup-db-type').value === 'sqlite') return 'sqlite:///' + (qs('setup-sqlite-path').value || './var/media2api.db');
+          const user = encodeURIComponent(qs('setup-db-user').value || 'media2api');
+          const password = encodeURIComponent(qs('setup-db-password').value || 'change-me');
+          const host = qs('setup-db-host').value || '127.0.0.1';
+          const port = qs('setup-db-port').value || '5432';
+          const name = qs('setup-db-name').value || 'media2api';
+          const ssl = qs('setup-db-ssl').value ? '?sslmode=' + encodeURIComponent(qs('setup-db-ssl').value) : '';
+          return `postgresql+psycopg2://${{user}}:${{password}}@${{host}}:${{port}}/${{name}}${{ssl}}`;
+        }}
+        function redisUrl() {{
+          if (qs('setup-redis-enabled').value !== 'true') return '';
+          const scheme = qs('setup-redis-tls').value === 'true' ? 'rediss' : 'redis';
+          const password = qs('setup-redis-password').value ? ':' + encodeURIComponent(qs('setup-redis-password').value) + '@' : '';
+          return `${{scheme}}://${{password}}${{qs('setup-redis-host').value || '127.0.0.1'}}:${{qs('setup-redis-port').value || '6379'}}/${{qs('setup-redis-db').value || '0'}}`;
+        }}
+        function envText() {{
+          const bootstrap = qs('setup-bootstrap-key').value || 'REPLACE_WITH_STRONG_BOOTSTRAP_KEY';
+          const adminPassword = qs('setup-admin-password').value || 'REPLACE_WITH_STRONG_ADMIN_PASSWORD';
+          const redis = redisUrl();
+          return [
+            'MEDIA2API_ENV=production',
+            'DATABASE_URL=' + dbUrl(),
+            redis ? 'REDIS_URL=' + redis : '# REDIS_URL=',
+            'PUBLIC_BASE_URL=' + (qs('setup-public-base-url').value || 'http://localhost:8080'),
+            'MEDIA2API_BOOTSTRAP_KEY=' + bootstrap,
+            'MEDIA2API_ADMIN_PASSWORD=' + adminPassword,
+            'MEDIA2API_DEFAULT_USER=' + (qs('setup-admin-email').value || 'admin@media2api.local'),
+            'MEDIA2API_INLINE_ASYNC=false',
+            'MEDIA2API_WORKER_CONCURRENCY=' + (qs('setup-worker-concurrency').value || '2'),
+            'ASSET_DIR=./var/assets',
+            'MEDIA2API_ASSET_STORE=local',
+            'MEDIA2API_SECRET_ENCRYPTION_KEY=' + installSecret('encryption', 'm2enc_'),
+            'MEDIA2API_ASSET_SIGNING_SECRET=' + installSecret('asset', 'm2asset_')
+          ].join('\\n');
+        }}
+        function commandText() {{
+          const port = qs('setup-port').value || '8080';
+          return [
+            'python -m venv .venv',
+            'source .venv/bin/activate',
+            'pip install -r requirements.txt',
+            'set -a && source .env && set +a',
+            `uvicorn media2api.main:app --host 0.0.0.0 --port ${{port}}`,
+            '# 新开一个终端或 systemd 服务运行 worker',
+            'python -m media2api.worker'
+          ].join('\\n');
+        }}
+        function buildOutput() {{
+          if (qs('setup-env-output')) qs('setup-env-output').value = envText();
+          if (qs('setup-command-output')) qs('setup-command-output').value = commandText();
+          const checks = [
+            ['DB', qs('setup-db-type').value === 'postgres' ? '生产数据库已选择 PostgreSQL' : '当前选择 SQLite，仅建议本地试用'],
+            ['RQ', redisUrl() ? 'Redis 已配置，worker 队列可用' : 'Redis 未配置，生产环境建议补齐'],
+            ['AK', qs('setup-bootstrap-key').value ? 'Bootstrap API Key 已填写' : '请生成并保存 bootstrap key'],
+            ['PW', qs('setup-admin-password').value ? '管理员密码已填写' : '请设置管理员登录密码'],
+            ['URL', qs('setup-public-base-url').value ? '公开地址已填写' : '请填写 PUBLIC_BASE_URL']
+          ];
+          const target = qs('setup-checklist');
+          if (target) target.innerHTML = checks.map(([icon, text]) => `<div class="check"><span class="icon">${{icon}}</span><span>${{text}}</span></div>`).join('');
+        }}
+        function renderStatus() {{
+          const target = qs('setup-status-pills');
+          const needs = initialStatus.needs_setup;
+          target.innerHTML = [
+            `<span class="pill ${{needs ? 'warn' : 'ok'}}">${{needs ? '需要完成首次配置' : '已具备部署配置'}}</span>`,
+            `<span class="pill">数据库：${{initialStatus.database_backend}}</span>`,
+            `<span class="pill">Redis：${{initialStatus.redis_configured ? '已配置' : '未配置'}}</span>`,
+            `<span class="pill">Admin：${{initialStatus.admin_password_configured ? '已配置' : '未配置'}}</span>`
+          ].join('');
+        }}
+        document.querySelectorAll('[data-step]').forEach(button => button.addEventListener('click', () => showStep(button.dataset.step)));
+        document.querySelectorAll('[data-next-step]').forEach(button => button.addEventListener('click', () => showStep(button.dataset.nextStep)));
+        document.querySelectorAll('input,select').forEach(item => item.addEventListener('input', buildOutput));
+        qs('setup-random-key')?.addEventListener('click', () => {{ qs('setup-bootstrap-key').value = strongRandom('m2api_'); buildOutput(); }});
+        qs('setup-build-output')?.addEventListener('click', buildOutput);
+        qs('setup-generate-from-db')?.addEventListener('click', buildOutput);
+        renderStatus();
+        buildOutput();
+      </script>
+    </body>
+    </html>
+    """
+
+
 def admin_login_html(error: str = "") -> str:
     error_html = f'<div class="error">{admin_escape(error)}</div>' if error else ""
     return f"""
@@ -12648,14 +12923,14 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         return f'<span class="pill {tone}">{text_value}</span>'
 
     metric_cards = "".join(
-        f'<div class="metric"><span>{label}</span><strong>{admin_escape(value)}</strong><small>{admin_escape(note)}</small></div>'
-        for label, value, note in [
-            ("今日任务", dashboard["jobs"]["today_total"], f'队列 {dashboard["jobs"]["queue_length"]}'),
-            ("成功率", "-" if dashboard["jobs"]["success_rate"] is None else f'{dashboard["jobs"]["success_rate"] * 100:.1f}%', "已终态任务"),
-            ("已启用平台", len([item for item in providers if item.status == "active"]), f'真实平台 {len(providers)}'),
-            ("已启用账号", len([item for item in accounts if item.status == "active"]), f'租约 {dashboard["accounts"]["active_leases"]}'),
-            ("打开告警", dashboard["alerts"]["open"], f'严重 {dashboard["alerts"]["critical_open"]}'),
-            ("今日毛利", dashboard["billing"]["gross_margin_today"], dashboard["billing"]["currency"]),
+        f'<div class="metric"><span class="inline-icon" aria-hidden="true">{admin_escape(icon)}</span><span>{admin_escape(label)}</span><strong>{admin_escape(value)}</strong><small>{admin_escape(note)}</small></div>'
+        for icon, label, value, note in [
+            ("JB", "今日任务", dashboard["jobs"]["today_total"], f'队列 {dashboard["jobs"]["queue_length"]}'),
+            ("SR", "成功率", "-" if dashboard["jobs"]["success_rate"] is None else f'{dashboard["jobs"]["success_rate"] * 100:.1f}%', "已终态任务"),
+            ("PV", "已启用平台", len([item for item in providers if item.status == "active"]), f'真实平台 {len(providers)}'),
+            ("AC", "已启用账号", len([item for item in accounts if item.status == "active"]), f'租约 {dashboard["accounts"]["active_leases"]}'),
+            ("!", "打开告警", dashboard["alerts"]["open"], f'严重 {dashboard["alerts"]["critical_open"]}'),
+            ("$", "今日毛利", dashboard["billing"]["gross_margin_today"], dashboard["billing"]["currency"]),
         ]
     )
     user_rows = "".join(f"<tr><td>{admin_escape(user.id)}</td><td>{admin_escape(user.email)}</td><td>{pill(user.status)}</td><td>{admin_escape(user.tier)}</td><td>{admin_escape(user.wallet_balance)}</td></tr>" for user in users)
@@ -12807,22 +13082,33 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     ])
     all_action_controls = operation_controls
     tabs = [
-        ("overview", "总览"),
-        ("users", "用户与鉴权"),
-        ("oauth", "授权资源"),
-        ("connectors", "开源连接器"),
-        ("models", "模型"),
-        ("providers", "平台"),
-        ("accounts", "账号池"),
-        ("jobs", "任务"),
-        ("assets", "资产"),
-        ("billing", "计费"),
-        ("alerts", "告警"),
-        ("webhooks", "回调"),
-        ("audit", "审计"),
-        ("delivery", "交付"),
+        ("overview", "总览", "01", "运营"),
+        ("users", "用户与 API Key", "AK", "运营"),
+        ("oauth", "授权资源", "AU", "接入"),
+        ("connectors", "开源连接器", "CN", "接入"),
+        ("providers", "平台", "PV", "接入"),
+        ("accounts", "账号池", "AC", "接入"),
+        ("models", "模型路由", "MD", "路由"),
+        ("jobs", "任务", "JB", "运营"),
+        ("assets", "资产", "AS", "运营"),
+        ("billing", "计费", "$", "运营"),
+        ("alerts", "告警", "!", "运维"),
+        ("webhooks", "回调", "WH", "运维"),
+        ("audit", "审计", "QA", "运维"),
+        ("setup", "部署向导", "DP", "系统"),
+        ("delivery", "交付", "OK", "系统"),
     ]
-    nav = "".join(f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}" data-title="{admin_escape(label)}">{admin_escape(label)}</button>' for tab_id, label in tabs)
+    nav_parts: list[str] = []
+    current_group = ""
+    for tab_id, label, icon, group in tabs:
+        if group != current_group:
+            current_group = group
+            nav_parts.append(f'<div class="nav-group-label">{admin_escape(group)}</div>')
+        nav_parts.append(
+            f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}" data-title="{admin_escape(label)}">'
+            f'<span class="nav-icon" aria-hidden="true">{admin_escape(icon)}</span><span>{admin_escape(label)}</span></button>'
+        )
+    nav = "".join(nav_parts)
     return f"""
     <!doctype html>
     <html lang="zh-CN">
@@ -12843,8 +13129,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .logo {{ width:42px; height:42px; border-radius:8px; display:grid; place-items:center; font-weight:900; background:linear-gradient(145deg,#1f3a36,#0e151d); color:#fff; border:1px solid #2b554c; box-shadow:var(--shadow-soft); }}
         .brand strong {{ display:block; letter-spacing:0; }}
         .brand span {{ display:block; color:var(--muted); font-size:12px; margin-top:2px; }}
-        .nav-item {{ width:100%; height:40px; margin:3px 0; text-align:left; color:#aeb8c8; border:1px solid transparent; border-radius:8px; padding:0 12px; background:transparent; cursor:pointer; }}
+        .nav-group-label {{ margin:18px 4px 7px; color:#6f7b8d; font-size:11px; font-weight:900; letter-spacing:0; }}
+        .nav-item {{ width:100%; min-height:42px; margin:3px 0; display:flex; align-items:center; gap:10px; text-align:left; color:#aeb8c8; border:1px solid transparent; border-radius:8px; padding:0 10px; background:transparent; cursor:pointer; }}
         .nav-item:hover,.nav-item.active {{ background:#1b222e; border-color:#2e3a4d; color:white; box-shadow:inset 0 1px 0 rgba(255,255,255,.04); }}
+        .nav-icon,.inline-icon {{ width:28px; height:28px; flex:0 0 28px; display:inline-grid; place-items:center; border-radius:8px; border:1px solid var(--line); background:linear-gradient(145deg,#1b222e,#111722); color:var(--soft); font-size:11px; font-weight:900; }}
+        .nav-item.active .nav-icon,.nav-item:hover .nav-icon {{ border-color:rgba(54,198,161,.5); color:#fff; background:linear-gradient(145deg,#21433c,#16222b); }}
         main {{ overflow:auto; padding:24px; }}
         header {{ min-height:72px; display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }}
         h1 {{ margin:0; font-size:28px; letter-spacing:0; }}
@@ -12871,6 +13160,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .action-cluster .ops {{ grid-template-columns:1fr; }}
         .table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); }}
         .table-wrap table {{ min-width:760px; }}
+        .table-tools {{ display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center; margin:0 0 10px; }}
+        .table-tools-left,.table-tools-right {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+        .table-search {{ width:min(300px, 100%); }}
+        .table-page-size {{ width:96px; }}
+        .table-count {{ color:var(--muted); font-size:12px; font-weight:800; }}
+        .table-page-button {{ min-height:36px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2) !important; color:var(--soft) !important; padding:0 10px; cursor:pointer; }}
+        .table-page-button:disabled {{ opacity:.45; cursor:not-allowed; }}
         .result-dock {{ margin:18px 0 0; position:sticky; bottom:0; z-index:2; box-shadow:0 -16px 38px rgba(0,0,0,.38); }}
         .result-dock pre {{ max-height:260px; }}
         .session-subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 14px; }}
@@ -12939,7 +13235,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .status-strip {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }}
         .status-strip div {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#0d1118; }}
         .status-strip b {{ display:block; font-size:18px; margin-top:4px; }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        .deploy-builder {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
+        .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
+        .setup-open-link {{ display:inline-flex; min-height:40px; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:8px; padding:0 12px; background:var(--surface-2); color:var(--soft); text-decoration:none; font-weight:900; }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -13244,6 +13543,65 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div class="panel subtab active" id="audit-reports-pane"><h2>审计报告</h2><p class="note">请求日志、安全事件、连接器合同和验收报告都通过操作区读取真实接口结果。真实平台上线前请先跑连接器一致性和真实平台合同套件。</p><div class="ops">{audit_actions}</div></div>
             <div class="panel subtab" id="audit-guidance-pane"><h2>上线关注点</h2><p class="note">关注数据库后端、worker 队列、资产签名密钥、凭据加密密钥、真实 provider 覆盖、账号验收和请求审计是否完整。</p></div>
           </section>
+          <section id="tab-setup" class="tab">
+            <div class="section-tabs">
+              <button class="subnav-item active" type="button" data-subtab="setup-guide-pane">首次配置</button>
+              <button class="subnav-item" type="button" data-subtab="setup-env-pane">生成 .env</button>
+              <button class="subnav-item" type="button" data-subtab="setup-check-pane">部署检查</button>
+            </div>
+            <div class="panel subtab active" id="setup-guide-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>自部署配置向导</h2>
+                  <p class="note">对齐 sub2api 的 Setup Wizard：程序首次运行前，先让用户按顺序填写数据库、Redis、初始管理员和公开地址。这里给管理员保留同样的配置入口；未登录时也可以直接打开公开向导。</p>
+                </div>
+                <a class="setup-open-link" href="/setup" target="_blank" rel="noreferrer"><span class="inline-icon" aria-hidden="true">DP</span> 打开 /setup</a>
+              </div>
+              <div class="product-flow">
+                <div class="step-card"><b><span>DB</span>数据库</b><p>生产使用 PostgreSQL，SQLite 只用于本地试用。部署前确认 `DATABASE_URL` 指向目标库。</p></div>
+                <div class="step-card"><b><span>RQ</span>Redis</b><p>配置 `REDIS_URL` 后启用队列、限流、租约和 worker 协调，避免把耗时任务压在 API 进程里。</p></div>
+                <div class="step-card"><b><span>AK</span>管理员</b><p>设置 `MEDIA2API_ADMIN_PASSWORD`、`MEDIA2API_BOOTSTRAP_KEY` 和初始管理员邮箱。</p></div>
+                <div class="step-card"><b><span>OK</span>验收</b><p>启动 API 与 worker 后访问 `/health`、`/admin`，再导入上游账号并发放用户 API Key。</p></div>
+              </div>
+              <div class="status-strip">
+                <div><span class="eyebrow">数据库</span><b>{admin_escape(settings.database_url.split(':', 1)[0])}</b></div>
+                <div><span class="eyebrow">Redis</span><b>{'已配置' if settings.redis_url else '未配置'}</b></div>
+                <div><span class="eyebrow">Admin 密码</span><b>{'已配置' if settings.admin_password else '未配置'}</b></div>
+                <div><span class="eyebrow">公开地址</span><b>{admin_escape(settings.public_base_url)}</b></div>
+              </div>
+            </div>
+            <div class="panel subtab" id="setup-env-pane">
+              <h2>生成部署 .env</h2>
+              <p class="note">这个生成器不会写入服务器文件，只把用户填写的配置整理成可复制的 `.env` 和 Linux 启动命令。正式部署时请把密钥保存到服务器环境变量或 systemd Environment。</p>
+              <div class="formline">
+                <div><label>数据库 URL</label><input id="admin-setup-database-url" value="postgresql+psycopg2://media2api:change-me@127.0.0.1:5432/media2api" /></div>
+                <div><label>Redis URL</label><input id="admin-setup-redis-url" value="redis://127.0.0.1:6379/0" /></div>
+                <button class="primary" type="button" id="admin-setup-build">生成配置</button>
+              </div>
+              <div class="formline" style="margin-top:10px">
+                <div><label>管理员邮箱</label><input id="admin-setup-email" value="{admin_escape(settings.default_user_email)}" /></div>
+                <div><label>公开地址</label><input id="admin-setup-public-url" value="{admin_escape(settings.public_base_url)}" /></div>
+                <div><label>端口</label><input id="admin-setup-port" value="8080" /></div>
+              </div>
+              <div class="formline" style="margin-top:10px">
+                <div><label>管理员密码</label><input id="admin-setup-password" type="password" placeholder="生产环境强密码" /></div>
+                <div><label>Bootstrap API Key</label><input id="admin-setup-bootstrap" type="password" placeholder="点击生成或手动填写" /></div>
+                <button class="op" type="button" id="admin-setup-random-key">生成 Key</button>
+              </div>
+              <div class="deploy-builder" style="margin-top:14px">
+                <div><label>.env</label><textarea id="admin-setup-env-output" readonly></textarea></div>
+                <div><label>启动命令</label><textarea id="admin-setup-command-output" readonly></textarea></div>
+              </div>
+            </div>
+            <div class="panel subtab" id="setup-check-pane">
+              <h2>部署完成检查</h2>
+              <div class="action-grid">
+                <div class="action-cluster"><h3><span class="inline-icon" aria-hidden="true">H</span> 存活检查</h3><p>确认 API 进程、数据库、Redis 和 worker runtime 都能返回当前状态。</p><div class="ops">{action_controls_for(["/v1/admin/readiness", "/v1/admin/operator-workbench-report"])}</div></div>
+                <div class="action-cluster"><h3><span class="inline-icon" aria-hidden="true">C</span> 配置快照</h3><p>导出配置用于交接和审计；导入前先 dry-run，避免覆盖真实账号凭据。</p><div class="ops">{action_controls_for(["/v1/admin/config-export", "/v1/admin/config-import"])}</div></div>
+                <div class="action-cluster"><h3><span class="inline-icon" aria-hidden="true">A</span> 接入验收</h3><p>部署只是第一步，真正可用还需要导入平台账号、确认模型映射并运行账号验收。</p><div class="ops">{action_controls_for(["/v1/admin/account-guides", "/v1/admin/account-acceptance-suite"])}</div></div>
+              </div>
+            </div>
+          </section>
           <section id="tab-delivery" class="tab">
             <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="delivery-package-pane">交付检查</button><button class="subnav-item" type="button" data-subtab="delivery-config-pane">配置快照</button><button class="subnav-item" type="button" data-subtab="delivery-all-actions-pane">全部操作</button></div>
             <div class="panel subtab active" id="delivery-package-pane"><h2>交付</h2><p class="note">交付包、最终验收矩阵、系统要求报告和配置快照用于发布评审与交接。</p><div class="ops">{delivery_actions}</div></div>
@@ -13409,6 +13767,111 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           result.textContent = JSON.stringify(payload, null, 2);
           if (!response.ok) throw new Error(text);
           return payload;
+        }}
+        function enhanceManagedTables() {{
+          document.querySelectorAll('.table-wrap').forEach((wrap, index) => {{
+            if (wrap.dataset.enhanced === 'true') return;
+            const table = wrap.querySelector('table');
+            const tbody = table?.querySelector('tbody');
+            if (!table || !tbody) return;
+            const originalRows = Array.from(tbody.querySelectorAll('tr'));
+            wrap.dataset.enhanced = 'true';
+            wrap.setAttribute('data-table-manager', 'true');
+            let page = 1;
+            let pageSize = 10;
+            const tools = document.createElement('div');
+            tools.className = 'table-tools';
+            tools.innerHTML = `
+              <div class="table-tools-left">
+                <input class="table-search" type="search" placeholder="搜索当前列表" aria-label="搜索当前列表" />
+                <select class="table-page-size" aria-label="每页条数">
+                  <option value="5">5 / 页</option>
+                  <option value="10" selected>10 / 页</option>
+                  <option value="20">20 / 页</option>
+                  <option value="50">50 / 页</option>
+                </select>
+              </div>
+              <div class="table-tools-right">
+                <span class="table-count"></span>
+                <button class="table-page-button" type="button" data-page-action="prev">上一页</button>
+                <button class="table-page-button" type="button" data-page-action="next">下一页</button>
+              </div>`;
+            wrap.parentNode.insertBefore(tools, wrap);
+            const search = tools.querySelector('.table-search');
+            const size = tools.querySelector('.table-page-size');
+            const count = tools.querySelector('.table-count');
+            const prev = tools.querySelector('[data-page-action="prev"]');
+            const next = tools.querySelector('[data-page-action="next"]');
+            function filteredRows() {{
+              const keyword = String(search.value || '').trim().toLowerCase();
+              return keyword ? originalRows.filter(row => row.textContent.toLowerCase().includes(keyword)) : originalRows;
+            }}
+            function render() {{
+              const rows = filteredRows();
+              const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+              page = Math.min(Math.max(1, page), totalPages);
+              const start = (page - 1) * pageSize;
+              const pageRows = rows.slice(start, start + pageSize);
+              tbody.innerHTML = '';
+              pageRows.forEach(row => tbody.appendChild(row));
+              count.textContent = `第 ${{page}} / ${{totalPages}} 页 · ${{rows.length}} 条`;
+              prev.disabled = page <= 1;
+              next.disabled = page >= totalPages;
+            }}
+            search.addEventListener('input', () => {{ page = 1; render(); }});
+            size.addEventListener('change', () => {{ pageSize = Number(size.value || 10); page = 1; render(); }});
+            prev.addEventListener('click', () => {{ page -= 1; render(); }});
+            next.addEventListener('click', () => {{ page += 1; render(); }});
+            render();
+          }});
+        }}
+        function adminRandomSecret(prefix) {{
+          const bytes = new Uint8Array(24);
+          crypto.getRandomValues(bytes);
+          return prefix + Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+        }}
+        const adminSetupSecrets = {{
+          encryption: adminRandomSecret('m2enc_'),
+          asset: adminRandomSecret('m2asset_'),
+        }};
+        function buildAdminSetupOutput() {{
+          const db = document.getElementById('admin-setup-database-url')?.value.trim() || 'postgresql+psycopg2://media2api:change-me@127.0.0.1:5432/media2api';
+          const redis = document.getElementById('admin-setup-redis-url')?.value.trim();
+          const publicUrl = document.getElementById('admin-setup-public-url')?.value.trim() || 'http://localhost:8080';
+          const email = document.getElementById('admin-setup-email')?.value.trim() || 'admin@media2api.local';
+          const password = document.getElementById('admin-setup-password')?.value || 'REPLACE_WITH_STRONG_ADMIN_PASSWORD';
+          const bootstrap = document.getElementById('admin-setup-bootstrap')?.value || 'REPLACE_WITH_STRONG_BOOTSTRAP_KEY';
+          const port = document.getElementById('admin-setup-port')?.value || '8080';
+          const envLines = [
+            'MEDIA2API_ENV=production',
+            'DATABASE_URL=' + db,
+            redis ? 'REDIS_URL=' + redis : '# REDIS_URL=',
+            'PUBLIC_BASE_URL=' + publicUrl,
+            'MEDIA2API_BOOTSTRAP_KEY=' + bootstrap,
+            'MEDIA2API_ADMIN_PASSWORD=' + password,
+            'MEDIA2API_DEFAULT_USER=' + email,
+            'MEDIA2API_INLINE_ASYNC=false',
+            'MEDIA2API_WORKER_CONCURRENCY=2',
+            'MEDIA2API_SECRET_ENCRYPTION_KEY=' + adminSetupSecrets.encryption,
+            'MEDIA2API_ASSET_SIGNING_SECRET=' + adminSetupSecrets.asset,
+            'ASSET_DIR=./var/assets',
+            'MEDIA2API_ASSET_STORE=local',
+          ];
+          const commands = [
+            'python -m venv .venv',
+            'source .venv/bin/activate',
+            'pip install -r requirements.txt',
+            'set -a && source .env && set +a',
+            'uvicorn media2api.main:app --host 0.0.0.0 --port ' + port,
+            '# worker 进程',
+            'python -m media2api.worker',
+            '# 完成后检查',
+            'curl ' + publicUrl.replace(/\\/$/, '') + '/health',
+          ];
+          const envOutput = document.getElementById('admin-setup-env-output');
+          const commandOutput = document.getElementById('admin-setup-command-output');
+          if (envOutput) envOutput.value = envLines.join('\\n');
+          if (commandOutput) commandOutput.value = commands.join('\\n');
         }}
         const safeCredentialRefPrefixes = ['secret://', 'agent://'];
         const credentialKindByAuth = {{
@@ -14247,6 +14710,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('save-secret')?.addEventListener('click', async () => {{
           await callAdmin('/v1/admin/credential-secrets', 'POST', {{ id: 'secret_' + Date.now(), name: '管理台保存凭据', kind: 'session', provider_id: document.getElementById('secret-provider').value, account_id: document.getElementById('secret-account').value, value: document.getElementById('secret-value').value, metadata: {{ source: 'admin_dashboard' }} }});
         }});
+        document.getElementById('admin-setup-random-key')?.addEventListener('click', () => {{
+          const input = document.getElementById('admin-setup-bootstrap');
+          if (input) input.value = adminRandomSecret('m2api_');
+          buildAdminSetupOutput();
+        }});
+        document.getElementById('admin-setup-build')?.addEventListener('click', buildAdminSetupOutput);
+        ['admin-setup-database-url', 'admin-setup-redis-url', 'admin-setup-email', 'admin-setup-public-url', 'admin-setup-port', 'admin-setup-password', 'admin-setup-bootstrap'].forEach(id => {{
+          document.getElementById(id)?.addEventListener('input', buildAdminSetupOutput);
+        }});
+        enhanceManagedTables();
+        buildAdminSetupOutput();
       </script>
     </body>
     </html>
@@ -14266,6 +14740,16 @@ def admin_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLResp
     if request.query_params.get("admin_key") or request.query_params.get("api_key"):
         response.set_cookie("media2api_admin_key", raw_admin_key, httponly=True, samesite="lax", max_age=604800)
     return response
+
+
+@app.get("/setup/status")
+def setup_status() -> dict[str, Any]:
+    return setup_status_payload()
+
+
+@app.get("/setup", response_class=HTMLResponse, include_in_schema=False)
+def setup_wizard() -> HTMLResponse:
+    return HTMLResponse(setup_wizard_html())
 
 
 @app.post("/admin/login")
