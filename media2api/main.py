@@ -12360,6 +12360,22 @@ def setup_status_payload() -> dict[str, Any]:
 def setup_wizard_html() -> str:
     status = setup_status_payload()
     status_json = json.dumps(status, ensure_ascii=False)
+
+    def setup_icon(name: str, css_class: str = "setup-icon") -> str:
+        icons = {
+            "database": '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>',
+            "redis": '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h5"/>',
+            "key": '<path d="M21 2l-2 2"/><path d="M15.5 7.5l2 2L9 18H5v-4z"/><circle cx="17.5" cy="6.5" r="3.5"/>',
+            "deploy": '<path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 21h14"/><path d="M6 17h12"/>',
+            "config": '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z"/><path d="M19 12h3"/><path d="M2 12h3"/><path d="M12 2v3"/><path d="M12 19v3"/>',
+            "server": '<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01"/><path d="M7 17h.01"/>',
+            "check": '<path d="M20 6L9 17l-5-5"/>',
+            "url": '<path d="M10 13a5 5 0 0 0 7.07 0l2-2a5 5 0 0 0-7.07-7.07l-1.14 1.14"/><path d="M14 11a5 5 0 0 0-7.07 0l-2 2A5 5 0 0 0 12 20.07l1.14-1.14"/>',
+            "lock": '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+        }
+        body = icons.get(name, icons["check"])
+        return f'<svg class="{css_class}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{body}</svg>'
+
     return f"""
     <!doctype html>
     <html lang="zh-CN">
@@ -12368,16 +12384,18 @@ def setup_wizard_html() -> str:
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>media2api 自部署配置向导</title>
       <style>
-        :root {{ color-scheme:dark; --bg:#07090d; --surface:#11151c; --surface-2:#171c25; --surface-3:#202735; --line:#2b3444; --text:#f4f7fb; --muted:#93a0b3; --soft:#cbd5e1; --accent:#36c6a1; --blue:#8aa4ff; --warn:#f4bf63; --shadow:0 18px 48px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03); }}
+        :root {{ color-scheme:dark; --bg:#05070a; --bg-2:#090d13; --surface:#11151c; --surface-2:#151b24; --surface-3:#1c2430; --line:#27313f; --line-strong:#3b475a; --text:#f7fafc; --muted:#8f9bad; --soft:#c8d1df; --accent:#43d6b2; --accent-deep:#12362f; --accent-line:rgba(67,214,178,.42); --blue:#8aa4ff; --warn:#e0b15a; --radius:8px; --font-display:Bahnschrift, "Aptos Display", "Segoe UI", sans-serif; --font-body:Inter, Aptos, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; --font-data:"JetBrains Mono", "Cascadia Mono", Consolas, monospace; --shadow:0 18px 48px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.035); --shadow-soft:8px 10px 24px rgba(0,0,0,.28), -6px -6px 16px rgba(255,255,255,.025); }}
         * {{ box-sizing:border-box; }}
-        body {{ margin:0; min-height:100vh; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:radial-gradient(circle at 14% 0%, rgba(54,198,161,.1), transparent 31%), linear-gradient(135deg,#050608,#0a0d13 55%,#0d1118); color:var(--text); }}
+        body {{ margin:0; min-height:100vh; font-family:var(--font-body); background:linear-gradient(135deg,#05070a,#090d13 48%,#0b1017); color:var(--text); }}
         button,input,select,textarea {{ font:inherit; color-scheme:dark; }}
         .shell {{ width:min(1120px, calc(100vw - 28px)); margin:0 auto; padding:28px 0 40px; }}
-        header {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; }}
+        header {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; padding:14px; border:1px solid rgba(255,255,255,.04); border-radius:var(--radius); background:rgba(9,13,19,.66); box-shadow:var(--shadow); }}
         .brand {{ display:flex; gap:12px; align-items:center; }}
-        .logo,.step-dot,.icon {{ width:40px; height:40px; border-radius:8px; display:grid; place-items:center; border:1px solid #2b554c; background:linear-gradient(145deg,#1f3a36,#0e151d); color:#fff; font-weight:900; box-shadow:var(--shadow); }}
-        h1 {{ margin:0; font-size:28px; letter-spacing:0; }}
-        h2 {{ margin:0 0 12px; font-size:18px; letter-spacing:0; }}
+        .logo {{ width:40px; height:40px; border-radius:var(--radius); display:grid; place-items:center; border:1px solid #2d5b51; background:linear-gradient(145deg,#203b35,#0e151d); color:#fff; font-family:var(--font-display); font-weight:900; box-shadow:var(--shadow-soft); }}
+        .setup-icon,.step-dot,.icon {{ display:inline-block; color:currentColor; }}
+        .step-dot,.icon {{ width:40px; height:40px; flex:0 0 40px; padding:8px; border-radius:var(--radius); border:1px solid #2d5b51; background:linear-gradient(145deg,#1f3a36,#0e151d); color:#fff; box-shadow:var(--shadow-soft); }}
+        h1 {{ margin:0; font-family:var(--font-display); font-size:28px; letter-spacing:0; }}
+        h2 {{ margin:0 0 12px; font-family:var(--font-display); font-size:18px; letter-spacing:0; }}
         p {{ color:var(--muted); line-height:1.6; }}
         a {{ color:var(--blue); }}
         .status {{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }}
@@ -12385,31 +12403,36 @@ def setup_wizard_html() -> str:
         .pill.ok {{ color:#66d484; border-color:rgba(102,212,132,.34); background:rgba(102,212,132,.1); }}
         .pill.warn {{ color:var(--warn); border-color:rgba(244,191,99,.34); background:rgba(244,191,99,.1); }}
         .layout {{ display:grid; grid-template-columns:270px 1fr; gap:16px; align-items:start; }}
-        .steps,.panel {{ border:1px solid var(--line); border-radius:8px; background:rgba(17,21,28,.93); box-shadow:var(--shadow); }}
+        .steps,.panel {{ border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,rgba(17,21,28,.96),rgba(12,17,24,.96)); box-shadow:var(--shadow); }}
         .steps {{ padding:12px; position:sticky; top:16px; }}
-        .step-button {{ width:100%; display:flex; gap:10px; align-items:center; min-height:52px; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--soft); text-align:left; padding:8px; cursor:pointer; }}
-        .step-button.active,.step-button:hover {{ background:#1b222e; border-color:#2e3a4d; color:#fff; }}
+        .step-button {{ width:100%; display:flex; gap:10px; align-items:center; min-height:54px; border:1px solid transparent; border-radius:var(--radius); background:transparent; color:var(--soft); text-align:left; padding:8px; cursor:pointer; position:relative; }}
+        .step-button::before {{ content:""; position:absolute; left:-7px; top:12px; width:3px; height:30px; border-radius:999px; background:transparent; }}
+        .step-button.active,.step-button:hover {{ background:linear-gradient(145deg,#1a222d,#111821); border-color:#2e3a4d; color:#fff; }}
+        .step-button.active::before {{ background:var(--accent); box-shadow:0 0 18px rgba(67,214,178,.45); }}
+        .step-button.active .step-dot,.step-button:hover .step-dot {{ border-color:var(--accent-line); color:#eafff8; background:linear-gradient(145deg,var(--accent-deep),#15222a); }}
         .step-button small {{ display:block; color:var(--muted); margin-top:2px; }}
         .panel {{ padding:20px; display:none; }}
         .panel.active {{ display:block; }}
         .grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
         .field {{ margin-bottom:12px; }}
         label {{ display:block; margin-bottom:6px; font-size:12px; color:var(--soft); font-weight:800; }}
-        input,select,textarea {{ width:100%; min-height:42px; border:1px solid var(--line); border-radius:8px; background:#0d1118; color:var(--text); padding:8px 10px; outline:none; }}
-        input:focus,select:focus,textarea:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(54,198,161,.14); }}
-        textarea {{ min-height:180px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; resize:vertical; }}
+        input,select,textarea {{ width:100%; min-height:42px; border:1px solid var(--line); border-radius:var(--radius); background:#0c1118; color:var(--text); padding:8px 10px; outline:none; }}
+        input:focus,select:focus,textarea:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(67,214,178,.14); }}
+        textarea {{ min-height:180px; font-family:var(--font-data); font-size:12px; resize:vertical; }}
         .actions {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }}
-        button.primary,button.secondary {{ min-height:42px; border-radius:8px; padding:0 14px; font-weight:900; cursor:pointer; }}
-        button.primary {{ border:1px solid rgba(54,198,161,.55); background:linear-gradient(145deg,#2ab38f,#1b806f); color:#06110f; }}
-        button.secondary {{ border:1px solid var(--line); background:var(--surface-2); color:var(--soft); }}
+        button.primary,button.secondary {{ min-height:42px; border-radius:var(--radius); padding:0 14px; font-weight:900; cursor:pointer; }}
+        button.primary {{ border:1px solid rgba(67,214,178,.58); background:linear-gradient(145deg,#41d3af,#238a76); color:#06110f; }}
+        button.secondary {{ border:1px solid var(--line); background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); }}
+        button.secondary:hover {{ border-color:var(--line-strong); background:#1a2230; color:#fff; }}
         .cards {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:14px 0; }}
-        .card {{ border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#171c25,#11161f); padding:14px; min-height:128px; }}
+        .card {{ border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,#171d27,#11161f); padding:14px; min-height:128px; box-shadow:var(--shadow-soft); }}
         .card b {{ display:flex; align-items:center; gap:8px; }}
+        .card .icon {{ width:30px; height:30px; flex-basis:30px; padding:6px; color:var(--accent); border-color:rgba(67,214,178,.22); background:rgba(67,214,178,.07); }}
         .card p {{ margin:8px 0 0; font-size:13px; }}
         .checklist {{ display:grid; gap:8px; }}
-        .check {{ display:flex; gap:10px; align-items:flex-start; border:1px solid var(--line); border-radius:8px; padding:12px; background:#0d1118; }}
-        .check .icon {{ width:28px; height:28px; font-size:12px; }}
-        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border:1px solid var(--line); border-radius:8px; background:#05070b; color:#dbeafe; max-height:360px; overflow:auto; }}
+        .check {{ display:flex; gap:10px; align-items:flex-start; border:1px solid var(--line); border-radius:var(--radius); padding:12px; background:#0d1118; }}
+        .check .icon {{ width:28px; height:28px; flex-basis:28px; padding:6px; color:var(--accent); border-color:rgba(67,214,178,.22); background:rgba(67,214,178,.07); }}
+        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border:1px solid var(--line); border-radius:var(--radius); background:#05070b; color:#dbeafe; max-height:360px; overflow:auto; font-family:var(--font-data); font-size:12px; }}
         @media (max-width:900px) {{ .layout,.grid,.cards {{ grid-template-columns:1fr; }} header {{ display:block; }} .status {{ justify-content:flex-start; margin-top:12px; }} .steps {{ position:static; }} }}
       </style>
     </head>
@@ -12421,10 +12444,10 @@ def setup_wizard_html() -> str:
         </header>
         <div class="layout">
           <nav class="steps">
-            <button class="step-button active" type="button" data-step="database"><span class="step-dot">DB</span><span>数据库<small>PostgreSQL / SQLite</small></span></button>
-            <button class="step-button" type="button" data-step="redis"><span class="step-dot">RQ</span><span>Redis<small>队列、限流、worker</small></span></button>
-            <button class="step-button" type="button" data-step="admin"><span class="step-dot">AK</span><span>管理员与 Key<small>首个管理员和 bootstrap key</small></span></button>
-            <button class="step-button" type="button" data-step="deploy"><span class="step-dot">RUN</span><span>生成部署<small>.env、命令和检查清单</small></span></button>
+            <button class="step-button active" type="button" data-step="database">{setup_icon("database", "step-dot")}<span>数据库<small>PostgreSQL / SQLite</small></span></button>
+            <button class="step-button" type="button" data-step="redis">{setup_icon("redis", "step-dot")}<span>Redis<small>队列、限流、worker</small></span></button>
+            <button class="step-button" type="button" data-step="admin">{setup_icon("key", "step-dot")}<span>管理员与 Key<small>首个管理员和 bootstrap key</small></span></button>
+            <button class="step-button" type="button" data-step="deploy">{setup_icon("deploy", "step-dot")}<span>生成部署<small>.env、命令和检查清单</small></span></button>
           </nav>
           <main>
             <section class="panel active" id="setup-step-database">
@@ -12471,10 +12494,10 @@ def setup_wizard_html() -> str:
             <section class="panel" id="setup-step-deploy">
               <h2>4. 生成部署配置</h2>
               <div class="cards">
-                <div class="card"><b><span class="icon">ENV</span>写入 .env</b><p>复制下方环境变量到服务器的 `.env` 或 systemd Environment。</p></div>
-                <div class="card"><b><span class="icon">DB</span>准备数据库</b><p>PostgreSQL 先创建用户和库，再启动迁移/初始化。</p></div>
-                <div class="card"><b><span class="icon">RUN</span>启动 API 与 worker</b><p>API 负责请求，worker 负责异步生成任务。</p></div>
-                <div class="card"><b><span class="icon">OK</span>完成验收</b><p>访问 `/health`、`/admin`，再导入上游账号和发放用户 API Key。</p></div>
+                <div class="card"><b>{setup_icon("config", "icon")}写入 .env</b><p>复制下方环境变量到服务器的 `.env` 或 systemd Environment。</p></div>
+                <div class="card"><b>{setup_icon("database", "icon")}准备数据库</b><p>PostgreSQL 先创建用户和库，再启动迁移/初始化。</p></div>
+                <div class="card"><b>{setup_icon("server", "icon")}启动 API 与 worker</b><p>API 负责请求，worker 负责异步生成任务。</p></div>
+                <div class="card"><b>{setup_icon("check", "icon")}完成验收</b><p>访问 `/health`、`/admin`，再导入上游账号和发放用户 API Key。</p></div>
               </div>
               <div class="grid">
                 <div><label>.env 配置</label><textarea id="setup-env-output" readonly></textarea></div>
@@ -12489,6 +12512,18 @@ def setup_wizard_html() -> str:
       <script>
         const initialStatus = {status_json};
         const generatedInstallSecrets = {{}};
+        const setupIconPaths = {{
+          database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>',
+          redis: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h5"/>',
+          key: '<path d="M21 2l-2 2"/><path d="M15.5 7.5l2 2L9 18H5v-4z"/><circle cx="17.5" cy="6.5" r="3.5"/>',
+          lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+          url: '<path d="M10 13a5 5 0 0 0 7.07 0l2-2a5 5 0 0 0-7.07-7.07l-1.14 1.14"/><path d="M14 11a5 5 0 0 0-7.07 0l-2 2A5 5 0 0 0 12 20.07l1.14-1.14"/>',
+          check: '<path d="M20 6L9 17l-5-5"/>'
+        }};
+        function setupIconSvg(name) {{
+          const path = setupIconPaths[name] || setupIconPaths.check;
+          return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${{path}}</svg>`;
+        }}
         const qs = id => document.getElementById(id);
         function showStep(step) {{
           document.querySelectorAll('.step-button').forEach(item => item.classList.toggle('active', item.dataset.step === step));
@@ -12556,14 +12591,14 @@ def setup_wizard_html() -> str:
           if (qs('setup-env-output')) qs('setup-env-output').value = envText();
           if (qs('setup-command-output')) qs('setup-command-output').value = commandText();
           const checks = [
-            ['DB', qs('setup-db-type').value === 'postgres' ? '生产数据库已选择 PostgreSQL' : '当前选择 SQLite，仅建议本地试用'],
-            ['RQ', redisUrl() ? 'Redis 已配置，worker 队列可用' : 'Redis 未配置，生产环境建议补齐'],
-            ['AK', qs('setup-bootstrap-key').value ? 'Bootstrap API Key 已填写' : '请生成并保存 bootstrap key'],
-            ['PW', qs('setup-admin-password').value ? '管理员密码已填写' : '请设置管理员登录密码'],
-            ['URL', qs('setup-public-base-url').value ? '公开地址已填写' : '请填写 PUBLIC_BASE_URL']
+            ['database', qs('setup-db-type').value === 'postgres' ? '生产数据库已选择 PostgreSQL' : '当前选择 SQLite，仅建议本地试用'],
+            ['redis', redisUrl() ? 'Redis 已配置，worker 队列可用' : 'Redis 未配置，生产环境建议补齐'],
+            ['key', qs('setup-bootstrap-key').value ? 'Bootstrap API Key 已填写' : '请生成并保存 bootstrap key'],
+            ['lock', qs('setup-admin-password').value ? '管理员密码已填写' : '请设置管理员登录密码'],
+            ['url', qs('setup-public-base-url').value ? '公开地址已填写' : '请填写 PUBLIC_BASE_URL']
           ];
           const target = qs('setup-checklist');
-          if (target) target.innerHTML = checks.map(([icon, text]) => `<div class="check"><span class="icon">${{icon}}</span><span>${{text}}</span></div>`).join('');
+          if (target) target.innerHTML = checks.map(([icon, text]) => `<div class="check">${{setupIconSvg(icon)}}<span>${{text}}</span></div>`).join('');
         }}
         function renderStatus() {{
           const target = qs('setup-status-pills');
@@ -12923,15 +12958,68 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         tone = "ok" if raw_value in {"active", "completed", "delivered", "enabled"} else "warn" if raw_value in {"created", "running", "pending", "open", "auth_required", "rate_limited", "cooldown"} else "muted"
         return f'<span class="pill {tone}">{text_value}</span>'
 
+    def admin_icon(name: str, css_class: str = "ui-icon") -> str:
+        icons = {
+            "overview": '<path d="M4 13h7V4H4z"/><path d="M13 20h7V4h-7z"/><path d="M4 20h7v-5H4z"/>',
+            "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+            "key": '<path d="M21 2l-2 2"/><path d="M15.5 7.5l2 2L9 18H5v-4z"/><circle cx="17.5" cy="6.5" r="3.5"/>',
+            "shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-5"/>',
+            "connect": '<path d="M7 7h10v10H7z"/><path d="M12 2v5"/><path d="M12 17v5"/><path d="M2 12h5"/><path d="M17 12h5"/>',
+            "server": '<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01"/><path d="M7 17h.01"/>',
+            "database": '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>',
+            "model": '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5"/><path d="M12 12v9"/><path d="M12 12L4 7.5"/>',
+            "job": '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
+            "asset": '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10.5" r="1.5"/><path d="M21 15l-5-5L5 19"/>',
+            "billing": '<path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/>',
+            "alert": '<path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+            "webhook": '<path d="M18 16.8A4 4 0 1 1 14 10h1"/><path d="M6 7.2A4 4 0 1 1 10 14H9"/><path d="M8 12h8"/>',
+            "audit": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 15l2 2 4-5"/>',
+            "deploy": '<path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 21h14"/><path d="M6 17h12"/>',
+            "delivery": '<path d="M20 7l-8-4-8 4 8 4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/>',
+            "health": '<path d="M22 12h-4l-3 8-6-16-3 8H2"/>',
+            "report": '<path d="M4 4h16v16H4z"/><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h5"/>',
+            "check": '<path d="M20 6L9 17l-5-5"/>',
+            "refresh": '<path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/>',
+            "config": '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.1 1.65V21a2 2 0 0 1-4 0v-.09A1.8 1.8 0 0 0 8.8 19.3a1.8 1.8 0 0 0-1.98.36l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.8 1.8 0 0 0 4.35 15a1.8 1.8 0 0 0-1.65-1.1H2.6a2 2 0 0 1 0-4h.09A1.8 1.8 0 0 0 4.3 8.8a1.8 1.8 0 0 0-.36-1.98l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.8 1.8 0 0 0 8.8 4.35a1.8 1.8 0 0 0 1.1-1.65V2.6a2 2 0 0 1 4 0v.09a1.8 1.8 0 0 0 1.1 1.65 1.8 1.8 0 0 0 1.98-.36l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.8 1.8 0 0 0-.36 1.98 1.8 1.8 0 0 0 1.65 1.1h.09a2 2 0 0 1 0 4h-.09A1.8 1.8 0 0 0 19.4 15z"/>',
+            "route": '<path d="M6 3v6a3 3 0 0 0 3 3h6a3 3 0 0 1 3 3v6"/><circle cx="6" cy="3" r="2"/><circle cx="18" cy="21" r="2"/><path d="M18 5v4"/><path d="M16 7h4"/>',
+        }
+        body = icons.get(name, '<circle cx="12" cy="12" r="7"/><path d="M12 8v4l3 2"/>')
+        return f'<svg class="{css_class}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{body}</svg>'
+
+    def operation_icon_name(label: str, path: str) -> str:
+        if "readiness" in path or "health" in path:
+            return "health"
+        if "acceptance" in path or "final" in path:
+            return "check"
+        if "registry" in path or "connector" in path or "manifest" in path:
+            return "connect"
+        if "config" in path:
+            return "config"
+        if "job" in path or "fallback" in path:
+            return "job"
+        if "asset" in path:
+            return "asset"
+        if "account" in path:
+            return "database"
+        if "provider" in path:
+            return "server"
+        if "delivery" in path or "requirements" in path:
+            return "delivery"
+        return "report"
+
+    def operation_button_html(label: str, method: str, path: str) -> str:
+        icon = admin_icon(operation_icon_name(label, path), "button-icon")
+        return f'<button class="op" data-method="{method}" data-path="{admin_escape(path)}">{icon}<span>{admin_escape(label)}</span></button>'
+
     metric_cards = "".join(
-        f'<div class="metric"><span class="inline-icon" aria-hidden="true">{admin_escape(icon)}</span><span>{admin_escape(label)}</span><strong>{admin_escape(value)}</strong><small>{admin_escape(note)}</small></div>'
+        f'<div class="metric"><div class="metric-head">{admin_icon(icon, "metric-icon")}<span>{admin_escape(label)}</span></div><strong>{admin_escape(value)}</strong><small>{admin_escape(note)}</small></div>'
         for icon, label, value, note in [
-            ("JB", "今日任务", dashboard["jobs"]["today_total"], f'队列 {dashboard["jobs"]["queue_length"]}'),
-            ("SR", "成功率", "-" if dashboard["jobs"]["success_rate"] is None else f'{dashboard["jobs"]["success_rate"] * 100:.1f}%', "已终态任务"),
-            ("PV", "已启用平台", len([item for item in providers if item.status == "active"]), f'真实平台 {len(providers)}'),
-            ("AC", "已启用账号", len([item for item in accounts if item.status == "active"]), f'租约 {dashboard["accounts"]["active_leases"]}'),
-            ("!", "打开告警", dashboard["alerts"]["open"], f'严重 {dashboard["alerts"]["critical_open"]}'),
-            ("$", "今日毛利", dashboard["billing"]["gross_margin_today"], dashboard["billing"]["currency"]),
+            ("job", "今日任务", dashboard["jobs"]["today_total"], f'队列 {dashboard["jobs"]["queue_length"]}'),
+            ("health", "成功率", "-" if dashboard["jobs"]["success_rate"] is None else f'{dashboard["jobs"]["success_rate"] * 100:.1f}%', "已终态任务"),
+            ("server", "已启用平台", len([item for item in providers if item.status == "active"]), f'真实平台 {len(providers)}'),
+            ("database", "已启用账号", len([item for item in accounts if item.status == "active"]), f'租约 {dashboard["accounts"]["active_leases"]}'),
+            ("alert", "打开告警", dashboard["alerts"]["open"], f'严重 {dashboard["alerts"]["critical_open"]}'),
+            ("billing", "今日毛利", dashboard["billing"]["gross_margin_today"], dashboard["billing"]["currency"]),
         ]
     )
     user_rows = "".join(f"<tr><td>{admin_escape(user.id)}</td><td>{admin_escape(user.email)}</td><td>{pill(user.status)}</td><td>{admin_escape(user.tier)}</td><td>{admin_escape(user.wallet_balance)}</td></tr>" for user in users)
@@ -13018,14 +13106,14 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("同步 Gemini 能力", "POST", "/v1/admin/providers/gemini/sync-capabilities"),
     ]
     operation_controls = "".join(
-        f'<button class="op" data-method="{method}" data-path="{admin_escape(path)}">{admin_escape(label)}</button>'
+        operation_button_html(label, method, path)
         for label, method, path in operation_buttons
     )
 
     def action_controls_for(paths: list[str]) -> str:
         wanted = set(paths)
         return "".join(
-            f'<button class="op" data-method="{method}" data-path="{admin_escape(path)}">{admin_escape(label)}</button>'
+            operation_button_html(label, method, path)
             for label, method, path in operation_buttons
             if path in wanted
         )
@@ -13083,21 +13171,21 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     ])
     all_action_controls = operation_controls
     tabs = [
-        ("overview", "总览", "01", "运营"),
-        ("users", "用户与 API Key", "AK", "运营"),
-        ("oauth", "授权资源", "AU", "接入"),
-        ("connectors", "开源连接器", "CN", "接入"),
-        ("providers", "平台", "PV", "接入"),
-        ("accounts", "账号池", "AC", "接入"),
-        ("models", "模型路由", "MD", "路由"),
-        ("jobs", "任务", "JB", "运营"),
-        ("assets", "资产", "AS", "运营"),
-        ("billing", "计费", "$", "运营"),
-        ("alerts", "告警", "!", "运维"),
-        ("webhooks", "回调", "WH", "运维"),
-        ("audit", "审计", "QA", "运维"),
-        ("setup", "部署向导", "DP", "系统"),
-        ("delivery", "交付", "OK", "系统"),
+        ("overview", "总览", "overview", "运营"),
+        ("users", "用户与 API Key", "users", "运营"),
+        ("oauth", "授权资源", "shield", "接入"),
+        ("connectors", "开源连接器", "connect", "接入"),
+        ("providers", "平台", "server", "接入"),
+        ("accounts", "账号池", "database", "接入"),
+        ("models", "模型路由", "model", "路由"),
+        ("jobs", "任务", "job", "运营"),
+        ("assets", "资产", "asset", "运营"),
+        ("billing", "计费", "billing", "运营"),
+        ("alerts", "告警", "alert", "运维"),
+        ("webhooks", "回调", "webhook", "运维"),
+        ("audit", "审计", "audit", "运维"),
+        ("setup", "部署向导", "deploy", "系统"),
+        ("delivery", "交付", "delivery", "系统"),
     ]
     nav_parts: list[str] = []
     current_group = ""
@@ -13107,7 +13195,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             nav_parts.append(f'<div class="nav-group-label">{admin_escape(group)}</div>')
         nav_parts.append(
             f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}" data-title="{admin_escape(label)}">'
-            f'<span class="nav-icon" aria-hidden="true">{admin_escape(icon)}</span><span>{admin_escape(label)}</span></button>'
+            f'{admin_icon(icon, "nav-icon")}<span>{admin_escape(label)}</span></button>'
         )
     nav = "".join(nav_parts)
     return f"""
@@ -13118,62 +13206,66 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>media2api 管理后台</title>
       <style>
-        :root {{ color-scheme:dark; --bg:#07090d; --surface:#11151c; --surface-2:#171c25; --surface-3:#202735; --surface-raised:#151a23; --line:#2b3444; --line-strong:#455165; --text:#f4f7fb; --muted:#93a0b3; --soft:#cbd5e1; --accent:#36c6a1; --accent-2:#8aa4ff; --amber:#f4bf63; --green:#66d484; --red:#ff7b72; --blue:#7aa2ff; --shadow:0 18px 38px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.03); --shadow-soft:10px 10px 24px rgba(0,0,0,.28), -8px -8px 18px rgba(255,255,255,.025); }}
+        :root {{ color-scheme:dark; --bg:#05070a; --bg-2:#090d13; --surface:#11151c; --surface-2:#151b24; --surface-3:#1c2430; --surface-raised:#19212c; --line:#27313f; --line-strong:#3b475a; --text:#f7fafc; --muted:#8f9bad; --soft:#c8d1df; --accent:#43d6b2; --accent-deep:#12362f; --accent-line:rgba(67,214,178,.42); --accent-2:#8aa4ff; --amber:#e0b15a; --green:#70d98b; --red:#ff7b72; --blue:#82a5ff; --shadow:0 18px 44px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.035); --shadow-soft:8px 10px 24px rgba(0,0,0,.28), -6px -6px 16px rgba(255,255,255,.025); --radius:8px; --font-display:Bahnschrift, "Aptos Display", "Segoe UI", sans-serif; --font-body:Inter, Aptos, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; --font-data:"JetBrains Mono", "Cascadia Mono", Consolas, monospace; }}
         html {{ color-scheme:dark !important; background:var(--bg); }}
         * {{ box-sizing:border-box; }}
-        body {{ margin:0; min-height:100vh; overflow:hidden; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:radial-gradient(circle at 14% 0%, rgba(54,198,161,.08), transparent 30%), linear-gradient(135deg,#050608,#0a0d13 52%,#0d1118); color:var(--text); }}
+        body {{ margin:0; min-height:100vh; overflow:hidden; font-family:var(--font-body); background:linear-gradient(135deg,#05070a,#090d13 48%,#0b1017); color:var(--text); }}
         button,input,select,textarea {{ font:inherit; color-scheme:dark; }}
         button {{ appearance:none; -webkit-appearance:none; color:var(--text); background:var(--surface); }}
-        .app {{ display:grid; grid-template-columns:282px 1fr; height:100vh; }}
-        aside {{ padding:20px; border-right:1px solid var(--line); background:linear-gradient(180deg,#0a0d13,#11151d); color:#e5e7eb; overflow:auto; box-shadow:inset -1px 0 0 rgba(255,255,255,.02); }}
-        .brand {{ display:flex; gap:12px; align-items:center; margin-bottom:24px; }}
-        .logo {{ width:42px; height:42px; border-radius:8px; display:grid; place-items:center; font-weight:900; background:linear-gradient(145deg,#1f3a36,#0e151d); color:#fff; border:1px solid #2b554c; box-shadow:var(--shadow-soft); }}
-        .brand strong {{ display:block; letter-spacing:0; }}
+        .app {{ display:grid; grid-template-columns:286px 1fr; height:100vh; }}
+        aside {{ padding:18px; border-right:1px solid var(--line); background:linear-gradient(180deg,#080c11,#11151d); color:#e5e7eb; overflow:auto; box-shadow:inset -1px 0 0 rgba(255,255,255,.025); }}
+        .brand {{ display:flex; gap:12px; align-items:center; margin-bottom:22px; padding:10px; border:1px solid rgba(67,214,178,.16); border-radius:var(--radius); background:linear-gradient(145deg,rgba(67,214,178,.08),rgba(255,255,255,.015)); }}
+        .logo {{ width:42px; height:42px; border-radius:8px; display:grid; place-items:center; font-family:var(--font-display); font-weight:900; background:linear-gradient(145deg,#203b35,#0e151d); color:#fff; border:1px solid #2d5b51; box-shadow:var(--shadow-soft); }}
+        .brand strong {{ display:block; letter-spacing:0; font-family:var(--font-display); }}
         .brand span {{ display:block; color:var(--muted); font-size:12px; margin-top:2px; }}
-        .nav-group-label {{ margin:18px 4px 7px; color:#6f7b8d; font-size:11px; font-weight:900; letter-spacing:0; }}
-        .nav-item {{ width:100%; min-height:42px; margin:3px 0; display:flex; align-items:center; gap:10px; text-align:left; color:#aeb8c8; border:1px solid transparent; border-radius:8px; padding:0 10px; background:transparent; cursor:pointer; }}
-        .nav-item:hover,.nav-item.active {{ background:#1b222e; border-color:#2e3a4d; color:white; box-shadow:inset 0 1px 0 rgba(255,255,255,.04); }}
-        .nav-icon,.inline-icon {{ width:28px; height:28px; flex:0 0 28px; display:inline-grid; place-items:center; border-radius:8px; border:1px solid var(--line); background:linear-gradient(145deg,#1b222e,#111722); color:var(--soft); font-size:11px; font-weight:900; }}
-        .nav-item.active .nav-icon,.nav-item:hover .nav-icon {{ border-color:rgba(54,198,161,.5); color:#fff; background:linear-gradient(145deg,#21433c,#16222b); }}
-        main {{ overflow:auto; padding:24px; }}
-        header {{ min-height:72px; display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }}
-        h1 {{ margin:0; font-size:28px; letter-spacing:0; }}
-        h2 {{ margin:0 0 14px; font-size:18px; letter-spacing:0; }}
-        .sub {{ color:var(--muted); margin-top:6px; }}
-        .logout {{ border:1px solid var(--line); border-radius:8px; min-height:38px; padding:0 14px; background:var(--surface-2) !important; color:var(--text) !important; cursor:pointer; box-shadow:var(--shadow); }}
-        .logout:hover {{ border-color:var(--line-strong); background:var(--surface-3); }}
+        .nav-group-label {{ margin:18px 8px 7px; color:#6f7b8d; font-size:11px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }}
+        .nav-item {{ width:100%; min-height:44px; margin:3px 0; display:flex; align-items:center; gap:10px; text-align:left; color:#aeb8c8; border:1px solid transparent; border-radius:var(--radius); padding:0 10px; background:transparent; cursor:pointer; position:relative; }}
+        .nav-item::before {{ content:""; position:absolute; left:-6px; top:9px; width:3px; height:26px; border-radius:999px; background:transparent; }}
+        .nav-item:hover,.nav-item.active {{ background:linear-gradient(145deg,#1a222d,#111821); border-color:#2e3a4d; color:white; box-shadow:inset 0 1px 0 rgba(255,255,255,.045); }}
+        .nav-item.active::before {{ background:var(--accent); box-shadow:0 0 18px rgba(67,214,178,.45); }}
+        .ui-icon,.nav-icon,.inline-icon,.metric-icon,.button-icon,.step-icon {{ display:inline-block; color:currentColor; }}
+        .nav-icon,.inline-icon,.metric-icon,.button-icon,.step-icon {{ width:28px; height:28px; flex:0 0 28px; padding:5px; border-radius:8px; border:1px solid var(--line); background:linear-gradient(145deg,#1b222e,#111722); color:var(--soft); box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }}
+        .nav-item.active .nav-icon,.nav-item:hover .nav-icon {{ border-color:var(--accent-line); color:#fff; background:linear-gradient(145deg,#21433c,#16222b); }}
+        main {{ overflow:auto; padding:24px; background:linear-gradient(180deg,rgba(255,255,255,.016),transparent 210px); }}
+        header {{ min-height:72px; display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; padding:12px 14px; border:1px solid rgba(255,255,255,.035); border-radius:var(--radius); background:rgba(9,13,19,.62); box-shadow:var(--shadow); }}
+        h1 {{ margin:0; font-family:var(--font-display); font-size:28px; letter-spacing:0; }}
+        h2 {{ margin:0 0 14px; font-family:var(--font-display); font-size:18px; letter-spacing:0; }}
+        .sub {{ color:var(--muted); margin-top:6px; line-height:1.45; }}
+        .logout {{ border:1px solid var(--line); border-radius:var(--radius); min-height:38px; padding:0 14px; background:linear-gradient(145deg,#171e28,#111720) !important; color:var(--text) !important; cursor:pointer; box-shadow:var(--shadow); font-weight:800; }}
+        .logout:hover {{ border-color:var(--line-strong); background:var(--surface-3) !important; }}
         .tab {{ display:none; }}
         .tab.active {{ display:block; }}
         .subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; }}
-        .subnav-item {{ border:1px solid var(--line); background:var(--surface-2) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
-        .subnav-item:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
-        .subnav-item.active {{ background:#eef3f8 !important; color:#111827 !important; border-color:#f8fafc; }}
+        .subnav-item {{ border:1px solid var(--line); background:linear-gradient(145deg,#171d27,#111720) !important; color:var(--soft) !important; border-radius:var(--radius); padding:8px 12px; cursor:pointer; min-height:38px; font-weight:800; }}
+        .subnav-item:hover {{ border-color:var(--line-strong); background:#1a2230 !important; }}
+        .subnav-item.active {{ background:linear-gradient(145deg,var(--accent-deep),#15222a) !important; color:#eafff8 !important; border-color:var(--accent-line); box-shadow:inset 0 1px 0 rgba(255,255,255,.04), 0 8px 18px rgba(67,214,178,.08); }}
         .subtab {{ display:none; }}
         .subtab.active {{ display:block; }}
-        .page-intro {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:14px; }}
+        .page-intro {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:16px; }}
         .page-intro .note {{ max-width:780px; margin:0; }}
-        .section-tabs {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; padding:8px; border:1px solid var(--line); border-radius:8px; background:rgba(17,21,28,.82); box-shadow:var(--shadow); }}
+        .section-tabs {{ display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; padding:8px; border:1px solid var(--line); border-radius:var(--radius); background:rgba(12,17,24,.86); box-shadow:var(--shadow); }}
         .section-tabs .subnav-item {{ margin:0; }}
         .action-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
-        .action-cluster {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:linear-gradient(145deg,#171c25,#11161f); box-shadow:var(--shadow-soft); }}
-        .action-cluster h3 {{ margin:0 0 6px; font-size:14px; letter-spacing:0; }}
+        .action-cluster {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#171d27,#10161e); box-shadow:var(--shadow-soft); }}
+        .action-cluster h3 {{ margin:0 0 6px; display:flex; align-items:center; gap:8px; font-family:var(--font-display); font-size:14px; letter-spacing:0; }}
         .action-cluster p {{ margin:0 0 10px; color:var(--muted); font-size:12px; line-height:1.5; }}
         .action-cluster .ops {{ grid-template-columns:1fr; }}
-        .table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); }}
+        .table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:var(--radius); background:#0d1219; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }}
         .table-wrap table {{ min-width:760px; }}
         .table-tools {{ display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center; margin:0 0 10px; }}
         .table-tools-left,.table-tools-right {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
         .table-search {{ width:min(300px, 100%); }}
-        .table-page-size {{ width:96px; }}
+        .table-page-size {{ width:106px; }}
         .table-count {{ color:var(--muted); font-size:12px; font-weight:800; }}
-        .table-page-button {{ min-height:36px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2) !important; color:var(--soft) !important; padding:0 10px; cursor:pointer; }}
+        .table-page-button {{ min-height:36px; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface-2) !important; color:var(--soft) !important; padding:0 10px; cursor:pointer; font-weight:800; }}
+        .table-page-button:hover {{ border-color:var(--line-strong); background:var(--surface-3) !important; }}
         .table-page-button:disabled {{ opacity:.45; cursor:not-allowed; }}
-        .result-dock {{ margin:18px 0 0; position:sticky; bottom:0; z-index:2; box-shadow:0 -16px 38px rgba(0,0,0,.38); }}
+        .result-dock {{ margin:18px 0 0; position:sticky; bottom:0; z-index:2; box-shadow:0 -16px 38px rgba(0,0,0,.38); background:rgba(12,17,24,.96); backdrop-filter:blur(10px); }}
         .result-dock pre {{ max-height:260px; }}
         .session-subnav {{ display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 14px; }}
-        .session-subnav-button {{ border:1px solid var(--line); background:var(--surface-2) !important; color:var(--soft) !important; border-radius:8px; padding:8px 12px; cursor:pointer; }}
-        .session-subnav-button:hover {{ border-color:var(--line-strong); background:var(--surface-2); }}
-        .session-subnav-button.active {{ background:#eef3f8 !important; color:#111827 !important; border-color:#f8fafc; font-weight:800; }}
+        .session-subnav-button {{ border:1px solid var(--line); background:linear-gradient(145deg,#171d27,#111720) !important; color:var(--soft) !important; border-radius:var(--radius); padding:8px 12px; cursor:pointer; font-weight:800; }}
+        .session-subnav-button:hover {{ border-color:var(--line-strong); background:#1a2230 !important; }}
+        .session-subnav-button.active {{ background:linear-gradient(145deg,var(--accent-deep),#15222a) !important; color:#eafff8 !important; border-color:var(--accent-line); font-weight:900; }}
         .session-subtab {{ display:none; }}
         .session-subtab.active {{ display:block; }}
         .field-hidden {{ display:none !important; }}
@@ -13181,40 +13273,46 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .disabled-surface input, .disabled-surface textarea, .disabled-surface button {{ cursor:not-allowed; }}
         .guide-grid.compact {{ grid-template-columns:180px 1fr; margin-top:6px; }}
         .grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
-        .metric,.panel {{ border:1px solid var(--line); border-radius:8px; background:rgba(17,21,28,.92); box-shadow:var(--shadow); }}
-        .metric {{ min-height:118px; padding:18px; }}
-        .metric span,.eyebrow {{ color:var(--muted); font-size:12px; font-weight:700; }}
-        .metric strong {{ display:block; font-size:30px; margin:10px 0 6px; }}
+        .metric,.panel {{ border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,rgba(17,21,28,.96),rgba(12,17,24,.96)); box-shadow:var(--shadow); }}
+        .metric {{ min-height:124px; padding:16px; position:relative; overflow:hidden; }}
+        .metric::after {{ content:""; position:absolute; inset:auto -24px -32px auto; width:100px; height:100px; border-radius:50%; background:rgba(67,214,178,.055); filter:blur(4px); }}
+        .metric-head {{ display:flex; align-items:center; gap:9px; color:var(--muted); font-size:12px; font-weight:900; }}
+        .metric-icon {{ color:var(--accent); border-color:rgba(67,214,178,.22); background:linear-gradient(145deg,#183830,#111821); }}
+        .eyebrow {{ color:var(--muted); font-size:12px; font-weight:800; }}
+        .metric strong {{ display:block; font-family:var(--font-display); font-size:31px; margin:12px 0 6px; letter-spacing:0; }}
         .metric small {{ color:var(--muted); }}
         .panel {{ padding:18px; margin-top:14px; }}
         .two {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
-        table {{ width:100%; border-collapse:collapse; font-size:13px; }}
-        th,td {{ padding:11px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }}
-        th {{ color:var(--soft); font-weight:800; background:#161b24; }}
+        table {{ width:100%; border-collapse:separate; border-spacing:0; font-size:13px; }}
+        th,td {{ padding:12px 11px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }}
+        th {{ color:var(--soft); font-weight:900; background:#141a23; position:sticky; top:0; z-index:1; }}
         td {{ color:var(--text); }}
-        tbody tr:hover {{ background:#171d28; }}
+        tbody tr:nth-child(even) {{ background:rgba(255,255,255,.012); }}
+        tbody tr:hover {{ background:#171f2b; }}
         .pill {{ display:inline-flex; min-height:24px; align-items:center; border-radius:999px; padding:3px 9px; border:1px solid var(--line); background:var(--surface-2); color:var(--muted); font-weight:700; }}
         .pill.ok {{ color:var(--green); background:rgba(102,212,132,.12); border-color:rgba(102,212,132,.34); }}
         .pill.warn {{ color:var(--amber); background:rgba(244,191,99,.12); border-color:rgba(244,191,99,.34); }}
         .pill.muted {{ color:var(--muted); background:var(--surface-2); }}
         .ops {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }}
-        .op {{ min-height:40px; border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#1a202b,#131820) !important; color:var(--soft) !important; cursor:pointer; text-align:left; padding:0 11px; font-weight:700; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }}
-        .op:hover {{ border-color:var(--line-strong); background:var(--surface-3) !important; }}
-        .formline {{ display:grid; grid-template-columns:1fr 1fr auto; gap:10px; align-items:end; }}
-        label {{ display:block; color:var(--soft); font-size:12px; font-weight:700; margin-bottom:6px; }}
-        input,select,textarea {{ width:100%; min-height:40px; border:1px solid var(--line); border-radius:8px; background:#0d1118; color:var(--text); padding:8px 10px; outline:none; }}
+        .op {{ min-height:42px; display:flex; align-items:center; gap:9px; border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,#1a202b,#111720) !important; color:var(--soft) !important; cursor:pointer; text-align:left; padding:7px 11px; font-weight:800; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }}
+        .op:hover {{ border-color:var(--line-strong); background:var(--surface-3) !important; color:#fff !important; }}
+        .op .button-icon {{ width:26px; height:26px; flex-basis:26px; color:var(--accent); border-color:rgba(67,214,178,.22); background:rgba(67,214,178,.07); }}
+        .op span {{ min-width:0; overflow-wrap:anywhere; }}
+        .formline {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; align-items:end; }}
+        label {{ display:block; color:var(--soft); font-size:12px; font-weight:800; margin-bottom:6px; }}
+        input,select,textarea {{ width:100%; min-height:42px; border:1px solid var(--line); border-radius:var(--radius); background:#0c1118; color:var(--text); padding:8px 10px; outline:none; }}
         input:focus,select:focus,textarea:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(54,198,161,.14); background:#101721; }}
         input[readonly] {{ color:var(--muted); background:#0a0e14; }}
         textarea {{ min-height:92px; resize:vertical; }}
-        .primary {{ min-height:40px; border:1px solid rgba(54,198,161,.55); border-radius:8px; background:linear-gradient(145deg,#2ab38f,#1b806f) !important; color:#06110f !important; font-weight:900; padding:0 14px; cursor:pointer; box-shadow:0 12px 26px rgba(54,198,161,.12); }}
+        .primary {{ min-height:42px; border:1px solid rgba(67,214,178,.58); border-radius:var(--radius); background:linear-gradient(145deg,#41d3af,#238a76) !important; color:#06110f !important; font-weight:900; padding:0 14px; cursor:pointer; box-shadow:0 12px 26px rgba(54,198,161,.12); }}
         .primary:hover {{ background:#36c6a1 !important; }}
-        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:8px; border:1px solid var(--line); background:#05070b; color:#dbeafe; max-height:360px; overflow:auto; }}
+        pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:14px; border-radius:var(--radius); border:1px solid var(--line); background:#05070b; color:#dbeafe; max-height:360px; overflow:auto; font-family:var(--font-data); font-size:12px; }}
         .note {{ color:var(--muted); line-height:1.55; }}
         .modal-backdrop {{ display:none; position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.62); backdrop-filter:blur(8px); place-items:center; padding:18px; }}
         .modal-backdrop.open {{ display:grid; }}
-        .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:0 24px 70px rgba(0,0,0,.58); padding:22px; }}
+        .modal {{ width:min(760px, 100%); max-height:86vh; overflow:auto; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); box-shadow:0 24px 70px rgba(0,0,0,.58); padding:22px; }}
         .modal.wide {{ width:min(1120px, 100%); }}
-        .guide-card {{ margin-top:12px; padding:14px; border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#171c25,#11161f); box-shadow:var(--shadow-soft); }}
+        .guide-card {{ margin-top:12px; padding:14px; border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,#171d27,#11161f); box-shadow:var(--shadow-soft); }}
         .guide-grid {{ display:grid; grid-template-columns:minmax(190px, 28%) minmax(0, 1fr); gap:8px 12px; align-items:start; font-size:13px; line-height:1.55; }}
         .guide-grid b {{ color:var(--text); }}
         .guide-grid span {{ color:var(--soft); }}
@@ -13223,22 +13321,23 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .guide-json {{ margin-top:10px; min-height:0; max-height:132px; font-size:12px; }}
         .steps {{ margin:0; padding-left:20px; color:var(--text); line-height:1.7; }}
         .mini-steps {{ margin:0; padding-left:18px; color:var(--soft); line-height:1.7; }}
-        code {{ color:#e2e8f0; background:#0b1017; border:1px solid var(--line); border-radius:6px; padding:1px 5px; }}
+        code {{ color:#e2e8f0; background:#0b1017; border:1px solid var(--line); border-radius:6px; padding:1px 5px; font-family:var(--font-data); }}
         a {{ color:var(--accent-2); }}
         .product-flow {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:14px 0; }}
-        .step-card {{ border:1px solid var(--line); border-radius:8px; background:linear-gradient(145deg,#161b24,#10151d); padding:14px; min-height:132px; box-shadow:var(--shadow-soft); }}
+        .step-card {{ border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,#161d27,#10151d); padding:14px; min-height:132px; box-shadow:var(--shadow-soft); }}
         .step-card b {{ display:flex; align-items:center; gap:8px; color:var(--text); }}
-        .step-card b span {{ width:26px; height:26px; display:grid; place-items:center; border-radius:8px; background:#eef3f8; color:#111827; font-size:12px; }}
+        .step-card b .step-icon {{ width:28px; height:28px; flex-basis:28px; color:var(--accent); border-color:rgba(67,214,178,.22); background:rgba(67,214,178,.07); }}
         .step-card p {{ margin:8px 0 0; color:var(--muted); line-height:1.55; font-size:13px; }}
-        .info-panel {{ border:1px solid var(--line); border-radius:8px; background:#0d1118; padding:14px; }}
+        .info-panel {{ border:1px solid var(--line); border-radius:var(--radius); background:#0d1118; padding:14px; }}
         .info-panel h3 {{ margin:0 0 8px; font-size:14px; }}
         .shortcut-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
         .status-strip {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }}
-        .status-strip div {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#0d1118; }}
+        .status-strip div {{ border:1px solid var(--line); border-radius:var(--radius); padding:12px; background:#0d1118; }}
         .status-strip b {{ display:block; font-size:18px; margin-top:4px; }}
         .deploy-builder {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
-        .setup-open-link {{ display:inline-flex; min-height:40px; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:8px; padding:0 12px; background:var(--surface-2); color:var(--soft); text-decoration:none; font-weight:900; }}
+        .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
+        .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
         @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
@@ -13556,13 +13655,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <h2>自部署配置向导</h2>
                   <p class="note">对齐 sub2api 的 Setup Wizard：程序首次运行前，先让用户按顺序填写数据库、Redis、初始管理员和公开地址。这里给管理员保留同样的配置入口；未登录时也可以直接打开公开向导。</p>
                 </div>
-                <a class="setup-open-link" href="/setup" target="_blank" rel="noreferrer"><span class="inline-icon" aria-hidden="true">DP</span> 打开 /setup</a>
+                <a class="setup-open-link" href="/setup" target="_blank" rel="noreferrer">{admin_icon("deploy", "inline-icon")} 打开 /setup</a>
               </div>
               <div class="product-flow">
-                <div class="step-card"><b><span>DB</span>数据库</b><p>生产使用 PostgreSQL，SQLite 只用于本地试用。部署前确认 `DATABASE_URL` 指向目标库。</p></div>
-                <div class="step-card"><b><span>RQ</span>Redis</b><p>配置 `REDIS_URL` 后启用队列、限流、租约和 worker 协调，避免把耗时任务压在 API 进程里。</p></div>
-                <div class="step-card"><b><span>AK</span>管理员</b><p>设置 `MEDIA2API_ADMIN_PASSWORD`、`MEDIA2API_BOOTSTRAP_KEY` 和初始管理员邮箱。</p></div>
-                <div class="step-card"><b><span>OK</span>验收</b><p>启动 API 与 worker 后访问 `/health`、`/admin`，再导入上游账号并发放用户 API Key。</p></div>
+                <div class="step-card"><b>{admin_icon("database", "step-icon")}数据库</b><p>生产使用 PostgreSQL，SQLite 只用于本地试用。部署前确认 `DATABASE_URL` 指向目标库。</p></div>
+                <div class="step-card"><b>{admin_icon("server", "step-icon")}Redis</b><p>配置 `REDIS_URL` 后启用队列、限流、租约和 worker 协调，避免把耗时任务压在 API 进程里。</p></div>
+                <div class="step-card"><b>{admin_icon("key", "step-icon")}管理员</b><p>设置 `MEDIA2API_ADMIN_PASSWORD`、`MEDIA2API_BOOTSTRAP_KEY` 和初始管理员邮箱。</p></div>
+                <div class="step-card"><b>{admin_icon("check", "step-icon")}验收</b><p>启动 API 与 worker 后访问 `/health`、`/admin`，再导入上游账号并发放用户 API Key。</p></div>
               </div>
               <div class="status-strip">
                 <div><span class="eyebrow">数据库</span><b>{admin_escape(settings.database_url.split(':', 1)[0])}</b></div>
@@ -13597,9 +13696,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div class="panel subtab" id="setup-check-pane">
               <h2>部署完成检查</h2>
               <div class="action-grid">
-                <div class="action-cluster"><h3><span class="inline-icon" aria-hidden="true">H</span> 存活检查</h3><p>确认 API 进程、数据库、Redis 和 worker runtime 都能返回当前状态。</p><div class="ops">{action_controls_for(["/v1/admin/readiness", "/v1/admin/operator-workbench-report"])}</div></div>
-                <div class="action-cluster"><h3><span class="inline-icon" aria-hidden="true">C</span> 配置快照</h3><p>导出配置用于交接和审计；导入前先 dry-run，避免覆盖真实账号凭据。</p><div class="ops">{action_controls_for(["/v1/admin/config-export", "/v1/admin/config-import"])}</div></div>
-                <div class="action-cluster"><h3><span class="inline-icon" aria-hidden="true">A</span> 接入验收</h3><p>部署只是第一步，真正可用还需要导入平台账号、确认模型映射并运行账号验收。</p><div class="ops">{action_controls_for(["/v1/admin/account-guides", "/v1/admin/account-acceptance-suite"])}</div></div>
+                <div class="action-cluster"><h3>{admin_icon("health", "inline-icon")} 存活检查</h3><p>确认 API 进程、数据库、Redis 和 worker runtime 都能返回当前状态。</p><div class="ops">{action_controls_for(["/v1/admin/readiness", "/v1/admin/operator-workbench-report"])}</div></div>
+                <div class="action-cluster"><h3>{admin_icon("config", "inline-icon")} 配置快照</h3><p>导出配置用于交接和审计；导入前先 dry-run，避免覆盖真实账号凭据。</p><div class="ops">{action_controls_for(["/v1/admin/config-export", "/v1/admin/config-import"])}</div></div>
+                <div class="action-cluster"><h3>{admin_icon("check", "inline-icon")} 接入验收</h3><p>部署只是第一步，真正可用还需要导入平台账号、确认模型映射并运行账号验收。</p><div class="ops">{action_controls_for(["/v1/admin/account-guides", "/v1/admin/account-acceptance-suite"])}</div></div>
               </div>
             </div>
           </section>
@@ -14805,13 +14904,15 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
             <head>
               <title>media2api admin login</title>
               <style>
-                body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f8fafc; color: #17202a; }
-                form { width: min(420px, calc(100vw - 32px)); border: 1px solid #d8dee9; border-radius: 8px; padding: 22px; background: white; }
+                :root { color-scheme: dark; --bg:#05070a; --surface:#11151c; --surface-2:#151b24; --line:#27313f; --text:#f7fafc; --muted:#8f9bad; --accent:#43d6b2; }
+                body { font-family: Inter, Aptos, system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: linear-gradient(135deg,#05070a,#090d13 48%,#0b1017); color: var(--text); }
+                form { width: min(420px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 8px; padding: 22px; background: linear-gradient(145deg,var(--surface),#0c1118); box-shadow: 0 18px 44px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.035); }
                 h1 { margin: 0 0 14px; font-size: 22px; }
-                label { display: block; color: #5f6b7a; font-size: 12px; margin: 12px 0 5px; }
-                input { width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px; font: inherit; }
-                button { border: 1px solid #0f766e; background: #0f766e; color: white; border-radius: 6px; padding: 9px 12px; margin-top: 14px; cursor: pointer; }
-                a { color: #0f766e; }
+                label { display: block; color: var(--muted); font-size: 12px; font-weight: 800; margin: 12px 0 5px; }
+                input { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; padding: 9px; font: inherit; background:#0c1118; color:var(--text); }
+                input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(67,214,178,.14); }
+                button { border: 1px solid rgba(67,214,178,.58); background: linear-gradient(145deg,#41d3af,#238a76); color: #06110f; border-radius: 8px; padding: 9px 12px; margin-top: 14px; cursor: pointer; font-weight:900; }
+                a { color: #8aa4ff; }
               </style>
             </head>
             <body>
@@ -15282,27 +15383,30 @@ def admin(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     <head>
       <title>media2api admin</title>
       <style>
-        body {{ font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 24px; color: #17202a; }}
+        :root {{ color-scheme:dark; --bg:#05070a; --surface:#11151c; --surface-2:#151b24; --surface-3:#1c2430; --line:#27313f; --line-strong:#3b475a; --text:#f7fafc; --muted:#8f9bad; --soft:#c8d1df; --accent:#43d6b2; --accent-2:#8aa4ff; --shadow:0 18px 44px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.035); }}
+        body {{ font-family: Inter, Aptos, system-ui, -apple-system, Segoe UI, sans-serif; margin: 24px; color: var(--text); background:linear-gradient(135deg,#05070a,#090d13 48%,#0b1017); }}
         .cards {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 18px 0 28px; }}
-        .card {{ border:1px solid #d8dee9; border-radius:8px; padding:12px; background:#fbfcfe; }}
-        .card strong {{ display:block; color:#5f6b7a; font-size:12px; text-transform:uppercase; }}
+        .card {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:linear-gradient(145deg,var(--surface),#0c1118); box-shadow:var(--shadow); }}
+        .card strong {{ display:block; color:var(--muted); font-size:12px; text-transform:uppercase; }}
         .card span {{ display:block; font-size:24px; margin-top:6px; }}
         .ops {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 18px 0 28px; }}
-        .panel {{ border:1px solid #d8dee9; border-radius:8px; padding:14px; background:#fff; }}
+        .panel {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:linear-gradient(145deg,var(--surface),#0c1118); box-shadow:var(--shadow); }}
         .panel h3 {{ margin:0 0 12px; font-size:16px; }}
-        label {{ display:block; color:#5f6b7a; font-size:12px; margin:10px 0 4px; }}
-        input, select, textarea {{ width:100%; box-sizing:border-box; border:1px solid #cbd5e1; border-radius:6px; padding:8px; font:inherit; }}
+        label {{ display:block; color:var(--muted); font-size:12px; font-weight:800; margin:10px 0 4px; }}
+        input, select, textarea {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:8px; padding:8px; font:inherit; background:#0c1118; color:var(--text); }}
+        input:focus,select:focus,textarea:focus {{ outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(67,214,178,.14); }}
         textarea {{ min-height:64px; resize:vertical; }}
-        button {{ border:1px solid #0f766e; background:#0f766e; color:white; border-radius:6px; padding:8px 10px; margin:10px 6px 0 0; cursor:pointer; }}
-        button.secondary {{ background:#fff; color:#0f766e; }}
+        button {{ border:1px solid rgba(67,214,178,.58); background:linear-gradient(145deg,#41d3af,#238a76); color:#06110f; border-radius:8px; padding:8px 10px; margin:10px 6px 0 0; cursor:pointer; font-weight:900; }}
+        button.secondary {{ background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); border-color:var(--line); }}
+        button.secondary:hover {{ border-color:var(--line-strong); color:white; }}
         .inline {{ display:flex; gap:10px; align-items:center; }}
         .inline input[type=checkbox] {{ width:auto; }}
         .field-hidden {{ display:none !important; }}
-        pre.result {{ white-space:pre-wrap; overflow:auto; max-height:360px; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; }}
+        pre.result {{ white-space:pre-wrap; overflow:auto; max-height:360px; background:#05070b; color:#dbeafe; padding:12px; border-radius:8px; border:1px solid var(--line); }}
         table {{ border-collapse: collapse; width: 100%; margin-bottom: 28px; }}
-        th, td {{ border: 1px solid #d8dee9; padding: 8px 10px; text-align: left; font-size: 13px; }}
-        th {{ background: #f5f7fa; }}
-        code {{ background:#f5f7fa; padding:2px 4px; }}
+        th, td {{ border: 1px solid var(--line); padding: 8px 10px; text-align: left; font-size: 13px; }}
+        th {{ background: #141a23; color:var(--soft); }}
+        code {{ background:#0b1017; border:1px solid var(--line); border-radius:6px; padding:2px 4px; }}
       </style>
     </head>
     <body>
