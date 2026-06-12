@@ -932,6 +932,24 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/routing-plan" \
   -H "Authorization: Bearer $MEDIA2API_API_KEY"
 ```
 
+查看只读运行时交付计划，确认每个 provider 当前下一步是补路由、探测 release、填写 SHA256、启动 loopback、同步 source-repo 还是导入账号：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/runtime-delivery-plan" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+响应中的关键字段：
+
+- `next_step`: 当前最应该执行的动作。
+- `state`: 路由、release、hash、runtime、进程、账号、source-repo 的当前证据。
+- `runtime.install_payload_template`: 安装 release 的请求体模板。
+- `runtime.start_payload_template`: 启动 loopback runtime 的请求体模板。
+- `commands`: 与后台按钮对应的 curl 模板。
+
 批量补齐全部定型 provider 的平台侧路由。该接口不会创建账号或假凭据：
 
 ```bash
@@ -1146,7 +1164,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |
