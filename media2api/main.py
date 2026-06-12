@@ -24865,6 +24865,36 @@ def proxy_kernel_release_checksum_next_step(
     }
 
 
+def proxy_kernel_release_candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, int, int, int, int, int, str]:
+    name = str(item.get("asset_name") or item.get("name") or "").lower()
+    score = int(item.get("candidate_score") or 0)
+    linux = 1 if any(token in name for token in ("linux", "ubuntu", "debian")) else 0
+    x64 = 1 if any(token in name for token in ("amd64", "x86_64", "x64")) else 0
+    non_docker = 0 if "docker" in name else 1
+    non_desktop = 0 if any(token in name for token in ("darwin", "macos", "osx", "windows", "win32", "win64")) else 1
+    full_feature = 0 if any(token in name for token in ("no-plugin", "no_plugin", "minimal", "lite")) else 1
+    archive = 1 if any(name.endswith(ext) for ext in (".tar.gz", ".tgz", ".zip", ".gz", ".bin", ".exe")) else 0
+    return (
+        1 if item.get("preferred") else 0,
+        score,
+        linux,
+        x64,
+        non_docker,
+        non_desktop,
+        full_feature,
+        archive,
+        name,
+    )
+
+
+def proxy_kernel_best_release_candidate(candidates: list[dict[str, Any]], *, require_preferred: bool = False) -> dict[str, Any]:
+    selected = [item for item in candidates if isinstance(item, dict)]
+    if require_preferred:
+        selected = [item for item in selected if item.get("preferred")]
+    selected.sort(key=proxy_kernel_release_candidate_sort_key, reverse=True)
+    return selected[0] if selected else {}
+
+
 def build_proxy_kernel_release_checksums(
     db: Session,
     provider_id: str,
@@ -24966,6 +24996,8 @@ def build_proxy_kernel_release_checksums(
         for asset in preferred_assets
         if proxy_kernel_asset_name(asset) not in resolved_asset_names
     ]
+    resolved_candidates.sort(key=proxy_kernel_release_candidate_sort_key, reverse=True)
+    unresolved_preferred_assets.sort(key=proxy_kernel_release_candidate_sort_key, reverse=True)
     status = str(probe.get("status") or "unknown")
     next_step = proxy_kernel_release_checksum_next_step(
         status,
@@ -25105,8 +25137,8 @@ def proxy_kernel_select_release_install_candidate(
         selected = preferred
     elif selected and not allow_non_preferred:
         return None
-    selected.sort(key=lambda item: (1 if item.get("preferred") else 0, int(item.get("candidate_score") or 0)), reverse=True)
-    return selected[0] if selected else None
+    best = proxy_kernel_best_release_candidate(selected)
+    return best or None
 
 
 def build_proxy_kernel_release_candidate_install(
@@ -25436,7 +25468,7 @@ def build_proxy_kernel_runtime_acquisition_plan(
     source_repo_allowed = next_action.get("id") in {"source_repo_reference", "source_runtime_plan"} or bool(source_repo.get("is_git_repo"))
     candidates = [item for item in release_state.get("resolved_sha256_candidates") or [] if isinstance(item, dict)]
     unresolved_preferred = [item for item in release_state.get("unresolved_preferred_assets") or [] if isinstance(item, dict)]
-    preferred_candidate = next((item for item in candidates if item.get("preferred")), None) or (candidates[0] if candidates else {})
+    preferred_candidate = proxy_kernel_best_release_candidate(candidates, require_preferred=True) or proxy_kernel_best_release_candidate(candidates)
     base = settings.public_base_url
     admin_key = "$MEDIA2API_API_KEY"
     provider_path = f"/v1/admin/proxy-kernels/{provider_id}"

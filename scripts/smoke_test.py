@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 from media2api import models as db_models
 from media2api.config import settings
 from media2api.database import SessionLocal
-from media2api.main import app
+from media2api.main import app, proxy_kernel_best_release_candidate
 from media2api.services_core import AccountScheduler, ModelRouter
 from media2api.services_proxy_kernels import ProxyKernelRuntimeService
 from media2api.utils import dumps
@@ -76,6 +76,25 @@ class StaticAssetHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    best_gemini_candidate = proxy_kernel_best_release_candidate(
+        [
+            {"asset_name": "CLIProxyAPI_7.1.68_darwin_aarch64.tar.gz", "candidate_score": 1, "preferred": True},
+            {"asset_name": "CLIProxyAPI_7.1.68_windows_x64.zip", "candidate_score": 4, "preferred": True},
+            {"asset_name": "CLIProxyAPI_7.1.68_linux_amd64_no-plugin.tar.gz", "candidate_score": 8, "preferred": True},
+            {"asset_name": "CLIProxyAPI_7.1.68_linux_amd64.tar.gz", "candidate_score": 8, "preferred": True},
+        ],
+        require_preferred=True,
+    )
+    assert best_gemini_candidate["asset_name"] == "CLIProxyAPI_7.1.68_linux_amd64.tar.gz", best_gemini_candidate
+    best_midjourney_candidate = proxy_kernel_best_release_candidate(
+        [
+            {"asset_name": "midjourney-proxy-linux-x64-docker-v11.9.7.tar.gz", "candidate_score": 8, "preferred": True},
+            {"asset_name": "midjourney-proxy-linux-x64-v11.9.7.tar.gz", "candidate_score": 8, "preferred": True},
+        ],
+        require_preferred=True,
+    )
+    assert best_midjourney_candidate["asset_name"] == "midjourney-proxy-linux-x64-v11.9.7.tar.gz", best_midjourney_candidate
+
     source_repo = SOURCE_REPO_DIR / "basketikun__chatgpt2api"
     source_repo.mkdir(parents=True, exist_ok=True)
     (source_repo / ".git").mkdir(exist_ok=True)
