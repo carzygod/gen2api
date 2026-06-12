@@ -1311,6 +1311,19 @@ class ProxyKernelActivationRunRequest(BaseModel):
     user_api_key: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProxyKernelDownstreamCallPackageRequest(BaseModel):
+    dry_run: bool = True
+    create_user: bool = False
+    create_user_api_key: bool = False
+    force_user_api_key: bool = False
+    user_id: str | None = None
+    user_email: str | None = None
+    user_tier: str = "default"
+    wallet_balance: int = 100000
+    key_name: str | None = None
+    key: str | None = None
+
+
 class ProxyKernelAccountMaterialsRequest(BaseModel):
     dry_run: bool = True
     account_id: str | None = None
@@ -7455,6 +7468,9 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
+    ("GET", "/v1/admin/proxy-kernels/downstream-call-package"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -7726,6 +7742,9 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
+                ("GET", "/v1/admin/proxy-kernels/downstream-call-package"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -13534,6 +13553,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
         ("全量生产就绪矩阵", "GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
+        ("全量下游调用包", "GET", "/v1/admin/proxy-kernels/downstream-call-package"),
+        ("OpenAI Web 下游调用包", "GET", "/v1/admin/proxy-kernels/openai_web_session/downstream-call-package"),
+        ("OpenAI Web 创建调用 Key", "POST", "/v1/admin/proxy-kernels/openai_web_session/downstream-call-package"),
         ("全量上线清单", "GET", "/v1/admin/proxy-kernels/go-live-checklist"),
         ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
         ("全量材料清单", "GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -13834,6 +13856,21 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .account-material-template {{ margin-top:10px; border-top:1px solid var(--line); padding-top:10px; }}
         .account-material-template summary {{ cursor:pointer; color:var(--soft); font-weight:900; }}
         .account-material-template pre {{ max-height:220px; overflow:auto; margin:8px 0 0; border:1px solid var(--line); border-radius:var(--radius); background:#090d13; padding:10px; color:#cbd5e1; font-family:var(--font-data); font-size:12px; white-space:pre-wrap; }}
+        .downstream-card {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#141b24,#0b1118); box-shadow:var(--shadow-soft); }}
+        .downstream-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; }}
+        .downstream-head h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
+        .downstream-head p {{ margin:5px 0 0; color:var(--muted); line-height:1.5; font-size:12px; }}
+        .downstream-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+        .downstream-status {{ border:1px solid var(--line); border-radius:var(--radius); padding:10px; background:#0b1017; color:var(--soft); font-size:12px; line-height:1.5; }}
+        .downstream-status strong {{ display:block; color:var(--text); margin-bottom:5px; }}
+        .downstream-status.ok {{ border-color:rgba(112,217,139,.34); background:rgba(112,217,139,.08); }}
+        .downstream-status.warn {{ border-color:rgba(224,177,90,.34); background:rgba(224,177,90,.08); }}
+        .downstream-status code {{ color:#dbeafe; font-family:var(--font-data); }}
+        .downstream-actions {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }}
+        .downstream-samples {{ display:grid; gap:8px; margin-top:10px; }}
+        .downstream-sample {{ border:1px solid var(--line); border-radius:var(--radius); background:#090d13; padding:10px; }}
+        .downstream-sample b {{ display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--soft); font-size:12px; margin-bottom:6px; }}
+        .downstream-sample pre {{ max-height:118px; overflow:auto; margin:0; font-family:var(--font-data); font-size:11px; white-space:pre-wrap; }}
         .activation-panel {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0d131b); box-shadow:var(--shadow-soft); }}
         .activation-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }}
         .activation-head h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
@@ -13934,7 +13971,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -14188,6 +14225,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="primary" type="button" id="kernel-activation-workflow-all">上线执行向导</button>
                   <button class="op" type="button" id="kernel-production-gap-report-all">生产缺口报告</button>
+                  <button class="op" type="button" id="kernel-downstream-package-all">下游调用包</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
                   <button class="op" type="button" id="kernel-live-workspace-plan">上线工作台预检</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
@@ -14234,6 +14272,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
                   <button class="primary" type="button" id="kernel-activation-workflow">上线执行向导</button>
                   <button class="op" type="button" id="kernel-production-gap-report">生产缺口报告</button>
+                  <button class="op" type="button" id="kernel-downstream-package">下游调用包</button>
                   <button class="primary" type="button" id="kernel-activation-run">启用预演</button>
                   <button class="op" type="button" id="kernel-live-acceptance">真实样本验收</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
@@ -14344,6 +14383,38 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                       <summary>字段模板和获取说明</summary>
                       <pre id="kernel-account-material-template">尚未读取模板。</pre>
                     </details>
+                  </div>
+                  <div class="downstream-card" id="kernel-downstream-panel">
+                    <div class="downstream-head">
+                      <div>
+                        <h3>下游调用包</h3>
+                        <p>用于确认当前 provider 是否已经可以被客户侧调用，并发放普通用户 API Key。</p>
+                      </div>
+                      <span class="activation-badge action-required" id="kernel-downstream-badge">未读取</span>
+                    </div>
+                    <div class="downstream-grid">
+                      <div class="downstream-status warn" id="kernel-downstream-status">
+                        <strong>等待调用包</strong>
+                        点击“下游调用包”后会显示缺失阶段、目标用户、API Key 状态和 curl 样例。
+                      </div>
+                      <div class="downstream-status" id="kernel-downstream-env">
+                        <strong>调用环境</strong>
+                        <code>MEDIA2API_USER_API_KEY</code> 只代表下游调用密钥，不是上游平台账号材料。
+                      </div>
+                    </div>
+                    <div class="formline" style="margin-top:10px">
+                      <div><label>下游用户 ID</label><input id="kernel-downstream-user-id" placeholder="留空使用 provider 专用用户" /></div>
+                      <div><label>用户邮箱</label><input id="kernel-downstream-user-email" placeholder="client@example.com" /></div>
+                    </div>
+                    <div class="formline" style="margin-top:10px">
+                      <div><label>Key 名称</label><input id="kernel-downstream-key-name" placeholder="production-client-key" /></div>
+                      <div><label>初始余额</label><input id="kernel-downstream-balance" value="100000" /></div>
+                    </div>
+                    <div class="downstream-actions">
+                      <button class="op" type="button" id="kernel-downstream-refresh">读取调用包</button>
+                      <button class="primary" type="button" id="kernel-downstream-create-key">创建用户和调用 Key</button>
+                    </div>
+                    <div class="downstream-samples" id="kernel-downstream-samples"></div>
                   </div>
                   <div class="activation-panel" id="kernel-activation-panel">
                     <div class="activation-empty">点击“上线执行向导”，这里会展示该 provider 的 6 步上线顺序和下一步操作。</div>
@@ -14939,6 +15010,103 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div class="activation-provider-grid">${{cards}}</div>
           `;
         }}
+        function downstreamStatusLabel(status) {{
+          const labels = {{
+            ready_to_call: '可以调用',
+            action_required: '仍需处理',
+            planned: '预演中',
+            created: '已创建',
+          }};
+          return labels[status] || String(status || '未读取');
+        }}
+        function renderDownstreamCallPackagePanel(providerId, payload) {{
+          const badge = document.getElementById('kernel-downstream-badge');
+          const statusBox = document.getElementById('kernel-downstream-status');
+          const envBox = document.getElementById('kernel-downstream-env');
+          const samplesBox = document.getElementById('kernel-downstream-samples');
+          if (!badge || !statusBox || !envBox || !samplesBox) return;
+          if (!payload || !payload.object) {{
+            badge.className = 'activation-badge action-required';
+            badge.textContent = '未读取';
+            statusBox.className = 'downstream-status warn';
+            statusBox.innerHTML = '<strong>等待调用包</strong>点击“下游调用包”后会显示缺失阶段、目标用户、API Key 状态和 curl 样例。';
+            samplesBox.innerHTML = '';
+            return;
+          }}
+          const key = payload.downstream_api_key || {{}};
+          const env = payload.environment || {{}};
+          const blockers = Array.isArray(payload.blockers) ? payload.blockers : [];
+          badge.className = 'activation-badge ' + (payload.ready_to_call ? 'done' : 'action-required');
+          badge.textContent = downstreamStatusLabel(payload.status);
+          const next = payload.next_action || blockers[0] || {{}};
+          statusBox.className = 'downstream-status ' + (payload.ready_to_call ? 'ok' : 'warn');
+          statusBox.innerHTML = `
+            <strong>${{payload.ready_to_call ? '当前 provider 已可调用' : '当前还不能直接调用'}}</strong>
+            下一步：${{escapeHtml(next.label || '等待读取')}}。${{escapeHtml(key.message || '')}}
+            ${{blockers.length ? '<div class="kernel-blockers">' + blockers.map(item => `<span>${{escapeHtml(item.stage || item.label || 'blocked')}}</span>`).join('') + '</div>' : ''}}
+          `;
+          envBox.className = 'downstream-status ' + (key.ready ? 'ok' : 'warn');
+          const latestKey = key.latest_key || {{}};
+          envBox.innerHTML = `
+            <strong>调用环境</strong>
+            <div><code>MEDIA2API_BASE_URL</code> = ${{escapeHtml(env.MEDIA2API_BASE_URL || '')}}</div>
+            <div><code>MEDIA2API_USER_API_KEY</code> = ${{key.plaintext_key_returned ? '本次响应已返回 api_key' : escapeHtml(env.MEDIA2API_USER_API_KEY || '$MEDIA2API_USER_API_KEY')}}</div>
+            <div>Key：${{latestKey.id ? escapeHtml(latestKey.id + ' / ' + latestKey.user_id) : '尚未发放普通用户 Key'}}</div>
+          `;
+          const targetUser = key.target_user || key.created_user || {{}};
+          if (targetUser.id && !document.getElementById('kernel-downstream-user-id')?.value) document.getElementById('kernel-downstream-user-id').value = targetUser.id;
+          if (targetUser.email && !document.getElementById('kernel-downstream-user-email')?.value) document.getElementById('kernel-downstream-user-email').value = targetUser.email;
+          const samples = payload.sample_requests || {{}};
+          const sampleItems = [
+            ['生图', samples.image_generation],
+            ['改图', samples.image_edit],
+            ['生视频', samples.video_generation],
+          ].filter(item => item[1]);
+          samplesBox.innerHTML = sampleItems.map(([label, sample]) => `
+            <div class="downstream-sample">
+              <b><span>${{escapeHtml(label)}}</span><span class="activation-badge ${{sample.supported ? 'done' : 'blocked'}}">${{sample.supported ? '支持' : '当前内核未声明'}}</span></b>
+              <pre>${{escapeHtml(sample.curl || JSON.stringify(sample, null, 2))}}</pre>
+            </div>
+          `).join('');
+        }}
+        function renderDownstreamCallPackageOverview(payload) {{
+          const panel = document.getElementById('kernel-activation-overview');
+          if (!panel) return;
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          if (!rows.length) {{
+            panel.innerHTML = '<div class="activation-empty">下游调用包暂无数据。</div>';
+            return;
+          }}
+          const summary = payload.summary || {{}};
+          const cards = rows.map(row => {{
+            const key = row.downstream_api_key || {{}};
+            const next = row.next_action || {{}};
+            return `
+              <div class="activation-provider-card">
+                <b>${{escapeHtml(row.provider_id || '-')}}</b>
+                <span class="activation-badge ${{row.ready_to_call ? 'done' : 'action-required'}}">${{escapeHtml(downstreamStatusLabel(row.status))}}</span>
+                <p>${{escapeHtml('下一步：' + (next.label || '等待读取'))}}</p>
+                <p>下游 Key：${{key.ready ? '已准备' : '未准备'}} · 缺口：${{escapeHtml(String((row.blockers || []).length))}} 项</p>
+                <div class="activation-action-row"><button class="op" type="button" data-activation-action="inspect-downstream" data-provider-id="${{escapeHtml(row.provider_id || '')}}">查看调用包</button></div>
+              </div>
+            `;
+          }}).join('');
+          panel.innerHTML = `
+            <div class="activation-head">
+              <div>
+                <h3>全量下游调用包</h3>
+                <p>这是客户侧调用口径：真实账号、loopback runtime、健康检查、live 样本验收和普通用户 API Key 都要就绪。</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge">总数 ${{escapeHtml(summary.total || rows.length)}}</span>
+                <span class="activation-badge done">可调用 ${{escapeHtml(summary.ready_to_call || 0)}}</span>
+                <span class="activation-badge action-required">需处理 ${{escapeHtml(summary.action_required || 0)}}</span>
+                <span class="activation-badge needs-input">缺 Key ${{escapeHtml(summary.missing_downstream_key || 0)}}</span>
+              </div>
+            </div>
+            <div class="activation-provider-grid">${{cards}}</div>
+          `;
+        }}
         function renderKernelSummary(providerId) {{
           const provider = providerId || selectedKernelProvider();
           const hint = kernelHint(provider);
@@ -14962,6 +15130,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const liveWorkspace = hint.live_workspace || {{}};
           const handoff = hint.operator_handoff || {{}};
           const activation = hint.activation_workflow || {{}};
+          const downstream = hint.downstream_call_package || {{}};
           const runtimeHealth = hint.runtime_health_check || {{}};
           const liveAcceptance = hint.live_acceptance || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
@@ -14984,6 +15153,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
               <dt>交付包</dt><dd>${{escapeHtml(handoff.status || '未读取')}}${{handoff.operator_questions?.length ? ' · 待填 ' + escapeHtml(handoff.operator_questions.length) + ' 项' : ''}}</dd>
               <dt>执行向导</dt><dd>${{escapeHtml(activation.status || '未读取')}}${{activation.next_stage?.label ? ' · 下一步：' + escapeHtml(activation.next_stage.label) : ''}}</dd>
+              <dt>下游调用</dt><dd>${{escapeHtml(downstream.status || '未读取')}}${{downstream.next_action?.label ? ' · 下一步：' + escapeHtml(downstream.next_action.label) : ''}}</dd>
               <dt>Runtime 健康</dt><dd>${{runtimeHealth.health_check ? escapeHtml(runtimeHealth.health_check.status || (runtimeHealth.ok ? 'ok' : 'failed')) : '未检查'}}${{runtimeHealth.health_check?.message ? ' · ' + escapeHtml(runtimeHealth.health_check.message) : ''}}</dd>
               <dt>真实验收</dt><dd>${{escapeHtml(liveAcceptance.status || '未运行')}}${{liveAcceptance.next_step?.label ? ' · 下一步：' + escapeHtml(liveAcceptance.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
@@ -15017,6 +15187,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (installPreview) installPreview.value = installed.path || '';
           if (base && hint.runtime_base_url) base.value = hint.runtime_base_url;
           renderActivationWorkflowPanel(provider, activation);
+          renderDownstreamCallPackagePanel(provider, downstream);
         }}
         function kernelCommandParts() {{
           const raw = document.getElementById('kernel-command')?.value.trim() || '';
@@ -15099,6 +15270,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             production_readiness: productionReadinessPayload,
             go_live: existingHint.go_live || {{}},
             materials_request: existingHint.materials_request || {{}},
+            downstream_call_package: existingHint.downstream_call_package || {{}},
           }};
           renderKernelSummary(provider);
           return payload;
@@ -15716,6 +15888,52 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           renderProductionGapReportOverview(payload);
           return payload;
         }}
+        async function loadKernelDownstreamCallPackage(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/downstream-call-package');
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            downstream_call_package: payload,
+          }});
+          renderKernelSummary(provider);
+          renderDownstreamCallPackagePanel(provider, payload);
+          return payload;
+        }}
+        async function loadAllKernelDownstreamCallPackages() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/downstream-call-package');
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              downstream_call_package: item,
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+          renderDownstreamCallPackageOverview(payload);
+          return payload;
+        }}
+        function buildKernelDownstreamCallPackageBody(dryRun = false) {{
+          return {{
+            dry_run: Boolean(dryRun),
+            create_user: true,
+            create_user_api_key: true,
+            force_user_api_key: false,
+            user_id: document.getElementById('kernel-downstream-user-id')?.value.trim() || null,
+            user_email: document.getElementById('kernel-downstream-user-email')?.value.trim() || null,
+            key_name: document.getElementById('kernel-downstream-key-name')?.value.trim() || null,
+            wallet_balance: Number(document.getElementById('kernel-downstream-balance')?.value || 100000),
+          }};
+        }}
+        async function submitKernelDownstreamCallPackage(dryRun = false, providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/downstream-call-package', 'POST', buildKernelDownstreamCallPackageBody(dryRun));
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            downstream_call_package: payload,
+          }});
+          renderKernelSummary(provider);
+          renderDownstreamCallPackagePanel(provider, payload);
+          return payload;
+        }}
         async function runKernelActivationRun(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
           syncKernelSelects(provider);
@@ -15762,6 +15980,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             await loadKernelActivationWorkflow(provider);
             return;
           }}
+          if (action === 'inspect-downstream') {{
+            activateMainTab('kernels');
+            activateSubtab('kernels-start-pane');
+            await loadKernelDownstreamCallPackage(provider);
+            document.getElementById('kernel-downstream-panel')?.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+            return;
+          }}
           if (action === 'open-account') {{
             activateMainTab('kernels');
             activateSubtab('kernels-start-pane');
@@ -15785,6 +16010,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (action === 'apply-routing') await applyKernelRouting();
           else if (action === 'routing-plan') await loadKernelRoutingPlan(provider);
           else if (action === 'materials-request') await loadKernelMaterialsRequest(provider);
+          else if (action === 'create-downstream-key') await loadKernelDownstreamCallPackage(provider);
           else if (action === 'run-handoff') await runKernelOperatorHandoff(provider);
           else if (action === 'health-check') await checkKernelRuntimeHealth(provider);
           else if (action === 'live-acceptance') await runKernelLiveAcceptance(provider);
@@ -16505,6 +16731,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-downstream-package-all')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelDownstreamCallPackages();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-runtime-delivery-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelRuntimeDeliveryPlans(); }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -16581,6 +16813,26 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           try {{
             const payload = await loadKernelAccountMaterials();
             focusKernelAccountMaterials();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-downstream-package')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelDownstreamCallPackage();
+            document.getElementById('kernel-downstream-panel')?.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-downstream-refresh')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelDownstreamCallPackage();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-downstream-create-key')?.addEventListener('click', async () => {{
+          try {{
+            if (!window.confirm('将创建普通下游用户和 API Key。明文 key 只会在这次响应中返回一次，确认继续？')) return;
+            const payload = await submitKernelDownstreamCallPackage(false);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -20643,6 +20895,17 @@ def admin_proxy_kernels_production_gap_report(provider_ids: str = "", ctx: AuthC
         raise HTTPException(status_code=400, detail={"error": str(exc), "production_gap_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/downstream-call-package")
+def admin_proxy_kernels_downstream_call_package(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_downstream_call_packages(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "downstream_call_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/runtime-delivery-plan")
 def admin_proxy_kernels_runtime_delivery_plan(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -20796,6 +21059,27 @@ def admin_proxy_kernel_activation_workflow(provider_id: str, ctx: AuthContext = 
 def admin_proxy_kernel_production_gap_report(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_production_gap_report(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/downstream-call-package")
+def admin_proxy_kernel_downstream_call_package(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_downstream_call_package(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/downstream-call-package")
+def admin_proxy_kernel_downstream_call_package_submit(
+    provider_id: str,
+    req: ProxyKernelDownstreamCallPackageRequest = ProxyKernelDownstreamCallPackageRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_downstream_call_package(db, provider_id, req)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -22941,6 +23225,249 @@ def run_proxy_kernel_activation_run(
             "source_repo_only_when_needed": True,
             "live_mode_requires_real_materials": True,
             "user_api_key_creation_requires_create_user_api_key": True,
+        },
+    }
+
+
+def proxy_kernel_default_downstream_user_id(provider_id: str) -> str:
+    return f"usr_{provider_id}_client"[:64]
+
+
+def downstream_api_key_candidates(db: Session) -> list[models.ApiKey]:
+    rows = (
+        db.query(models.ApiKey)
+        .join(models.User, models.ApiKey.user_id == models.User.id)
+        .filter(models.ApiKey.status == "active", models.User.status == "active")
+        .order_by(models.ApiKey.created_at.desc())
+        .limit(500)
+        .all()
+    )
+    return [item for item in rows if not is_admin_user(item.user)]
+
+
+def proxy_kernel_downstream_model_hints(provider_id: str) -> dict[str, str]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    operations = set(template.operations if template else [])
+    image_model = "t2i-fast" if "text_to_image" in operations else "image-edit" if operations.intersection({"image_edit", "image_to_image"}) else "t2i-fast"
+    video_model = "t2v-general" if "text_to_video" in operations else "i2v-fast" if "image_to_video" in operations else "video-extend"
+    return {
+        "image_generation": image_model,
+        "image_edit": "image-edit",
+        "video_generation": video_model,
+    }
+
+
+def proxy_kernel_downstream_sample_requests(provider_id: str, user_key_env: str = "$MEDIA2API_USER_API_KEY") -> dict[str, Any]:
+    base = settings.public_base_url.rstrip("/")
+    models_ = proxy_kernel_downstream_model_hints(provider_id)
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    operations = set(template.operations if template else [])
+    samples = {
+        "image_generation": {
+            "supported": bool(not operations or "text_to_image" in operations),
+            "method": "POST",
+            "url": f"{base}/v1/images/generations",
+            "headers": {"Authorization": f"Bearer {user_key_env}", "Content-Type": "application/json"},
+            "body": {"model": models_["image_generation"], "prompt": "one verification image, clean product photo lighting", "size": "1024x1024", "n": 1},
+            "curl": (
+                f"curl -X POST {base}/v1/images/generations "
+                f"-H \"Authorization: Bearer {user_key_env}\" "
+                f"-H \"Content-Type: application/json\" "
+                f"-d '{json.dumps({'model': models_['image_generation'], 'prompt': 'one verification image, clean product photo lighting', 'size': '1024x1024', 'n': 1}, ensure_ascii=False, separators=(',', ':'))}'"
+            ),
+        },
+        "image_edit": {
+            "supported": bool(not operations or operations.intersection({"image_edit", "image_to_image"})),
+            "method": "POST",
+            "url": f"{base}/v1/images/edits",
+            "headers": {"Authorization": f"Bearer {user_key_env}", "Content-Type": "application/json"},
+            "body": {"model": models_["image_edit"], "prompt": "replace the background with a dark studio backdrop", "image": "asset://input-image-id"},
+            "curl": (
+                f"curl -X POST {base}/v1/images/edits "
+                f"-H \"Authorization: Bearer {user_key_env}\" "
+                f"-H \"Content-Type: application/json\" "
+                f"-d '{json.dumps({'model': models_['image_edit'], 'prompt': 'replace the background with a dark studio backdrop', 'image': 'asset://input-image-id'}, ensure_ascii=False, separators=(',', ':'))}'"
+            ),
+        },
+        "video_generation": {
+            "supported": bool(not operations or operations.intersection({"text_to_video", "image_to_video", "video_extend"})),
+            "method": "POST",
+            "url": f"{base}/v1/videos/generations",
+            "headers": {"Authorization": f"Bearer {user_key_env}", "Content-Type": "application/json"},
+            "body": {"model": models_["video_generation"], "prompt": "a short product turntable shot, five seconds", "duration": 5},
+            "curl": (
+                f"curl -X POST {base}/v1/videos/generations "
+                f"-H \"Authorization: Bearer {user_key_env}\" "
+                f"-H \"Content-Type: application/json\" "
+                f"-d '{json.dumps({'model': models_['video_generation'], 'prompt': 'a short product turntable shot, five seconds', 'duration': 5}, ensure_ascii=False, separators=(',', ':'))}'"
+            ),
+        },
+    }
+    return samples
+
+
+def build_proxy_kernel_downstream_call_package(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelDownstreamCallPackageRequest | None = None,
+) -> dict[str, Any]:
+    if provider_id not in PROVIDER_TEMPLATES:
+        raise KeyError(provider_id)
+    req = req or ProxyKernelDownstreamCallPackageRequest()
+    gap_report = build_proxy_kernel_production_gap_report(db, provider_id)
+    existing_downstream_keys = downstream_api_key_candidates(db)
+    chosen_existing_key = existing_downstream_keys[0] if existing_downstream_keys and not req.force_user_api_key else None
+    target_user_id = str(req.user_id or proxy_kernel_default_downstream_user_id(provider_id))
+    target_email = str(req.user_email or f"{provider_id}.client@media2api.local")
+    key_name = str(req.key_name or f"{provider_id}-downstream-key")
+    user_before = db.get(models.User, target_user_id)
+    created_user: models.User | None = None
+    created_api_key: dict[str, Any] | None = None
+    api_key_action = "reuse_existing" if chosen_existing_key else "none"
+    api_key_message = "已有普通下游 API Key，可复用或选择强制创建新 key。" if chosen_existing_key else "尚未发现普通下游 API Key。"
+
+    if not chosen_existing_key and req.create_user_api_key:
+        if req.dry_run:
+            api_key_action = "planned_create"
+            api_key_message = "Dry-run only; no user or API key was created."
+        else:
+            user = user_before
+            if not user:
+                if not req.create_user:
+                    api_key_action = "blocked_missing_user"
+                    api_key_message = "Target downstream user does not exist. Set create_user=true or create the user first."
+                else:
+                    user = models.User(id=target_user_id, email=target_email, status="active", tier=req.user_tier or "default", wallet_balance=req.wallet_balance)
+                    db.add(user)
+                    db.flush()
+                    created_user = user
+            if user and is_admin_user(user):
+                api_key_action = "blocked_admin_user"
+                api_key_message = "Downstream call package will not create customer keys for an admin user."
+            elif user and api_key_action != "blocked_missing_user":
+                raw_key = str(req.key or f"mk_{new_id('key')}")
+                item = models.ApiKey(id=new_id("key"), user_id=user.id, name=key_name, key_hash=hash_api_key(raw_key), status="active")
+                db.add(item)
+                db.commit()
+                created_api_key = serialize_api_key(item)
+                created_api_key["api_key"] = raw_key
+                api_key_action = "created"
+                api_key_message = "A new downstream API key was created. The plaintext key is returned only in this response."
+    elif not chosen_existing_key:
+        api_key_action = "requires_confirmation"
+        api_key_message = "Set create_user_api_key=true to create a downstream API key."
+
+    if created_user and not created_api_key:
+        db.commit()
+
+    downstream_key_ready = bool(chosen_existing_key or created_api_key)
+    core_gaps = [gap for gap in gap_report.get("gaps") or [] if gap.get("stage") != "user_api_key"]
+    blockers = list(core_gaps)
+    if not downstream_key_ready:
+        blockers.append(
+            {
+                "stage": "user_api_key",
+                "label": "发放下游 API Key",
+                "status": "action_required" if api_key_action not in {"planned_create"} else "planned",
+                "severity": "operator_action",
+                "ui_tab": "users",
+                "primary_api": "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package",
+                "operator_required": False,
+                "platform_can_run": True,
+                "action": {"action_id": "create-downstream-key", "label": "创建下游调用 Key", "safe_to_run": False},
+                "detail": {"target_user_id": target_user_id, "api_key_action": api_key_action},
+            }
+        )
+    ready_to_call = bool(not blockers and gap_report.get("usable") and downstream_key_ready)
+    existing_key_payload = serialize_api_key(chosen_existing_key) if chosen_existing_key else None
+    latest_key = created_api_key or existing_key_payload
+    create_payload = {
+        "dry_run": True,
+        "create_user": True,
+        "create_user_api_key": True,
+        "force_user_api_key": False,
+        "user_id": target_user_id,
+        "user_email": target_email,
+        "user_tier": req.user_tier,
+        "wallet_balance": req.wallet_balance,
+        "key_name": key_name,
+    }
+    base = settings.public_base_url.rstrip("/")
+    admin_key = "$MEDIA2API_API_KEY"
+    return {
+        "object": "media2api.proxy_kernel.downstream_call_package",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": gap_report.get("selection_id"),
+        "dry_run": bool(req.dry_run),
+        "ready_to_call": ready_to_call,
+        "status": "ready_to_call" if ready_to_call else "action_required",
+        "next_action": blockers[0] if blockers else {"stage": "none", "label": "可以发起下游调用", "status": "done"},
+        "blockers": blockers,
+        "downstream_api_key": {
+            "ready": downstream_key_ready,
+            "action": api_key_action,
+            "message": api_key_message,
+            "target_user": serialize_user(db.get(models.User, target_user_id)) if db.get(models.User, target_user_id) else None,
+            "created_user": serialize_user(created_user) if created_user else None,
+            "latest_key": latest_key,
+            "existing_active_downstream_key_count": len(existing_downstream_keys),
+            "plaintext_key_returned": bool(created_api_key and created_api_key.get("api_key")),
+        },
+        "environment": {
+            "MEDIA2API_BASE_URL": base,
+            "MEDIA2API_USER_API_KEY": "<paste-created-api_key-here>" if created_api_key else "$MEDIA2API_USER_API_KEY",
+            "PROVIDER_ID": provider_id,
+        },
+        "sample_requests": proxy_kernel_downstream_sample_requests(provider_id),
+        "commands": {
+            "inspect": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/downstream-call-package",
+            "create_key_dry_run": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/downstream-call-package -d '{json.dumps(create_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "create_key": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/downstream-call-package -d '{json.dumps({**create_payload, 'dry_run': False}, ensure_ascii=False, separators=(',', ':'))}'",
+        },
+        "evidence": {
+            "production_gap_report": {
+                "status": gap_report.get("status"),
+                "ready_to_use": gap_report.get("ready_to_use"),
+                "usable": gap_report.get("usable"),
+                "blocking_stages": gap_report.get("blocking_stages") or [],
+            },
+            "core_gap_count": len(core_gaps),
+            "downstream_key_ready": downstream_key_ready,
+        },
+        "policy": {
+            "default_mode": "dry_run",
+            "dry_run_mutates_state": False,
+            "admin_bootstrap_key_is_not_downstream_key": True,
+            "create_user_api_key_requires_explicit_true": True,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "ready_to_call_requires_live_acceptance": True,
+        },
+    }
+
+
+def build_proxy_kernel_downstream_call_packages(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_downstream_call_package(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.downstream_call_package.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": {
+            "total": len(rows),
+            "ready_to_call": sum(1 for row in rows if row.get("ready_to_call")),
+            "action_required": sum(1 for row in rows if not row.get("ready_to_call")),
+            "missing_downstream_key": sum(1 for row in rows if not ((row.get("downstream_api_key") or {}).get("ready"))),
+            "blocked_by_core_readiness": sum(1 for row in rows if (row.get("evidence") or {}).get("core_gap_count")),
+        },
+        "data": rows,
+        "policy": {
+            "default_mode": "read_only",
+            "admin_bootstrap_key_is_not_downstream_key": True,
+            "official_sdk_api": "forbidden",
+            "release_binary_preferred": True,
         },
     }
 

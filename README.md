@@ -199,6 +199,12 @@ The production gap report is the stricter "can users actually use this now?"
 view: real account material, loopback runtime, health evidence, live sample
 acceptance, and a downstream user API key must all be present before a provider
 is marked ready to use.
+`GET/POST /v1/admin/proxy-kernels/{provider_id}/downstream-call-package`
+is the final customer-call handoff. It separates ordinary downstream API keys
+from the admin bootstrap key, reports the remaining blockers, and returns
+ready-to-run `/v1/images/*` and `/v1/videos/*` curl samples. It only creates a
+normal user/API key when `dry_run=false`, `create_user=true`, and
+`create_user_api_key=true` are explicitly supplied.
 For a single provider, `POST /v1/admin/proxy-kernels/{provider_id}/activation-run`
 turns the same checklist into a dry-run-first activation session, then returns
 the refreshed production gap report and the next required material.

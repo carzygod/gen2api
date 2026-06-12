@@ -279,6 +279,21 @@ def main() -> None:
         assert openai_activation_run["object"] == "media2api.proxy_kernel.activation_run" and openai_activation_run["dry_run"] is True, openai_activation_run
         assert openai_activation_run["status"] in {"planned", "failed"} and openai_activation_run["after_gap_report"]["object"] == "media2api.proxy_kernel.production_gap_report", openai_activation_run
         assert {"apply_routing", "submit_account_material", "runtime_health_check", "user_api_key"}.issubset(set(openai_activation_run["requested_steps"])), openai_activation_run
+        downstream_packages = assert_ok(client.get("/v1/admin/proxy-kernels/downstream-call-package", headers=headers))
+        assert downstream_packages["object"] == "media2api.proxy_kernel.downstream_call_package.list" and downstream_packages["summary"]["total"] >= 10, downstream_packages
+        openai_downstream = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/downstream-call-package", headers=headers))
+        assert openai_downstream["object"] == "media2api.proxy_kernel.downstream_call_package" and openai_downstream["provider_id"] == "openai_web_session", openai_downstream
+        assert openai_downstream["ready_to_call"] is False and "user_api_key" in {item["stage"] for item in openai_downstream["blockers"]}, openai_downstream
+        assert "/v1/images/generations" in openai_downstream["sample_requests"]["image_generation"]["url"], openai_downstream
+        assert openai_downstream["policy"]["admin_bootstrap_key_is_not_downstream_key"] is True, openai_downstream
+        openai_downstream_dry = assert_ok(
+            client.post(
+                "/v1/admin/proxy-kernels/openai_web_session/downstream-call-package",
+                headers=headers,
+                json={"dry_run": True, "create_user": True, "create_user_api_key": True, "user_id": "usr_openai_web_client", "user_email": "openai-web-client@example.com"},
+            )
+        )
+        assert openai_downstream_dry["downstream_api_key"]["action"] == "planned_create" and openai_downstream_dry["downstream_api_key"]["plaintext_key_returned"] is False, openai_downstream_dry
         openai_release_checksums = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/release-checksums?dry_run=true", headers=headers))
         assert openai_release_checksums["object"] == "media2api.proxy_kernel.release_checksums" and openai_release_checksums["provider_id"] == "openai_web_session", openai_release_checksums
         assert openai_release_checksums["policy"]["hash_required"] is True and openai_release_checksums["policy"]["downloaded_binaries"] is False, openai_release_checksums

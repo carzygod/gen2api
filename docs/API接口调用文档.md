@@ -993,6 +993,48 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/acti
 
 如果要真实推进，必须把 `account_onboarding`、`install_release`、`source_runtime_setup`、`source_runtime_launcher`、`start_runtime` 或 `live_acceptance` 中的占位材料替换成真实值，并显式传入 `dry_run=false`。创建下游用户 API Key 还需要额外设置 `create_user_api_key=true`，避免无意生成新 key。
 
+下游调用包是最终交付给调用方前的核对入口。它不会把管理员 bootstrap key 当作客户侧 API Key；必须存在普通下游用户 key，且真实账号、loopback runtime、健康检查和 live 样本验收全部通过后，`ready_to_call` 才会变为 `true`：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/downstream-call-package" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/downstream-call-package" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+如果只想预演创建普通下游用户和调用 Key：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/downstream-call-package" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":true,"create_user":true,"create_user_api_key":true,"user_id":"usr_openai_web_client","user_email":"openai-web-client@example.com","key_name":"openai-web-production-key"}'
+```
+
+确认要真实创建时，把 `dry_run` 改成 `false`。响应里的 `downstream_api_key.latest_key.api_key` 只会在创建成功的这一次返回明文；后续只能看到 key id、用户和状态。拿到 key 后设置：
+
+```bash
+export MEDIA2API_USER_API_KEY="<created-api-key>"
+
+curl -X POST "$MEDIA2API_BASE_URL/v1/images/generations" \
+  -H "Authorization: Bearer $MEDIA2API_USER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"t2i-fast","prompt":"one verification image","size":"1024x1024","n":1}'
+
+curl -X POST "$MEDIA2API_BASE_URL/v1/videos/generations" \
+  -H "Authorization: Bearer $MEDIA2API_USER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"t2v-general","prompt":"a short product turntable shot","duration":5}'
+```
+
+响应中的关键字段：
+
+- `ready_to_call`: 客户侧是否可以直接调用。
+- `blockers`: 仍缺的阶段，例如 `account`、`runtime`、`health`、`live_acceptance`、`user_api_key`。
+- `downstream_api_key`: 普通下游 API Key 状态；`plaintext_key_returned=true` 表示本次响应返回了一次性明文 key。
+- `sample_requests`: `/v1/images/generations`、`/v1/images/edits`、`/v1/videos/generations` 的 curl 样例。
+
 上线工作台预检把路由、release 候选、runtime、账号、健康检查和真实样本验收缺口聚合到同一个响应里。默认 dry-run，不创建账号、不下载二进制、不调用上游：
 
 ```bash
@@ -1445,7 +1487,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/activation-workflow`、`/v1/admin/proxy-kernels/production-gap-report`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/source-repo/sync`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/account-materials`、`/v1/admin/proxy-kernels/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/activation-workflow`、`/v1/admin/proxy-kernels/{provider_id}/production-gap-report`、`/v1/admin/proxy-kernels/{provider_id}/activation-run`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/activation-workflow`、`/v1/admin/proxy-kernels/production-gap-report`、`/v1/admin/proxy-kernels/downstream-call-package`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/source-repo/sync`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/account-materials`、`/v1/admin/proxy-kernels/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/activation-workflow`、`/v1/admin/proxy-kernels/{provider_id}/production-gap-report`、`/v1/admin/proxy-kernels/{provider_id}/downstream-call-package`、`/v1/admin/proxy-kernels/{provider_id}/activation-run`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |
