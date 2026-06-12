@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any
@@ -7284,6 +7285,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/routing-plan"),
     ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
     ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
+    ("GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
     ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
     ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
@@ -7296,6 +7298,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/release-checksums"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
@@ -7534,6 +7537,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/routing-plan"),
                 ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
+                ("GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
@@ -7546,6 +7550,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/release-checksums"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
@@ -13323,6 +13328,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量路由计划", "GET", "/v1/admin/proxy-kernels/routing-plan"),
         ("全量运行时交付计划", "GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
+        ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
         ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
         ("全量生产就绪矩阵", "GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
@@ -13335,6 +13341,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 运行合同", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-contract"),
         ("OpenAI Web 生产就绪", "GET", "/v1/admin/proxy-kernels/openai_web_session/production-readiness"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
+        ("OpenAI Web Hash 候选", "GET", "/v1/admin/proxy-kernels/openai_web_session/release-checksums"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
         ("应用 OpenAI Web 路由", "POST", "/v1/admin/proxy-kernels/openai_web_session/apply-routing"),
@@ -13395,6 +13402,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
+        "/v1/admin/proxy-kernels/release-checksum-matrix",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
@@ -13407,6 +13415,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/runtime-contract",
         "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
+        "/v1/admin/proxy-kernels/openai_web_session/release-checksums",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
         "/v1/admin/proxy-kernels/openai_web_session/process",
@@ -13436,6 +13445,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
+        "/v1/admin/proxy-kernels/release-checksum-matrix",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
@@ -13448,6 +13458,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/runtime-contract",
         "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
+        "/v1/admin/proxy-kernels/openai_web_session/release-checksums",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13914,6 +13925,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
+                  <button class="op" type="button" id="kernel-release-checksum-matrix">全量 Hash 候选</button>
                   <button class="op" type="button" id="kernel-runtime-contract-matrix">运行合同矩阵</button>
                   <button class="op" type="button" id="kernel-production-readiness-matrix">生产就绪矩阵</button>
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
@@ -13939,6 +13951,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 </div>
                 <div class="ops" style="min-width:260px">
                   <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
+                  <button class="op" type="button" id="kernel-release-checksums">Hash 候选</button>
                   <button class="op" type="button" id="kernel-runtime-delivery">运行时交付计划</button>
                   <button class="op" type="button" id="kernel-runtime-contract">运行合同</button>
                   <button class="op" type="button" id="kernel-production-readiness">生产就绪</button>
@@ -14382,6 +14395,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const materials = hint.materials_request || {{}};
           const runtimePlan = hint.runtime_delivery_plan || {{}};
           const releaseProbe = hint.release_probe || {{}};
+          const releaseChecksums = hint.release_checksums || {{}};
           const runtimeContract = hint.runtime_contract || {{}};
           const productionReadiness = hint.production_readiness || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
@@ -14398,6 +14412,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>资产</dt><dd class="kernel-path-note">${{escapeHtml(installed.path || '尚未安装 release 资产')}}</dd>
               <dt>Hash</dt><dd>${{installed.sha256 ? '已记录' : '未记录'}}${{hint.installed_verified ? ' · 已校验' : ''}}</dd>
               <dt>Release 探测</dt><dd>${{escapeHtml(releaseProbe.status || '未探测')}}${{releaseProbe.next_step?.label ? ' · 下一步：' + escapeHtml(releaseProbe.next_step.label) : ''}}</dd>
+              <dt>Hash 候选</dt><dd>${{escapeHtml(releaseChecksums.status || '未读取')}}${{Number(releaseChecksums.install_ready_candidate_count || 0) ? ' · 可安装候选 ' + escapeHtml(releaseChecksums.install_ready_candidate_count) : ''}}${{releaseChecksums.next_step?.label ? ' · 下一步：' + escapeHtml(releaseChecksums.next_step.label) : ''}}</dd>
               <dt>运行合同</dt><dd>${{escapeHtml(runtimeContract.status || '未读取')}}${{runtimeContract.next_action ? ' · 下一步：' + escapeHtml(runtimeContract.next_action) : ''}}</dd>
               <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
@@ -14417,11 +14432,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const releaseSha = document.getElementById('kernel-release-sha256');
           const installPreview = document.getElementById('kernel-install-path-preview');
           const base = document.getElementById('kernel-base-url');
+          const checksumCandidates = Array.isArray(releaseChecksums.resolved_sha256_candidates) ? releaseChecksums.resolved_sha256_candidates : [];
+          const preferredChecksum = checksumCandidates.find(item => item.preferred) || checksumCandidates[0] || {{}};
           if (artifact && !artifact.value && installed.path) artifact.value = installed.path;
           if (sha && !sha.value && (installed.expected_sha256 || installed.sha256)) sha.value = installed.expected_sha256 || installed.sha256;
-          if (releaseTag && !releaseTag.value && installed.tag_name) releaseTag.value = installed.tag_name;
-          if (releaseAsset && !releaseAsset.value && installed.asset_name) releaseAsset.value = installed.asset_name;
-          if (releaseSha && !releaseSha.value && (installed.expected_sha256 || installed.sha256)) releaseSha.value = installed.expected_sha256 || installed.sha256;
+          if (releaseTag && !releaseTag.value && (installed.tag_name || preferredChecksum.tag_name)) releaseTag.value = installed.tag_name || preferredChecksum.tag_name;
+          if (releaseAsset && !releaseAsset.value && (installed.asset_name || preferredChecksum.asset_name)) releaseAsset.value = installed.asset_name || preferredChecksum.asset_name;
+          if (releaseSha && !releaseSha.value && (installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256)) releaseSha.value = installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256;
           if (installPreview) installPreview.value = installed.path || '';
           if (base && hint.runtime_base_url) base.value = hint.runtime_base_url;
         }}
@@ -14501,6 +14518,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             routing_plan: routingPayload,
             runtime_delivery_plan: runtimePlanPayload,
             release_probe: existingHint.release_probe || {{}},
+            release_checksums: existingHint.release_checksums || {{}},
             runtime_contract: runtimeContractPayload,
             production_readiness: productionReadinessPayload,
             go_live: existingHint.go_live || {{}},
@@ -14622,6 +14640,33 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const suffix = dryRun ? '?dry_run=true' : '';
           const payload = await callAdmin('/v1/admin/proxy-kernels/release-probe-matrix' + suffix);
           mergeKernelReleaseProbeMatrix(payload);
+          return payload;
+        }}
+        function mergeKernelReleaseChecksumMatrix(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              release_checksums: item,
+              installed: item.installed || kernelHint(item.provider_id).installed || {{}},
+              installed_verified: Boolean(item.installed_verified),
+              runtime_registered: Boolean(item.runtime_registered),
+              source_repo: item.source_repo || kernelHint(item.provider_id).source_repo || {{}},
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelReleaseChecksums(providerId = null, dryRun = false) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const suffix = dryRun ? '?dry_run=true' : '';
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/release-checksums' + suffix);
+          mergeKernelReleaseChecksumMatrix(payload);
+          return payload;
+        }}
+        async function loadAllKernelReleaseChecksumMatrix(dryRun = false) {{
+          const suffix = dryRun ? '?dry_run=true' : '';
+          const payload = await callAdmin('/v1/admin/proxy-kernels/release-checksum-matrix' + suffix);
+          mergeKernelReleaseChecksumMatrix(payload);
           return payload;
         }}
         function mergeKernelRuntimeContractMatrix(payload) {{
@@ -15267,6 +15312,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-probe-release')?.addEventListener('click', async () => {{
           try {{ await probeKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-release-checksums')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelReleaseChecksums();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-runtime-contract')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelRuntimeContract();
@@ -15291,6 +15342,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-release-probe-matrix')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelReleaseProbeMatrix(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-release-checksum-matrix')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelReleaseChecksumMatrix(false);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -19308,6 +19365,23 @@ def admin_proxy_kernels_release_probe_matrix(
         raise HTTPException(status_code=400, detail={"error": str(exc), "release_probe_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/release-checksum-matrix")
+def admin_proxy_kernels_release_checksum_matrix(
+    provider_ids: str = "",
+    dry_run: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_release_checksum_matrix(db, selected, dry_run=dry_run, max_checksum_bytes=max_checksum_bytes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "release_checksum_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/runtime-contract-matrix")
 def admin_proxy_kernels_runtime_contract_matrix(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -19377,6 +19451,22 @@ def admin_proxy_kernel_production_readiness(provider_id: str, ctx: AuthContext =
         return build_proxy_kernel_production_readiness(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/release-checksums")
+def admin_proxy_kernel_release_checksums(
+    provider_id: str,
+    dry_run: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_release_checksums(db, provider_id, dry_run=dry_run, max_checksum_bytes=max_checksum_bytes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "release_checksum_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
 @app.get("/v1/admin/proxy-kernels/{provider_id}")
@@ -20525,6 +20615,473 @@ def build_proxy_kernel_release_probe_matrix(db: Session, provider_ids: list[str]
             "release_binary_first": True,
             "hash_required": True,
             "downloaded": False,
+            "source_repo_root": str(settings.source_repo_dir),
+            "proxy_kernel_root": str(settings.proxy_kernel_dir),
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+        },
+    }
+
+
+PROXY_KERNEL_SHA256_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+PROXY_KERNEL_CHECKSUM_NAME_TOKENS = ("sha256", "sha256sum", "shasum", "checksum", "checksums")
+PROXY_KERNEL_SIGNATURE_SUFFIXES = (".sig", ".asc", ".minisig", ".pem", ".cert")
+
+
+def proxy_kernel_asset_name(asset: dict[str, Any]) -> str:
+    return str(asset.get("name") or "").strip()
+
+
+def proxy_kernel_normalized_asset_name(value: str) -> str:
+    name = str(value or "").strip().strip("\"'")
+    name = name.lstrip("*").strip()
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    if name.startswith("./"):
+        name = name[2:]
+    return name.lower()
+
+
+def proxy_kernel_is_signature_asset(asset: dict[str, Any]) -> bool:
+    lower = proxy_kernel_asset_name(asset).lower()
+    return lower.endswith(PROXY_KERNEL_SIGNATURE_SUFFIXES) or "signature" in lower
+
+
+def proxy_kernel_is_checksum_asset(asset: dict[str, Any]) -> bool:
+    lower = proxy_kernel_asset_name(asset).lower()
+    if proxy_kernel_is_signature_asset(asset):
+        return False
+    return any(token in lower for token in PROXY_KERNEL_CHECKSUM_NAME_TOKENS)
+
+
+def proxy_kernel_implied_checksum_target(source_asset_name: str) -> str:
+    name = str(source_asset_name or "").strip()
+    lower = name.lower()
+    suffixes = (
+        ".sha256sum.txt",
+        ".sha256sums.txt",
+        ".sha256.txt",
+        ".sha256sum",
+        ".sha256sums",
+        ".sha256",
+        ".checksum.txt",
+        ".checksums.txt",
+    )
+    for suffix in suffixes:
+        if lower.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)]
+    return ""
+
+
+def proxy_kernel_clean_checksum_filename(value: str) -> str:
+    cleaned = str(value or "").strip().strip("\"'")
+    cleaned = cleaned.strip(" \t:=()")
+    cleaned = cleaned.lstrip("*").strip()
+    if cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    cleaned = cleaned.replace("\\", "/").rsplit("/", 1)[-1]
+    if not cleaned or cleaned in {"-", "."} or PROXY_KERNEL_SHA256_RE.fullmatch(cleaned):
+        return ""
+    return cleaned
+
+
+def proxy_kernel_checksum_entry(asset_name: str, expected_sha256: str, source_line: str, source_path: str = "") -> dict[str, Any] | None:
+    sha = str(expected_sha256 or "").strip().lower()
+    name = proxy_kernel_clean_checksum_filename(asset_name)
+    if not name or not PROXY_KERNEL_SHA256_RE.fullmatch(sha):
+        return None
+    return {
+        "asset_name": name,
+        "normalized_asset_name": proxy_kernel_normalized_asset_name(name),
+        "expected_sha256": sha,
+        "source_line": source_line[:240],
+        "source_path": source_path,
+    }
+
+
+def proxy_kernel_collect_checksum_json(value: Any, source_path: str = "$") -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        lowered = {str(key).lower(): raw_value for key, raw_value in value.items()}
+        name_value = (
+            lowered.get("name")
+            or lowered.get("filename")
+            or lowered.get("file")
+            or lowered.get("asset")
+            or lowered.get("path")
+        )
+        hash_value = (
+            lowered.get("sha256")
+            or lowered.get("sha256sum")
+            or lowered.get("checksum")
+            or lowered.get("digest")
+            or lowered.get("hash")
+        )
+        if isinstance(name_value, str) and isinstance(hash_value, str):
+            entry = proxy_kernel_checksum_entry(name_value, hash_value, source_path, source_path)
+            if entry:
+                entries.append(entry)
+        for key, item in value.items():
+            entries.extend(proxy_kernel_collect_checksum_json(item, f"{source_path}.{key}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            entries.extend(proxy_kernel_collect_checksum_json(item, f"{source_path}[{index}]"))
+    return entries
+
+
+def proxy_kernel_parse_checksum_text(text: str, source_asset_name: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    implied_target = proxy_kernel_implied_checksum_target(source_asset_name)
+    stripped = (text or "").strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            entries.extend(proxy_kernel_collect_checksum_json(json.loads(stripped)))
+        except Exception:
+            pass
+    for line_number, raw_line in enumerate((text or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        bsd = re.search(r"SHA256\s*\((?P<name>[^)]+)\)\s*=\s*(?P<sha>[0-9a-fA-F]{64})", line, flags=re.IGNORECASE)
+        if bsd:
+            entry = proxy_kernel_checksum_entry(bsd.group("name"), bsd.group("sha"), f"line {line_number}: {line}")
+            if entry:
+                entries.append(entry)
+            continue
+        hashes = PROXY_KERNEL_SHA256_RE.findall(line)
+        if len(hashes) != 1:
+            continue
+        sha = hashes[0]
+        before, _, after = line.partition(sha)
+        filename = ""
+        if before.strip():
+            filename = before.strip()
+        elif after.strip():
+            filename = after.strip()
+        elif implied_target:
+            filename = implied_target
+        filename = filename.strip(" \t:=*-")
+        if " " in filename:
+            filename = filename.split()[0]
+        entry = proxy_kernel_checksum_entry(filename, sha, f"line {line_number}: {line}")
+        if entry:
+            entries.append(entry)
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in entries:
+        key = (entry["normalized_asset_name"], entry["expected_sha256"], entry.get("source_path") or entry.get("source_line") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def proxy_kernel_download_checksum_asset(asset: dict[str, Any], max_checksum_bytes: int) -> dict[str, Any]:
+    name = proxy_kernel_asset_name(asset)
+    url = str(asset.get("browser_download_url") or "")
+    source = {
+        "asset_name": name,
+        "status": "skipped",
+        "size": asset.get("size"),
+        "parsed_count": 0,
+        "entries": [],
+    }
+    if not url:
+        return {**source, "status": "failed", "error": "CHECKSUM_ASSET_URL_MISSING"}
+    try:
+        declared_size = int(asset.get("size") or 0)
+    except Exception:
+        declared_size = 0
+    if declared_size > max_checksum_bytes:
+        return {**source, "status": "too_large", "error": "CHECKSUM_ASSET_TOO_LARGE"}
+    request = urllib.request.Request(url, headers=proxy_kernel_service.github_headers())
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content_length = response.headers.get("Content-Length")
+            try:
+                if content_length and int(content_length) > max_checksum_bytes:
+                    return {**source, "status": "too_large", "error": "CHECKSUM_ASSET_TOO_LARGE"}
+            except Exception:
+                pass
+            data = response.read(max_checksum_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        return {**source, "status": "failed", "error": "GITHUB_HTTP_ERROR", "status_code": exc.code}
+    except Exception as exc:
+        return {**source, "status": "failed", "error": exc.__class__.__name__, "message": str(exc)}
+    if len(data) > max_checksum_bytes:
+        return {**source, "status": "too_large", "error": "CHECKSUM_ASSET_TOO_LARGE"}
+    text = data.decode("utf-8", errors="replace")
+    entries = proxy_kernel_parse_checksum_text(text, name)
+    return {**source, "status": "parsed", "parsed_count": len(entries), "entries": entries}
+
+
+def proxy_kernel_release_checksum_next_step(
+    status: str,
+    dry_run: bool,
+    resolved_count: int,
+    preferred_count: int,
+    checksum_count: int,
+) -> dict[str, Any]:
+    if dry_run:
+        return {
+            "id": "probe_release",
+            "label": "探测 GitHub release",
+            "reason": "dry_run=true 只展示计划，不访问 GitHub，也不读取 checksum 文件。",
+            "primary_api": "/v1/admin/proxy-kernels/release-checksum-matrix",
+        }
+    if status == "failed":
+        return {
+            "id": "retry_release_probe",
+            "label": "重试 release 探测",
+            "reason": "release 或 checksum 文件读取失败；先确认 GitHub 网络、仓库权限和 release 可见性。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-checksums",
+        }
+    if status in {"release_without_assets", "no_release"}:
+        return {
+            "id": "source_repo_reference",
+            "label": "同步 source-repo 参考",
+            "reason": "当前没有可直接安装的 release 资产；仅在这种情况下进入 source-repo 参考、构建或重写 adapter。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync",
+        }
+    if resolved_count:
+        return {
+            "id": "install_release_with_resolved_sha256",
+            "label": "使用已解析 SHA256 安装 release",
+            "reason": "checksum 文件已匹配 release 资产；复制 install_payload_template 调用 install-release。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/install-release",
+        }
+    if preferred_count:
+        return {
+            "id": "manual_sha256_required",
+            "label": "人工确认 SHA256",
+            "reason": "找到了候选 runtime 资产，但 release 中没有可匹配的 checksum；必须人工从可信来源提供 SHA256。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/install-release",
+        }
+    if checksum_count:
+        return {
+            "id": "inspect_release_assets",
+            "label": "人工确认 release 资产",
+            "reason": "仓库有 checksum 文件，但没有自动命中 Linux/amd64 runtime 资产；需要人工确认架构、启动方式和文件名。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-probe",
+        }
+    return {
+        "id": "probe_release",
+        "label": "探测或确认 release",
+        "reason": "尚未拿到可安装资产与 SHA256 的组合。",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-probe",
+    }
+
+
+def build_proxy_kernel_release_checksums(
+    db: Session,
+    provider_id: str,
+    dry_run: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+) -> dict[str, Any]:
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    spec = kernel.get("spec") if isinstance(kernel.get("spec"), dict) else {}
+    source_repo = proxy_kernel_service.source_repo_status(provider_id)
+    installed = kernel.get("installed") if isinstance(kernel.get("installed"), dict) else {}
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    max_bytes = max(1024, min(int(max_checksum_bytes or 1024 * 1024), 5 * 1024 * 1024))
+    if dry_run:
+        probe = {
+            "status": "planned",
+            "release": {},
+            "assets": [],
+            "preferred_assets": [],
+            "message": "dry_run=true; no GitHub request or checksum download was made.",
+        }
+    else:
+        try:
+            probe = proxy_kernel_service.probe_release(provider_id)
+        except Exception as exc:  # pragma: no cover - defensive envelope for unstable upstream metadata
+            probe = {
+                "object": "media2api.proxy_kernel.release_probe",
+                "provider_id": provider_id,
+                "status": "failed",
+                "error": exc.__class__.__name__,
+                "message": str(exc),
+                "repo_url": spec.get("repo_url"),
+            }
+    assets = [item for item in (probe.get("assets") or []) if isinstance(item, dict)]
+    preferred_assets = [item for item in (probe.get("preferred_assets") or []) if isinstance(item, dict)]
+    checksum_assets = [item for item in assets if proxy_kernel_is_checksum_asset(item)]
+    runtime_assets = [item for item in assets if not proxy_kernel_is_checksum_asset(item) and not proxy_kernel_is_signature_asset(item)]
+    checksum_sources = []
+    checksums_by_asset: dict[str, list[dict[str, Any]]] = {}
+    if not dry_run:
+        for asset in checksum_assets:
+            source = proxy_kernel_download_checksum_asset(asset, max_bytes)
+            checksum_sources.append(source)
+            for entry in source.get("entries") or []:
+                if not isinstance(entry, dict):
+                    continue
+                normalized = str(entry.get("normalized_asset_name") or "")
+                if not normalized:
+                    continue
+                checksums_by_asset.setdefault(normalized, []).append({**entry, "source_asset": proxy_kernel_asset_name(asset)})
+    preferred_names = {proxy_kernel_asset_name(item) for item in preferred_assets}
+    resolved_candidates = []
+    seen_candidate_keys: set[tuple[str, str]] = set()
+    release = probe.get("release") if isinstance(probe.get("release"), dict) else {}
+    tag_name = str(release.get("tag_name") or "")
+    for asset in runtime_assets:
+        asset_name = proxy_kernel_asset_name(asset)
+        normalized = proxy_kernel_normalized_asset_name(asset_name)
+        for entry in checksums_by_asset.get(normalized, []):
+            sha = str(entry.get("expected_sha256") or "").lower()
+            key = (asset_name, sha)
+            if key in seen_candidate_keys:
+                continue
+            seen_candidate_keys.add(key)
+            install_payload = {
+                "tag_name": tag_name,
+                "asset_name": asset_name,
+                "expected_sha256": sha,
+                "force": False,
+            }
+            install_payload_json = json.dumps(install_payload, ensure_ascii=False, separators=(",", ":"))
+            resolved_candidates.append({
+                "provider_id": provider_id,
+                "selection_id": kernel.get("selection_id"),
+                "tag_name": tag_name,
+                "asset_name": asset_name,
+                "expected_sha256": sha,
+                "source_asset": entry.get("source_asset"),
+                "source_line": entry.get("source_line"),
+                "candidate_score": int(asset.get("candidate_score") or 0),
+                "candidate_reason": asset.get("candidate_reason") or "",
+                "preferred": asset_name in preferred_names,
+                "install_payload_template": install_payload,
+                "install_command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{install_payload_json}'",
+            })
+    resolved_asset_names = {item["asset_name"] for item in resolved_candidates}
+    unresolved_preferred_assets = [
+        {
+            "asset_name": proxy_kernel_asset_name(asset),
+            "candidate_score": int(asset.get("candidate_score") or 0),
+            "candidate_reason": asset.get("candidate_reason") or "",
+            "manual_install_payload_template": {
+                "tag_name": tag_name,
+                "asset_name": proxy_kernel_asset_name(asset),
+                "expected_sha256": "64-hex-sha256",
+                "force": False,
+            },
+        }
+        for asset in preferred_assets
+        if proxy_kernel_asset_name(asset) not in resolved_asset_names
+    ]
+    status = str(probe.get("status") or "unknown")
+    next_step = proxy_kernel_release_checksum_next_step(
+        status,
+        dry_run=bool(dry_run),
+        resolved_count=len(resolved_candidates),
+        preferred_count=len(preferred_assets),
+        checksum_count=len(checksum_assets),
+    )
+    return {
+        "object": "media2api.proxy_kernel.release_checksums",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "repo": spec.get("repo"),
+        "repo_url": spec.get("repo_url"),
+        "dry_run": bool(dry_run),
+        "status": status,
+        "message": probe.get("message") or probe.get("error") or "",
+        "release": release,
+        "asset_count": len(assets),
+        "runtime_asset_count": len(runtime_assets),
+        "preferred_asset_count": len(preferred_assets),
+        "checksum_asset_count": len(checksum_assets),
+        "checksum_sources": checksum_sources,
+        "resolved_sha256_candidates": resolved_candidates,
+        "install_ready_candidate_count": len(resolved_candidates),
+        "resolved_preferred_asset_count": sum(1 for item in resolved_candidates if item.get("preferred")),
+        "unresolved_preferred_assets": unresolved_preferred_assets,
+        "hash_required": True,
+        "installed": installed,
+        "installed_verified": bool(kernel.get("installed_verified")),
+        "runtime_registered": bool(kernel.get("runtime_registered")),
+        "source_repo": source_repo,
+        "source_repo_fallback": next_step.get("id") == "source_repo_reference",
+        "next_step": next_step,
+        "commands": {
+            "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
+            "release_checksums": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-checksums",
+            "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64-hex-sha256\"}}'",
+            "source_repo_sync": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-repo/sync -d '{{\"ref\":\"\",\"force\":false}}'",
+        },
+        "policy": {
+            "read_only": True,
+            "release_binary_first": True,
+            "hash_required": True,
+            "downloaded_binaries": False,
+            "checksum_download_only": not bool(dry_run),
+            "max_checksum_bytes": max_bytes,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "source_repo_only_when": "release missing, asset unusable, protocol inspection, local build input, or adapter rewrite reference",
+        },
+    }
+
+
+def proxy_kernel_release_checksum_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    next_step_counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        step_id = str((row.get("next_step") or {}).get("id") or "unknown")
+        next_step_counts[step_id] = next_step_counts.get(step_id, 0) + 1
+    return {
+        "total": len(rows),
+        "planned": status_counts.get("planned", 0),
+        "ok": status_counts.get("ok", 0),
+        "release_without_assets": status_counts.get("release_without_assets", 0),
+        "no_release": status_counts.get("no_release", 0),
+        "failed": status_counts.get("failed", 0),
+        "with_checksum_assets": sum(1 for row in rows if int(row.get("checksum_asset_count") or 0) > 0),
+        "install_ready_candidates": sum(int(row.get("install_ready_candidate_count") or 0) for row in rows),
+        "rows_with_install_ready_candidates": sum(1 for row in rows if int(row.get("install_ready_candidate_count") or 0) > 0),
+        "manual_sha256_required": sum(1 for row in rows if (row.get("next_step") or {}).get("id") == "manual_sha256_required"),
+        "source_repo_reference": sum(1 for row in rows if row.get("source_repo_fallback")),
+        "preferred_assets_total": sum(int(row.get("preferred_asset_count") or 0) for row in rows),
+        "resolved_preferred_assets": sum(int(row.get("resolved_preferred_asset_count") or 0) for row in rows),
+        "status_counts": status_counts,
+        "next_step_counts": next_step_counts,
+    }
+
+
+def build_proxy_kernel_release_checksum_matrix(
+    db: Session,
+    provider_ids: list[str] | None = None,
+    dry_run: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [
+        build_proxy_kernel_release_checksums(db, provider_id, dry_run=dry_run, max_checksum_bytes=max_checksum_bytes)
+        for provider_id in selected
+    ]
+    max_bytes = max(1024, min(int(max_checksum_bytes or 1024 * 1024), 5 * 1024 * 1024))
+    return {
+        "object": "media2api.proxy_kernel.release_checksum_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "dry_run": bool(dry_run),
+        "summary": proxy_kernel_release_checksum_matrix_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "release_binary_first": True,
+            "hash_required": True,
+            "downloaded_binaries": False,
+            "checksum_download_only": not bool(dry_run),
+            "max_checksum_bytes": max_bytes,
             "source_repo_root": str(settings.source_repo_dir),
             "proxy_kernel_root": str(settings.proxy_kernel_dir),
             "official_sdk_api": "forbidden",

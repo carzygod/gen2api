@@ -1002,6 +1002,26 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/release-probe-matrix" \
 - `data[].preferred_assets`: 平台按 Linux/amd64/可执行资产规则筛出的候选项。
 - `data[].next_step`: 对该 provider 的下一步建议。
 
+查看全量 release hash 候选矩阵。`dry_run=true` 只列出计划；默认调用只读取 release 中的小型 checksum/sha256 文本，不下载二进制、不安装：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/release-checksum-matrix?dry_run=true" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/release-checksum-matrix" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/release-checksums" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+响应中的关键字段：
+
+- `summary.install_ready_candidates`: 已解析出可直接带入安装请求的候选数。
+- `data[].resolved_sha256_candidates`: 每个候选的 `asset_name`、`expected_sha256`、来源 checksum 文件和 `install_payload_template`。
+- `data[].unresolved_preferred_assets`: 仍需人工提供 SHA256 的 preferred release 资产。
+- `policy.downloaded_binaries=false`: 该接口不会下载 release 二进制。
+
 批量补齐全部定型 provider 的平台侧路由。该接口不会创建账号或假凭据：
 
 ```bash
@@ -1216,7 +1236,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |
