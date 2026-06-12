@@ -515,6 +515,21 @@ Targeted checks:
 .venv\Scripts\python.exe scripts\stability_audit.py --iterations 1000
 ```
 
+Stability acceptance evidence can also be generated through the admin API after
+deployment. The suite runs the five stability checks, persists a sanitized
+evidence file, and defaults to cleaning the temporary users/jobs/assets it
+created:
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/stability/acceptance-suite" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"iterations":1000,"cleanup":true,"persist_evidence":true}'
+
+curl "$MEDIA2API_BASE_URL/v1/admin/stability/acceptance-evidence" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
 Remote resilience audit:
 
 ```powershell

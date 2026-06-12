@@ -731,6 +731,18 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/account-onboarding" \
 | `POST` | `/v1/admin/account-onboarding/bulk` | 批量账号接入 |
 | `POST` | `/v1/admin/account-setup-quickstart` | 快速接入工作流 |
 
+稳定性验收证据不依赖真实上游账号，也不会把 mock 任务伪装成生产可用性。管理员可以运行一次完整套件生成 `var/stability-acceptance-evidence.json`，最终验收矩阵会读取该文件来满足 `AC-S-001` 到 `AC-S-005`。默认 `cleanup=true` 会清理本次自测创建的临时用户、任务、资产、租约和账号：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/stability/acceptance-suite" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"iterations":1000,"cleanup":true,"persist_evidence":true}'
+
+curl "$MEDIA2API_BASE_URL/v1/admin/stability/acceptance-evidence" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
 ### 8.4 模型与映射
 
 | 方法 | 路径 | 用途 |

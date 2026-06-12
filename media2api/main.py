@@ -67,6 +67,7 @@ ASSET_STORAGE_SELF_TEST_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKUlEQVR4nGNkYPjPQC5gIlvnqOZRzaOaRzWPal7QMRg1g9EwYBgAq7cCP7wf1QQAAAAASUVORK5CYII="
 )
 EXTERNAL_ACCEPTANCE_SAMPLE_ORDER = ["text_to_image", "image_to_image", "image_edit", "text_to_video", "image_to_video", "video_extend"]
+STABILITY_ACCEPTANCE_EVIDENCE_PATH = Path("var") / "stability-acceptance-evidence.json"
 
 
 def metric_label(value: Any) -> str:
@@ -514,6 +515,13 @@ class MockStabilitySelfTestRequest(BaseModel):
     iterations: int = 100
     model: str = "t2i-fast"
     provider_id: str = "mock"
+    max_failures: int = 3
+
+
+class StabilityAcceptanceSuiteRequest(BaseModel):
+    iterations: int = 1000
+    cleanup: bool = True
+    persist_evidence: bool = True
     max_failures: int = 3
 
 
@@ -6505,6 +6513,330 @@ def run_temp_url_asset_self_test(db: Session, ctx: AuthContext) -> dict[str, Any
             thread.join(timeout=2)
 
 
+def load_stability_acceptance_evidence() -> dict[str, Any]:
+    try:
+        if not STABILITY_ACCEPTANCE_EVIDENCE_PATH.exists():
+            return {}
+        payload = json.loads(STABILITY_ACCEPTANCE_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if payload.get("object") != "media2api.stability_acceptance_evidence":
+        return {}
+    return payload
+
+
+def write_stability_acceptance_evidence(payload: dict[str, Any]) -> None:
+    STABILITY_ACCEPTANCE_EVIDENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STABILITY_ACCEPTANCE_EVIDENCE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def stability_acceptance_row(evidence: dict[str, Any], row_id: str) -> dict[str, Any]:
+    rows = evidence.get("rows") if isinstance(evidence.get("rows"), dict) else {}
+    row = rows.get(row_id) if isinstance(rows.get(row_id), dict) else {}
+    return row
+
+
+def stability_acceptance_cleanup_ids_from_payload(payload: Any, job_ids: set[str], account_ids: set[str], asset_ids: set[str], model_ids: set[str], provider_ids: set[str]) -> None:
+    if isinstance(payload, dict):
+        payload_id = str(payload.get("id") or "")
+        if payload_id.startswith("job_"):
+            job_ids.add(payload_id)
+        elif payload_id.startswith("acct_selftest_") or payload_id.startswith("acct_stability_"):
+            account_ids.add(payload_id)
+        elif payload_id.startswith("asset_"):
+            asset_ids.add(payload_id)
+        elif payload_id.startswith("selftest-"):
+            model_ids.add(payload_id)
+        elif payload_id.startswith("selftest_temp_url_"):
+            provider_ids.add(payload_id)
+        for key in ("job_id",):
+            value = str(payload.get(key) or "")
+            if value.startswith("job_"):
+                job_ids.add(value)
+        for key in ("account_id",):
+            value = str(payload.get(key) or "")
+            if value.startswith("acct_selftest_") or value.startswith("acct_stability_"):
+                account_ids.add(value)
+        for key in ("asset_id",):
+            value = str(payload.get(key) or "")
+            if value.startswith("asset_"):
+                asset_ids.add(value)
+        for value in payload.values():
+            stability_acceptance_cleanup_ids_from_payload(value, job_ids, account_ids, asset_ids, model_ids, provider_ids)
+    elif isinstance(payload, list):
+        for item in payload:
+            stability_acceptance_cleanup_ids_from_payload(item, job_ids, account_ids, asset_ids, model_ids, provider_ids)
+
+
+def create_stability_acceptance_context(db: Session, iterations: int) -> AuthContext:
+    suffix = new_id("stability_suite")
+    user_id = f"usr_{suffix}"
+    api_key_id = f"key_{suffix}"
+    policy_id = f"limit_{suffix}"
+    user = models.User(
+        id=user_id,
+        email=f"{user_id}@media2api.local",
+        status="active",
+        tier="stability_acceptance_suite",
+        wallet_balance=max(1000000, iterations * 100),
+    )
+    api_key = models.ApiKey(
+        id=api_key_id,
+        user_id=user_id,
+        name="stability-acceptance-suite",
+        key_hash=hash_api_key(f"stability-acceptance-suite-{suffix}"),
+        status="active",
+    )
+    policy = models.UserLimitPolicy(
+        id=policy_id,
+        name="Stability acceptance suite temporary policy",
+        user_id=user_id,
+        requests_per_minute=max(3000, iterations + 100),
+        daily_job_limit=max(3000, iterations + 100),
+        concurrent_job_limit=100,
+        high_cost_allowed=True,
+        enabled=True,
+        notes="Temporary policy created by /v1/admin/stability/acceptance-suite.",
+    )
+    db.add_all([user, api_key, policy])
+    db.commit()
+    return AuthContext(user=user, api_key=api_key, request_id=f"req_{suffix}")
+
+
+def disable_stability_acceptance_context(db: Session, ctx: AuthContext) -> None:
+    user = db.get(models.User, ctx.user.id)
+    api_key = db.get(models.ApiKey, ctx.api_key.id)
+    policies = db.query(models.UserLimitPolicy).filter(models.UserLimitPolicy.user_id == ctx.user.id).all()
+    if user:
+        user.status = "disabled"
+    if api_key:
+        api_key.status = "disabled"
+    for policy in policies:
+        policy.enabled = False
+    db.commit()
+
+
+def cleanup_stability_acceptance_artifacts(db: Session, started_at: datetime, results: dict[str, Any]) -> dict[str, Any]:
+    job_ids: set[str] = set()
+    account_ids: set[str] = set()
+    asset_ids: set[str] = set()
+    model_ids: set[str] = set()
+    provider_ids: set[str] = set()
+
+    stability_user_ids = {
+        user_id
+        for user_id, in db.query(models.User.id)
+        .filter(models.User.tier.in_(["stability_self_test", "stability_acceptance_suite"]), models.User.created_at >= started_at - timedelta(seconds=5))
+        .all()
+    }
+    if stability_user_ids:
+        job_ids.update(
+            job_id
+            for job_id, in db.query(models.MediaJob.id).filter(models.MediaJob.user_id.in_(stability_user_ids)).all()
+        )
+        asset_ids.update(
+            asset_id
+            for asset_id, in db.query(models.MediaAsset.id).filter(models.MediaAsset.user_id.in_(stability_user_ids)).all()
+        )
+
+    stability_acceptance_cleanup_ids_from_payload(results, job_ids, account_ids, asset_ids, model_ids, provider_ids)
+    job_ids.update(
+        job_id
+        for job_id, in db.query(models.MediaJob.id)
+        .filter(
+            models.MediaJob.created_at >= started_at - timedelta(seconds=5),
+            or_(
+                models.MediaJob.id.like("job_lease_selftest%"),
+                models.MediaJob.logical_model.like("selftest-%"),
+            ),
+        )
+        .all()
+    )
+    model_ids.update(
+        model_id
+        for model_id, in db.query(models.LogicalModel.id)
+        .filter(models.LogicalModel.created_at >= started_at - timedelta(seconds=5), models.LogicalModel.id.like("selftest-%"))
+        .all()
+    )
+    account_ids.update(
+        account_id
+        for account_id, in db.query(models.AccountResource.id)
+        .filter(models.AccountResource.created_at >= started_at - timedelta(seconds=5), models.AccountResource.id.like("acct_selftest_%"))
+        .all()
+    )
+    provider_ids.update(
+        provider_id
+        for provider_id, in db.query(models.Provider.id)
+        .filter(models.Provider.created_at >= started_at - timedelta(seconds=5), models.Provider.id.like("selftest_temp_url_%"))
+        .all()
+    )
+    if job_ids:
+        for job_id, output_json in db.query(models.MediaJob.id, models.MediaJob.output_asset_ids_json).filter(models.MediaJob.id.in_(job_ids)).all():
+            for asset_id in loads(output_json, []):
+                if str(asset_id).startswith("asset_"):
+                    asset_ids.add(str(asset_id))
+
+    deleted: dict[str, int] = {
+        "assets": 0,
+        "events": 0,
+        "leases": 0,
+        "billing_holds": 0,
+        "usage_records": 0,
+        "provider_cost_records": 0,
+        "attempts": 0,
+        "jobs": 0,
+        "alerts": 0,
+        "mappings": 0,
+        "pricing_rules": 0,
+        "models": 0,
+        "accounts": 0,
+        "providers": 0,
+        "api_keys": 0,
+        "policies": 0,
+        "users": 0,
+    }
+
+    for asset in list(db.query(models.MediaAsset).filter(models.MediaAsset.id.in_(asset_ids)).all()) if asset_ids else []:
+        asset_service.delete(db, asset)
+        deleted["assets"] += 1
+    if job_ids:
+        deleted["events"] += db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id.in_(job_ids)).delete(synchronize_session=False)
+        deleted["leases"] += db.query(models.AccountLease).filter(models.AccountLease.job_id.in_(job_ids)).delete(synchronize_session=False)
+        deleted["billing_holds"] += db.query(models.BillingHold).filter(models.BillingHold.job_id.in_(job_ids)).delete(synchronize_session=False)
+        deleted["usage_records"] += db.query(models.UsageRecord).filter(models.UsageRecord.job_id.in_(job_ids)).delete(synchronize_session=False)
+        deleted["provider_cost_records"] += db.query(models.ProviderCostRecord).filter(models.ProviderCostRecord.job_id.in_(job_ids)).delete(synchronize_session=False)
+        deleted["attempts"] += db.query(models.MediaJobAttempt).filter(models.MediaJobAttempt.job_id.in_(job_ids)).delete(synchronize_session=False)
+        deleted["jobs"] += db.query(models.MediaJob).filter(models.MediaJob.id.in_(job_ids)).delete(synchronize_session=False)
+        deleted["alerts"] += db.query(models.AlertEvent).filter(models.AlertEvent.job_id.in_(job_ids)).delete(synchronize_session=False)
+    if account_ids:
+        deleted["alerts"] += db.query(models.AlertEvent).filter(models.AlertEvent.account_id.in_(account_ids)).delete(synchronize_session=False)
+        deleted["leases"] += db.query(models.AccountLease).filter(models.AccountLease.account_id.in_(account_ids)).delete(synchronize_session=False)
+        safe_account_ids = {item for item in account_ids if item.startswith("acct_selftest_") or item.startswith("acct_stability_")}
+        if safe_account_ids:
+            deleted["accounts"] += db.query(models.AccountResource).filter(models.AccountResource.id.in_(safe_account_ids)).delete(synchronize_session=False)
+    if model_ids:
+        safe_model_ids = {item for item in model_ids if item.startswith("selftest-")}
+        if safe_model_ids:
+            deleted["mappings"] += db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.logical_model.in_(safe_model_ids)).delete(synchronize_session=False)
+            deleted["pricing_rules"] += db.query(models.PricingRule).filter(models.PricingRule.logical_model.in_(safe_model_ids)).delete(synchronize_session=False)
+            deleted["models"] += db.query(models.LogicalModel).filter(models.LogicalModel.id.in_(safe_model_ids)).delete(synchronize_session=False)
+    if provider_ids:
+        safe_provider_ids = {item for item in provider_ids if item.startswith("selftest_temp_url_")}
+        if safe_provider_ids:
+            deleted["providers"] += db.query(models.Provider).filter(models.Provider.id.in_(safe_provider_ids)).delete(synchronize_session=False)
+    if stability_user_ids:
+        deleted["api_keys"] += db.query(models.ApiKey).filter(models.ApiKey.user_id.in_(stability_user_ids)).delete(synchronize_session=False)
+        deleted["policies"] += db.query(models.UserLimitPolicy).filter(models.UserLimitPolicy.user_id.in_(stability_user_ids)).delete(synchronize_session=False)
+        deleted["alerts"] += db.query(models.AlertEvent).filter(models.AlertEvent.user_id.in_(stability_user_ids)).delete(synchronize_session=False)
+        deleted["users"] += db.query(models.User).filter(models.User.id.in_(stability_user_ids)).delete(synchronize_session=False)
+    db.commit()
+    return {
+        "enabled": True,
+        "deleted": deleted,
+        "job_ids": sorted(job_ids)[:12],
+        "job_count": len(job_ids),
+        "stability_user_count": len(stability_user_ids),
+        "account_ids": sorted(account_ids)[:12],
+        "account_count": len(account_ids),
+        "asset_count": len(asset_ids),
+    }
+
+
+def build_stability_acceptance_rows(results: dict[str, Any], iterations: int) -> dict[str, Any]:
+    mock = results.get("mock_1000") or {}
+    lease = results.get("lease_expiry") or {}
+    timeout = results.get("fallback_timeout") or {}
+    temp_asset = results.get("temp_url_asset") or {}
+    cooldown = results.get("account_cooldown") or {}
+    mock_completed = int(mock.get("iterations_completed") or 0)
+    required_iterations = 1000
+    return {
+        "AC-S-001": {
+            "ok": bool(mock.get("ok") and mock_completed >= required_iterations and not ((mock.get("leases") or {}).get("active_lease_leaks") or [])),
+            "criterion": "Mock Provider can execute 1000 tasks without state-machine deadlock.",
+            "evidence": {
+                "iterations_requested": iterations,
+                "iterations_required": required_iterations,
+                "iterations_completed": mock_completed,
+                "duration_seconds": mock.get("duration_seconds"),
+                "jobs": mock.get("jobs"),
+                "attempts": mock.get("attempts"),
+                "assets": {"output_asset_count": (mock.get("assets") or {}).get("output_asset_count")},
+                "billing": mock.get("billing"),
+                "leases": mock.get("leases"),
+            },
+        },
+        "AC-S-002": {
+            "ok": bool(lease.get("ok") and int(lease.get("expired_leases") or 0) >= 1),
+            "criterion": "Worker crash or stuck jobs release expired account leases through the scanner.",
+            "evidence": {"expired_leases": lease.get("expired_leases"), "lease": lease.get("lease"), "attempt": lease.get("attempt"), "account": lease.get("account")},
+        },
+        "AC-S-003": {
+            "ok": bool(timeout.get("ok") and ((timeout.get("fallback") or {}).get("expected_error_code") == "PROVIDER_TIMEOUT")),
+            "criterion": "Provider timeouts terminate attempts and can fallback or fail cleanly.",
+            "evidence": {"fallback": timeout.get("fallback"), "billing": timeout.get("billing"), "attempt_count": len(timeout.get("attempts") or [])},
+        },
+        "AC-S-004": {
+            "ok": bool(temp_asset.get("ok") and (temp_asset.get("platform_download") or {}).get("ok") and (temp_asset.get("source") or {}).get("second_fetch_status") == 410),
+            "criterion": "Transferred provider result assets remain downloadable even if upstream temporary URLs expire.",
+            "evidence": {"source": temp_asset.get("source"), "platform_download": temp_asset.get("platform_download"), "billing": temp_asset.get("billing")},
+        },
+        "AC-S-005": {
+            "ok": bool(cooldown.get("ok")),
+            "criterion": "Single-account failure escalation increases failure score and removes the account from active scheduling by cooldown.",
+            "evidence": {"account": cooldown.get("account"), "score_trace": cooldown.get("score_trace"), "billing": cooldown.get("billing"), "cleanup": cooldown.get("cleanup")},
+        },
+    }
+
+
+def build_stability_acceptance_suite(db: Session, ctx: AuthContext, req: StabilityAcceptanceSuiteRequest) -> dict[str, Any]:
+    iterations = max(1, min(int(req.iterations or 1), 1000))
+    started_at = datetime.utcnow()
+    started = time.time()
+    results: dict[str, Any] = {}
+    cleanup: dict[str, Any] = {"enabled": bool(req.cleanup), "deleted": {}}
+    suite_ctx = create_stability_acceptance_context(db, iterations)
+    results["suite_context"] = {"user_id": suite_ctx.user.id, "api_key_id": suite_ctx.api_key.id}
+    try:
+        results["mock_1000"] = run_mock_stability_self_test(db, MockStabilitySelfTestRequest(iterations=iterations, max_failures=req.max_failures))
+        results["lease_expiry"] = run_lease_expiry_self_test(db, suite_ctx)
+        results["fallback_timeout"] = run_fallback_timeout_self_test(db, suite_ctx)
+        results["temp_url_asset"] = run_temp_url_asset_self_test(db, suite_ctx)
+        results["account_cooldown"] = run_account_cooldown_self_test(db, suite_ctx)
+    finally:
+        if req.cleanup:
+            cleanup = cleanup_stability_acceptance_artifacts(db, started_at, results)
+        else:
+            disable_stability_acceptance_context(db, suite_ctx)
+    rows = build_stability_acceptance_rows(results, iterations)
+    ok = all(bool(row.get("ok")) for row in rows.values())
+    payload = {
+        "object": "media2api.stability_acceptance_evidence",
+        "schema_version": 1,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "run_id": new_id("stability_suite"),
+        "status": "satisfied" if ok else "action_required",
+        "ok": ok,
+        "iterations": iterations,
+        "duration_seconds": round(time.time() - started, 3),
+        "rows": rows,
+        "cleanup": cleanup,
+        "policy": {
+            "production_account_data": "not_required",
+            "mock_provider_only": True,
+            "cleanup_default": True,
+            "official_sdk_api": "forbidden",
+            "upstream_calls": False,
+        },
+    }
+    if req.persist_evidence:
+        write_stability_acceptance_evidence(payload)
+        payload["persisted_to"] = str(STABILITY_ACCEPTANCE_EVIDENCE_PATH)
+    return payload
+
+
 def serialize_webhook(delivery: models.WebhookDelivery) -> dict[str, Any]:
     return {
         "id": delivery.id,
@@ -7605,6 +7937,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/media-jobs/self-test-stalled-recovery"),
     ("POST", "/v1/admin/media-jobs/self-test-connector-cancel"),
     ("POST", "/v1/admin/stability/self-test-mock"),
+    ("GET", "/v1/admin/stability/acceptance-evidence"),
+    ("POST", "/v1/admin/stability/acceptance-suite"),
     ("POST", "/v1/admin/fallback/self-test"),
     ("POST", "/v1/admin/fallback/self-test-timeout"),
     ("POST", "/v1/admin/accounts/self-test-cooldown"),
@@ -7952,6 +8286,26 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
             },
             data_ready=bool(active_account_rows),
             action_items=[] if external_accounts else [{"check": "active_external_account", "detail": {"message": "Configure at least one active non-mock account for production readiness."}}],
+        ),
+        module_row(
+            "Stability",
+            "Run isolated stability acceptance self-tests, persist sanitized evidence, and optionally clean generated business rows after the suite.",
+            [
+                ("GET", "/v1/admin/stability/acceptance-evidence"),
+                ("POST", "/v1/admin/stability/acceptance-suite"),
+                ("POST", "/v1/admin/stability/self-test-mock"),
+                ("POST", "/v1/admin/account-leases/self-test-expiry"),
+                ("POST", "/v1/admin/fallback/self-test-timeout"),
+                ("POST", "/v1/admin/assets/self-test-temp-url"),
+                ("POST", "/v1/admin/accounts/self-test-cooldown"),
+            ],
+            {
+                "evidence": load_stability_acceptance_evidence(),
+                "cleanup_default": True,
+                "production_accounts_required": False,
+            },
+            data_ready=bool(load_stability_acceptance_evidence().get("ok")),
+            action_items=[] if load_stability_acceptance_evidence().get("ok") else [{"check": "stability_acceptance_suite", "detail": {"message": "Run /v1/admin/stability/acceptance-suite once to persist sanitized stability evidence."}}],
         ),
         module_row(
             "Jobs",
@@ -10782,6 +11136,7 @@ def build_final_acceptance_matrix(db: Session) -> dict[str, Any]:
     external_mixed_media = build_external_mixed_media_provider_snapshot(db)
     connector_preflight = build_external_connector_preflight(db)
     connector_manifest_template = build_external_connector_manifest_template(db, provider_id="jimeng")
+    stability_acceptance_evidence = load_stability_acceptance_evidence()
 
     def route_rows(routes: list[tuple[str, str]]) -> list[dict[str, Any]]:
         return [
@@ -11019,18 +11374,26 @@ def build_final_acceptance_matrix(db: Session) -> dict[str, Any]:
         "AC-S-001",
         "stability",
         "Mock Provider can execute 1000 tasks without state-machine deadlock.",
-        bool(best_stability_run and best_stability_run["jobs"] >= 1000 and best_stability_run["completed"] == best_stability_run["jobs"] and best_stability_active_leases == 0),
-        {"best_stability_run": best_stability_run, "best_stability_active_leases": best_stability_active_leases, "self_test_route": "/v1/admin/stability/self-test-mock"},
-        [("POST", "/v1/admin/stability/self-test-mock")],
+        bool(stability_acceptance_row(stability_acceptance_evidence, "AC-S-001").get("ok"))
+        or bool(best_stability_run and best_stability_run["jobs"] >= 1000 and best_stability_run["completed"] == best_stability_run["jobs"] and best_stability_active_leases == 0),
+        {
+            "best_stability_run": best_stability_run,
+            "best_stability_active_leases": best_stability_active_leases,
+            "self_test_route": "/v1/admin/stability/self-test-mock",
+            "acceptance_suite_route": "/v1/admin/stability/acceptance-suite",
+            "acceptance_suite_evidence": stability_acceptance_row(stability_acceptance_evidence, "AC-S-001"),
+        },
+        [("POST", "/v1/admin/stability/self-test-mock"), ("POST", "/v1/admin/stability/acceptance-suite"), ("GET", "/v1/admin/stability/acceptance-evidence")],
         scope="stability",
     )
     add_row(
         "AC-S-002",
         "stability",
         "Worker crash or stuck jobs release expired account leases through the scanner.",
-        expired_leases > 0 and routes_available([("POST", "/v1/admin/account-leases/release-expired")]),
-        {"expired_leases": expired_leases},
-        [("POST", "/v1/admin/account-leases/release-expired"), ("POST", "/v1/admin/account-leases/self-test-expiry")],
+        bool(stability_acceptance_row(stability_acceptance_evidence, "AC-S-002").get("ok"))
+        or (expired_leases > 0 and routes_available([("POST", "/v1/admin/account-leases/release-expired")])),
+        {"expired_leases": expired_leases, "acceptance_suite_evidence": stability_acceptance_row(stability_acceptance_evidence, "AC-S-002")},
+        [("POST", "/v1/admin/account-leases/release-expired"), ("POST", "/v1/admin/account-leases/self-test-expiry"), ("POST", "/v1/admin/stability/acceptance-suite")],
         scope="stability",
         linked_requirements=["ACC-001"],
     )
@@ -11038,9 +11401,10 @@ def build_final_acceptance_matrix(db: Session) -> dict[str, Any]:
         "AC-S-003",
         "stability",
         "Provider timeouts terminate attempts and can fallback or fail cleanly.",
-        provider_timeout_attempts > 0 and fallback_events > 0,
-        {"provider_timeout_attempts": provider_timeout_attempts, "fallback_events": fallback_events},
-        [("POST", "/v1/admin/fallback/self-test-timeout")],
+        bool(stability_acceptance_row(stability_acceptance_evidence, "AC-S-003").get("ok"))
+        or (provider_timeout_attempts > 0 and fallback_events > 0),
+        {"provider_timeout_attempts": provider_timeout_attempts, "fallback_events": fallback_events, "acceptance_suite_evidence": stability_acceptance_row(stability_acceptance_evidence, "AC-S-003")},
+        [("POST", "/v1/admin/fallback/self-test-timeout"), ("POST", "/v1/admin/stability/acceptance-suite")],
         scope="stability",
         linked_requirements=["C-008", "ROUTE-001", "PA-004"],
     )
@@ -11048,9 +11412,10 @@ def build_final_acceptance_matrix(db: Session) -> dict[str, Any]:
         "AC-S-004",
         "stability",
         "Transferred provider result assets remain downloadable even if upstream temporary URLs expire.",
-        provider_result_assets > 0 and routes_available([("POST", "/v1/admin/assets/self-test-temp-url"), ("GET", "/v1/assets/{asset_id}/content")]),
-        {"provider_result_assets": provider_result_assets, "temp_url_self_test_route": "/v1/admin/assets/self-test-temp-url"},
-        [("POST", "/v1/admin/assets/self-test-temp-url"), ("GET", "/v1/assets/{asset_id}/content")],
+        bool(stability_acceptance_row(stability_acceptance_evidence, "AC-S-004").get("ok"))
+        or (provider_result_assets > 0 and routes_available([("POST", "/v1/admin/assets/self-test-temp-url"), ("GET", "/v1/assets/{asset_id}/content")])),
+        {"provider_result_assets": provider_result_assets, "temp_url_self_test_route": "/v1/admin/assets/self-test-temp-url", "acceptance_suite_evidence": stability_acceptance_row(stability_acceptance_evidence, "AC-S-004")},
+        [("POST", "/v1/admin/assets/self-test-temp-url"), ("GET", "/v1/assets/{asset_id}/content"), ("POST", "/v1/admin/stability/acceptance-suite")],
         scope="stability",
         linked_requirements=["C-004", "ASSET-001"],
     )
@@ -11058,9 +11423,13 @@ def build_final_acceptance_matrix(db: Session) -> dict[str, Any]:
         "AC-S-005",
         "stability",
         "Single-account failure escalation increases failure score and removes the account from active scheduling by cooldown.",
-        bool((acceptance_by_name.get("account_failure_cooldown_evidence") or {}).get("ok")),
-        {"acceptance_evidence": (acceptance_by_name.get("account_failure_cooldown_evidence") or {}).get("evidence")},
-        [("POST", "/v1/admin/accounts/self-test-cooldown"), ("GET", "/v1/admin/accounts/{account_id}/diagnostics")],
+        bool(stability_acceptance_row(stability_acceptance_evidence, "AC-S-005").get("ok"))
+        or bool((acceptance_by_name.get("account_failure_cooldown_evidence") or {}).get("ok")),
+        {
+            "acceptance_evidence": (acceptance_by_name.get("account_failure_cooldown_evidence") or {}).get("evidence"),
+            "acceptance_suite_evidence": stability_acceptance_row(stability_acceptance_evidence, "AC-S-005"),
+        },
+        [("POST", "/v1/admin/accounts/self-test-cooldown"), ("GET", "/v1/admin/accounts/{account_id}/diagnostics"), ("POST", "/v1/admin/stability/acceptance-suite")],
         scope="stability",
         linked_checks=["account_failure_cooldown_evidence"],
         linked_requirements=["ACC-005"],
@@ -13711,6 +14080,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("Qwen.ai 指南", "GET", "/v1/admin/account-guides/qwen_ai_web_session"),
         ("Qianwen 指南", "GET", "/v1/admin/account-guides/qianwen_web_session"),
         ("账号验收套件", "POST", "/v1/admin/account-acceptance-suite"),
+        ("稳定性验收证据", "GET", "/v1/admin/stability/acceptance-evidence"),
+        ("稳定性验收套件", "POST", "/v1/admin/stability/acceptance-suite"),
         ("任务诊断", "GET", "/v1/admin/jobs?limit=5"),
         ("租约自检", "POST", "/v1/admin/account-leases/self-test-expiry"),
         ("停滞任务恢复测试", "POST", "/v1/admin/media-jobs/self-test-stalled-recovery"),
@@ -13790,6 +14161,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/account-onboarding/plan",
         "/v1/admin/account-setup-quickstart",
         "/v1/admin/account-acceptance-suite",
+        "/v1/admin/stability/acceptance-evidence",
+        "/v1/admin/stability/acceptance-suite",
         "/v1/admin/account-leases/self-test-expiry",
     ])
     provider_actions = action_controls_for([
@@ -21161,6 +21534,33 @@ def admin_mock_stability_self_test(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return run_mock_stability_self_test(db, req)
+
+
+@app.get("/v1/admin/stability/acceptance-evidence")
+def admin_stability_acceptance_evidence(ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    evidence = load_stability_acceptance_evidence()
+    if not evidence:
+        return {
+            "object": "media2api.stability_acceptance_evidence",
+            "status": "missing",
+            "ok": False,
+            "path": str(STABILITY_ACCEPTANCE_EVIDENCE_PATH),
+            "next_action": {
+                "id": "run_stability_acceptance_suite",
+                "method": "POST",
+                "path": "/v1/admin/stability/acceptance-suite",
+            },
+        }
+    return evidence
+
+
+@app.post("/v1/admin/stability/acceptance-suite")
+def admin_stability_acceptance_suite(
+    req: StabilityAcceptanceSuiteRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return build_stability_acceptance_suite(db, ctx, req)
 
 
 @app.post("/v1/admin/fallback/self-test")
