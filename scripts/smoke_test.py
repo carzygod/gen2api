@@ -99,6 +99,7 @@ def main() -> None:
         proxy_kernels = assert_ok(client.get("/v1/admin/proxy-kernels", headers=headers))
         assert proxy_kernels["object"] == "media2api.proxy_kernel.list" and proxy_kernels["summary"]["total"] >= 10, proxy_kernels
         assert {"ready_for_live_acceptance", "needs_live_acceptance", "needs_route", "needs_health", "usable"}.issubset(proxy_kernels["summary"]), proxy_kernels
+        assert proxy_kernels["summary"]["needs_route"] == 0, proxy_kernels
         assert {"openai_web_session", "gemini_cli_oauth", "doubao_web_session", "qwen_ai_web_session"}.issubset({item["provider_id"] for item in proxy_kernels["data"]}), proxy_kernels
         assert all({"directly_usable", "route_ready", "route_evidence", "health_ok", "latest_health", "ready_for_live_acceptance", "live_acceptance_ok", "live_acceptance"}.issubset(item) for item in proxy_kernels["data"]), proxy_kernels
         bulk_routing_plan = assert_ok(client.get("/v1/admin/proxy-kernels/routing-plan", headers=headers))
@@ -111,7 +112,9 @@ def main() -> None:
             )
         )
         assert bulk_routing_apply["object"] == "media2api.proxy_kernel.routing_apply.list" and bulk_routing_apply["no_fake_account_created"] is True, bulk_routing_apply
-        assert bulk_routing_apply["summary"]["total"] >= 10 and bulk_routing_apply["summary"]["mappings"]["created"] >= 1, bulk_routing_apply
+        applied_mapping_count = bulk_routing_apply["summary"]["mappings"]["created"] + bulk_routing_apply["summary"]["mappings"]["updated"]
+        assert bulk_routing_apply["summary"]["total"] >= 10 and applied_mapping_count >= 1, bulk_routing_apply
+        assert all(item["routing_plan"]["route_config_ready"] and not item["routing_plan"]["missing_mappings"] for item in bulk_routing_apply["data"]), bulk_routing_apply
         bulk_go_live = assert_ok(client.get("/v1/admin/proxy-kernels/go-live-checklist", headers=headers))
         assert bulk_go_live["object"] == "media2api.proxy_kernel.go_live_checklist.list" and bulk_go_live["summary"]["total"] >= 10, bulk_go_live
         bulk_materials = assert_ok(client.get("/v1/admin/proxy-kernels/materials-request", headers=headers))
@@ -338,6 +341,10 @@ def main() -> None:
         login_response = client.post("/admin/login", data={"username": "admin", "password": "dev-admin-key"}, follow_redirects=False)
         assert login_response.status_code in {302, 303} and "media2api_admin_key" in login_response.headers.get("set-cookie", "")
         admin_page = client.get("/admin")
+        setup_page = client.get("/setup")
+        assert setup_page.status_code == 200 and "MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true" in setup_page.text and "MEDIA2API_SEED_DEFAULTS=false" in setup_page.text
+        for setup_env_dom in ["MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true", "MEDIA2API_SEED_DEFAULTS=false"]:
+            assert setup_env_dom in admin_page.text, setup_env_dom
         assert admin_page.status_code == 200 and "总览" in admin_page.text and "今日任务" in admin_page.text and "操作" in admin_page.text
         for admin_control in ["平台输入要求", "反代内核", "反代内核清单", "启动受控执行器", "安装 Release", "安装 Hash 候选", "批量安装候选计划", "上线工作台预检", "反代内核上线工作台", "启动 Runtime", "查看全部路由计划", "查看运行时交付计划", "运行时交付计划", "全量 Release 探测", "全量 Release 探测矩阵", "全量 Hash 候选", "全量 Release Hash 候选", "全量安装 Hash 候选计划", "Hash 候选", "OpenAI Web Hash 候选", "OpenAI Web 安装 Hash 候选", "运行合同矩阵", "全量运行合同矩阵", "运行合同", "OpenAI Web 运行合同", "生产就绪矩阵", "全量生产就绪矩阵", "生产就绪", "OpenAI Web 生产就绪", "补齐全部定型路由", "查看全部上线清单", "查看全部材料清单", "查看材料清单", "Loopback 合同自检", "查看上线清单", "查看路由计划", "补齐路由映射", "日志与停止", "源码参考", "同步到 source-repo", "探测 OpenAI Web Release", "探测 Gemini CLI Release", "全量材料清单", "OpenAI Web 材料清单", "OpenAI Web 运行时交付计划", "OpenAI Web 指南", "Codex 图像指南", "Gemini CLI 指南", "豆包指南", "Qwen.ai 指南", "Qianwen 指南", "账号验收套件", "任务诊断", "验收报告", "平台接入报告", "运维工作台报告", "生产上线计划", "连接器一致性", "外部连接器预检", "连接器清单模板", "系统要求报告", "最终验收矩阵", "交付包", "租约自检", "停滞任务恢复测试", "恢复停滞任务", "资产存储测试", "故障转移自检", "就绪检查", "添加平台账号", "批量导入账号", "真实平台合同套件", "配置快照", "导出配置", "试运行导入", "授权资源", "查看获取教程"]:
             assert admin_control in admin_page.text, admin_control

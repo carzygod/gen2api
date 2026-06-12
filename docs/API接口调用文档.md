@@ -1144,6 +1144,8 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/oper
 - `live_acceptance_ok` / `live_acceptance`: 每个声明图片/视频操作是否已有完成任务与输出资产。
 - `blockers[].code`: 可能包含 `NO_ROUTE_MAPPING`、`NO_ACTIVE_ACCOUNT`、`NO_LOOPBACK_RUNTIME`、`RUNTIME_HEALTH_REQUIRED`、`LIVE_ACCEPTANCE_REQUIRED`。
 
+部署默认开启 `MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true`。它只创建定型 provider 和 provider/model 映射，不创建账号、不写凭据、不生成 mock 任务；因此清空业务数据后仍可保留平台路由能力，下一步只需导入真实账号和启动 loopback runtime。
+
 运行 loopback 合同自检，验证平台能把图片/视频请求真实转发到本机反代内核合同并完成资产入库。该接口只启动临时本机 runner，不调用真实上游、不消耗额度：
 
 ```bash

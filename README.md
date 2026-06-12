@@ -198,6 +198,13 @@ image/video acceptance samples must all have evidence. Providers that have the
 first prerequisites but no live sample evidence are shown as "待验收", not
 production-usable.
 
+`MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true` is enabled by default and by the
+bare-metal deploy script. It initializes only finalized proxy-kernel providers
+and model mappings, so a freshly cleared platform still knows how to route
+OAI/Gemini/Grok/Doubao/Qwen/etc. requests after real accounts and runtimes are
+added. It does not create mock accounts, fake upstream credentials, or sample
+jobs; `MEDIA2API_SEED_DEFAULTS` remains the separate switch for demo defaults.
+
 ## Local Development
 
 ```powershell

@@ -202,9 +202,16 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         default_config={
             "health_endpoint": "/health",
             "poll_timeout_seconds": 600,
+            "endpoints": {
+                OPS["t2i"]: "/v1/images/generations",
+                OPS["i2i"]: "/v1/images/edits",
+                OPS["t2v"]: "/v1/videos/generations",
+                OPS["i2v"]: "/v1/videos/generations",
+            },
         },
         mappings=[
             MappingTemplate("t2i-pro", "grok-imagine-image", [OPS["t2i"]], priority=20, quality_score=0.8, reliability_score=0.65),
+            MappingTemplate("image-edit", "grok-imagine-image", [OPS["i2i"]], priority=25, quality_score=0.78, reliability_score=0.6),
             MappingTemplate("i2v-fast", "grok-imagine-video", [OPS["i2v"]], priority=20, speed_score=0.75, quality_score=0.7),
             MappingTemplate("t2v-general", "grok-imagine-video", [OPS["t2v"]], priority=10, speed_score=0.75, quality_score=0.7),
         ],

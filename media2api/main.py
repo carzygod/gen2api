@@ -1462,6 +1462,14 @@ def startup() -> None:
         db.commit()
         if settings.seed_defaults_enabled:
             seed_defaults(db)
+        if settings.proxy_kernel_bootstrap_routes_enabled:
+            apply_proxy_kernel_bulk_routing(
+                db,
+                status="active",
+                enable_mappings=True,
+                priority_offset=0,
+                update_provider_base_url=True,
+            )
         migrate_inline_account_credentials(db)
         scrub_existing_request_audit_queries(db)
 
@@ -12819,6 +12827,8 @@ def setup_wizard_html() -> str:
             'MEDIA2API_DEFAULT_USER=' + (qs('setup-admin-email').value || 'admin@media2api.local'),
             'MEDIA2API_INLINE_ASYNC=false',
             'MEDIA2API_WORKER_CONCURRENCY=' + (qs('setup-worker-concurrency').value || '2'),
+            'MEDIA2API_SEED_DEFAULTS=false',
+            'MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true',
             'ASSET_DIR=./var/assets',
             'MEDIA2API_ASSET_STORE=local',
             'MEDIA2API_SECRET_ENCRYPTION_KEY=' + installSecret('encryption', 'm2enc_'),
@@ -15259,6 +15269,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             'MEDIA2API_DEFAULT_USER=' + email,
             'MEDIA2API_INLINE_ASYNC=false',
             'MEDIA2API_WORKER_CONCURRENCY=2',
+            'MEDIA2API_SEED_DEFAULTS=false',
+            'MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true',
             'MEDIA2API_SECRET_ENCRYPTION_KEY=' + adminSetupSecrets.encryption,
             'MEDIA2API_ASSET_SIGNING_SECRET=' + adminSetupSecrets.asset,
             'ASSET_DIR=./var/assets',
