@@ -1537,6 +1537,24 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 
 ### 13.2 管理员侧
 
+刷新本地开源连接器清单时，默认扫描 `MEDIA2API_SOURCE_REPO_DIR`：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/connector-registry/refresh" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+如需指定目录，使用 `source_repo_path`：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/connector-registry/refresh" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source_repo_path":"/opt/media2api/source-repo"}'
+```
+
 管理员侧接口较多，按模块使用：
 
 | 模块 | 代表接口 |

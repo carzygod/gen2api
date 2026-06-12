@@ -7,7 +7,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RES_REPO = ROOT / "res-repo"
+SOURCE_REPO = ROOT / "source-repo"
 sys.path.insert(0, str(ROOT))
 
 from media2api.catalog import TARGET_MODEL_TABLE
@@ -213,7 +213,7 @@ def field_names(provider_id: str) -> set[str]:
 
 
 def spec_passes(spec: EvidenceSpec) -> bool:
-    evidence_path = RES_REPO / str(spec["path"])
+    evidence_path = SOURCE_REPO / str(spec["path"])
     if not evidence_path.is_file():
         fail("evidence file is missing", {"path": str(evidence_path)})
     content = evidence_path.read_text(encoding="utf-8", errors="ignore").casefold()
@@ -224,8 +224,8 @@ def spec_passes(spec: EvidenceSpec) -> bool:
 
 
 def main() -> None:
-    if not RES_REPO.is_dir():
-        fail("res-repo is required for source evidence audit", {"path": str(RES_REPO)})
+    if not SOURCE_REPO.is_dir():
+        fail("source-repo is required for source evidence audit", {"path": str(SOURCE_REPO)})
 
     target_providers = {row[0] for row in TARGET_MODEL_TABLE}
     missing_provider_specs = sorted(target_providers - set(EVIDENCE_SPECS))

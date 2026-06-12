@@ -704,6 +704,7 @@ class AccountSubscriptionSourceProductionSyncRequest(BaseModel):
 
 class ConnectorRegistryRefreshRequest(BaseModel):
     res_repo_path: str | None = None
+    source_repo_path: str | None = None
 
 
 class AccountOnboardingPlanRequest(BaseModel):
@@ -7733,7 +7734,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 "reference_auth_types": REFERENCE_AUTH_TYPES,
                 "blueprint_contract": "project -> provider manifest -> authorized resource import/session capture -> production preflight commands",
             },
-            action_items=[] if connector_project_count else [{"check": "connector_registry_scan", "detail": {"message": "Run /v1/admin/connector-registry/refresh after cloning res-repo."}}],
+            action_items=[] if connector_project_count else [{"check": "connector_registry_scan", "detail": {"message": "Run /v1/admin/connector-registry/refresh after cloning source-repo."}}],
         ),
         module_row(
             "ProxyKernels",
@@ -9247,7 +9248,7 @@ def build_connector_project_blueprint(
         "commands": commands,
         "action_items": action_items,
         "operator_notes": [
-            "This blueprint never executes code from res-repo. It only installs media2api provider/account metadata and optional resource-list compatibility sources.",
+            "This blueprint never executes code from source-repo. It only installs media2api provider/account metadata and optional resource-list compatibility sources.",
             "Use credential_ref values returned by a Web Cookie/session helper or Agent Provider runner. Do not paste passwords, verification codes, or unofficial login automation into this platform.",
             "Run preflight, connector contract tests, quota sync, and account acceptance before sending production traffic.",
         ],
@@ -11788,7 +11789,7 @@ def admin_connector_registry_refresh(
     ctx: AuthContext = Depends(require_auth),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    return connector_registry_service.refresh_from_local_repos(db, res_repo_path=req.res_repo_path)
+    return connector_registry_service.refresh_from_local_repos(db, res_repo_path=req.source_repo_path or req.res_repo_path)
 
 
 @app.get("/v1/admin/account-guides")
@@ -13528,7 +13529,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         for item in connector_projects
     )
     if not connector_project_rows:
-        connector_project_rows = '<tr><td colspan="7">尚未扫描 res-repo。点击“刷新开源连接器清单”后会显示已拉取仓库的分类结果。</td></tr>'
+        connector_project_rows = '<tr><td colspan="7">尚未扫描 source-repo。点击“刷新开源连接器清单”后会显示已拉取仓库的分类结果。</td></tr>'
     visible_checks = [item for item in readiness.get("checks", []) if "mock" not in dumps(item).lower()]
     check_rows = "".join(f"<tr><td>{admin_escape(item.get('name'))}</td><td>{pill('ready' if item.get('ok') else 'blocked')}</td><td>{admin_escape(item.get('detail'))}</td></tr>" for item in visible_checks)
     proxy_kernel_rows = "".join(
@@ -13860,6 +13861,14 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .kernel-summary dd {{ margin:0; overflow-wrap:anywhere; }}
         .kernel-blockers {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }}
         .kernel-blockers span {{ border:1px solid rgba(224,177,90,.3); border-radius:999px; padding:5px 8px; color:#ffe1a3; background:rgba(224,177,90,.08); font-size:12px; font-weight:900; }}
+        .source-plan-panel {{ margin-top:14px; border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,#151b24,#0d1219); padding:14px; box-shadow:var(--shadow-soft); }}
+        .source-plan-panel h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
+        .source-plan-panel .note {{ margin:6px 0 0; }}
+        .source-plan-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:12px; }}
+        .source-plan-card {{ border:1px solid var(--line); border-radius:var(--radius); background:#0d1118; padding:12px; min-height:112px; }}
+        .source-plan-card b {{ display:block; margin-bottom:6px; color:var(--text); }}
+        .source-plan-card code {{ display:block; overflow-wrap:anywhere; line-height:1.55; margin-top:6px; }}
+        .source-step-list {{ margin:10px 0 0; padding-left:18px; color:var(--soft); line-height:1.7; }}
         .kernel-side {{ display:grid; gap:12px; }}
         .account-material-card {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0c1219); box-shadow:var(--shadow-soft); }}
         .account-material-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; }}
@@ -14018,7 +14027,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions,.go-live-layout {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions,.go-live-layout,.source-plan-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -14133,7 +14142,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             </div>
             <div class="panel subtab active" id="oauth-guide-pane">
               <h2>平台字段对照</h2>
-              <p class="note">先选平台。这里按本地 res-repo 里的对应开源项目说明用户实际要填什么；base_url 只在对应项目确实要求执行器/服务地址时出现。</p>
+              <p class="note">先选平台。这里按本地 source-repo 里的对应开源项目说明用户实际要填什么；base_url 只在对应项目确实要求执行器/服务地址时出现。</p>
               <div class="formline">
                 <div><label>平台</label><select id="oauth-guide-provider">{provider_options}</select></div>
                 <div><label>推荐凭据类型</label><input id="oauth-guide-type" readonly /></div>
@@ -14225,7 +14234,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <section id="tab-connectors" class="tab">
             <div class="panel">
               <h2>开源连接器</h2>
-              <p class="note">已登记 {connector_project_count} 个本地开源项目。这里用于把 res-repo 里的 sub2api、web-to-api、MCP、聚合器和自托管连接器转成可执行的账号接入计划。</p>
+              <p class="note">已登记 {connector_project_count} 个本地开源项目。这里用于把 source-repo 里的 sub2api、web-to-api、MCP、聚合器和自托管连接器转成可执行的账号接入计划。</p>
               <div class="formline">
                 <div><label>平台</label><select id="connector-provider">{provider_options}</select></div>
                 <div><label>鉴权方式</label><select id="connector-auth-method">{auth_method_options}</select></div>
@@ -14553,7 +14562,19 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                     <button class="primary" type="button" id="kernel-source-sync">同步到 source-repo</button>
                   </div>
                   <p class="note" style="margin-top:10px">路径固定为项目根的 `source-repo/<owner>__<repo>`。已有目录如果不是同一个 GitHub 仓库，会拒绝同步。</p>
-                  <pre id="kernel-source-output" style="margin-top:14px;white-space:pre-wrap">尚未读取源码状态。</pre>
+                  <div class="source-plan-panel" id="kernel-source-plan-panel">
+                    <h3>源码兜底操作面板</h3>
+                    <p class="note">读取源码状态或源码运行计划后，这里会把下一步拆成可理解的动作：是否允许同步、需要安装什么、是否可以生成 loopback 启动器。</p>
+                    <ol class="source-step-list">
+                      <li>先确认 release 二进制不可用或预检失败。</li>
+                      <li>再同步到 source-repo 做协议参考、本地构建或 adapter 重写。</li>
+                      <li>最后只通过平台生成的 hash 启动器进入 start-runtime。</li>
+                    </ol>
+                  </div>
+                  <details class="source-plan-panel">
+                    <summary>查看原始接口返回 JSON</summary>
+                    <pre id="kernel-source-output" style="margin-top:14px;white-space:pre-wrap">尚未读取源码状态。</pre>
+                  </details>
                 </div>
                 <div class="kernel-summary" id="kernel-source-summary">
                   <h3>源码参考边界</h3>
@@ -15539,6 +15560,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             downstream_call_package: existingHint.downstream_call_package || {{}},
           }};
           renderKernelSummary(provider);
+          renderKernelSourcePlanPanel(provider);
           return payload;
         }}
         async function loadKernelSourceStatus(providerId = null) {{
@@ -15549,6 +15571,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output');
           if (output) output.textContent = JSON.stringify(payload, null, 2);
           renderKernelSummary(provider);
+          renderKernelSourcePlanPanel(provider);
           return payload;
         }}
         async function syncKernelSourceRepo() {{
@@ -15562,6 +15585,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output');
           if (output) output.textContent = JSON.stringify(response, null, 2);
           renderKernelSummary(provider);
+          renderKernelSourcePlanPanel(provider);
         }}
         async function syncNeededKernelSourceRepos(dryRun = true) {{
           const payload = {{
@@ -15585,6 +15609,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output') || result;
           if (output) output.textContent = JSON.stringify(response, null, 2);
           renderKernelSummary(selectedKernelProvider());
+          renderKernelSourcePlanPanel(selectedKernelProvider());
           return response;
         }}
         async function loadKernelSourceRuntimePlan(providerId = null) {{
@@ -15597,6 +15622,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output') || result;
           if (output) output.textContent = JSON.stringify(payload, null, 2);
           renderKernelSummary(provider);
+          renderKernelSourcePlanPanel(provider);
           return payload;
         }}
         async function prepareKernelSourceRuntimeSetup(dryRun = true) {{
@@ -15619,6 +15645,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output') || result;
           if (output) output.textContent = JSON.stringify(response, null, 2);
           renderKernelSummary(provider);
+          renderKernelSourcePlanPanel(provider);
           return response;
         }}
         async function prepareKernelSourceRuntimeLauncher(dryRun = true) {{
@@ -15640,6 +15667,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output') || result;
           if (output) output.textContent = JSON.stringify(response, null, 2);
           renderKernelSummary(provider);
+          renderKernelSourcePlanPanel(provider);
           return response;
         }}
         async function loadKernelRoutingPlan(providerId = null) {{
@@ -15985,6 +16013,73 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             if (Array.isArray(parsed)) return parsed.map(item => String(item).trim()).filter(Boolean);
           }} catch (_) {{}}
           return raw.split(/[,\\n]/).map(item => item.trim()).filter(Boolean);
+        }}
+        function commandLineText(command) {{
+          return Array.isArray(command) && command.length ? command.join(' ') : '等待平台识别';
+        }}
+        function renderKernelSourcePlanPanel(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          const hint = kernelHint(provider);
+          const source = hint.source_repo || {{}};
+          const sync = hint.source_repo_sync || {{}};
+          const plan = hint.source_runtime_plan || {{}};
+          const setup = hint.source_runtime_setup || {{}};
+          const launcher = hint.source_runtime_launcher || {{}};
+          const panel = document.getElementById('kernel-source-plan-panel');
+          if (!panel) return;
+          const sourceReady = Boolean(source.exists && source.is_git_repo) || Boolean(plan.source_available);
+          const detected = Array.isArray(plan.detected_project_types) ? plan.detected_project_types : [];
+          const dependencies = Array.isArray(plan.dependency_commands) ? plan.dependency_commands.filter(item => !item.reference_only) : [];
+          const builds = Array.isArray(plan.build_commands) ? plan.build_commands.filter(item => !item.reference_only) : [];
+          const preferred = plan.preferred_start_command || {{}};
+          const setupCommand = dependencies[0] || builds[0] || {{}};
+          const launcherTemplate = plan.launcher_payload_template || {{}};
+          const launcherPath = launcher.launcher?.path || '';
+          const nextSteps = [];
+          if (!sourceReady) nextSteps.push('先点击“source-repo 缺口计划”，确认只有 release 不可用或预检失败时才同步源码。');
+          if (!sourceReady) nextSteps.push('点击“同步到 source-repo”或“同步需要源码参考”，把定型仓库拉到指定目录。');
+          if (sourceReady && setupCommand.command?.length) nextSteps.push('先运行“源码准备 dry-run”核对依赖/构建命令；确认后再通过接口 dry_run=false 执行。');
+          if (sourceReady && preferred.command?.length) nextSteps.push('点击“生成启动器 dry-run”确认 loopback 启动器 payload；生产执行时生成 hash 启动器，再走“启动 Runtime”。');
+          if (sourceReady && !preferred.command?.length) nextSteps.push('源码已同步，但平台未识别启动入口；需要阅读 README 或源码后补 adapter/launcher。');
+          panel.innerHTML = `
+            <h3>${{escapeHtml(provider)}} 源码兜底操作面板</h3>
+            <p class="note">只在 release 缺失、release 资产不可运行、需要协议参考或 adapter 重写时使用。源码不会被直接公网暴露。</p>
+            <div class="source-plan-grid">
+              <div class="source-plan-card">
+                <b>源码状态</b>
+                <span>${{sourceReady ? '已同步，可做参考/构建' : '未同步或不是 Git 仓库'}}</span>
+                <code>${{escapeHtml(source.path || plan.source_repo?.path || '等待同步')}}</code>
+              </div>
+              <div class="source-plan-card">
+                <b>项目识别</b>
+                <span>${{escapeHtml(detected.join(', ') || '未识别')}}</span>
+                <code>${{escapeHtml(sync.reason || (plan.policy?.source_repo_only_when_needed ? 'source-repo 仅作为兜底路径' : '等待获取决策'))}}</code>
+              </div>
+              <div class="source-plan-card">
+                <b>依赖/构建</b>
+                <span>${{escapeHtml(setup.status || (setupCommand.id ? '可 dry-run' : '暂无候选'))}}</span>
+                <code>${{escapeHtml(commandLineText(setupCommand.command))}}</code>
+              </div>
+              <div class="source-plan-card">
+                <b>启动候选</b>
+                <span>${{preferred.id ? escapeHtml(preferred.id) : '暂无候选'}}</span>
+                <code>${{escapeHtml(commandLineText(preferred.command || launcherTemplate.command))}}</code>
+              </div>
+              <div class="source-plan-card">
+                <b>Hash 启动器</b>
+                <span>${{launcherPath ? '已生成' : '未生成'}}</span>
+                <code>${{escapeHtml(launcherPath || launcherTemplate.base_url || plan.base_url || '等待生成')}}</code>
+              </div>
+              <div class="source-plan-card">
+                <b>安全边界</b>
+                <span>loopback only · shell=false</span>
+                <code>官方 SDK/API 禁止；第三方公网反代禁止</code>
+              </div>
+            </div>
+            <ol class="source-step-list">
+              ${{nextSteps.map(item => `<li>${{escapeHtml(item)}}</li>`).join('') || '<li>读取源码运行计划后继续。</li>'}}
+            </ol>
+          `;
         }}
         function renderKernelAccountMaterialsPanel(providerId, payload) {{
           const provider = providerId || selectedKernelProvider();
@@ -16985,6 +17080,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-source-provider')?.addEventListener('change', event => {{
           syncKernelSelects(event.target.value);
           renderKernelSummary(event.target.value);
+          renderKernelSourcePlanPanel(event.target.value);
         }});
         document.querySelectorAll('.kernel-row-select').forEach(button => button.addEventListener('click', () => {{
           const provider = button.dataset.providerId;
@@ -16995,6 +17091,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           document.querySelector('[data-subtab="kernels-start-pane"]')?.classList.add('active');
           document.getElementById('kernels-start-pane')?.classList.add('active');
           renderKernelSummary(provider);
+          renderKernelSourcePlanPanel(provider);
         }}));
         document.getElementById('kernel-fill-command')?.addEventListener('click', () => {{
           try {{ fillKernelCommandFromArtifact(); }} catch (error) {{ result.textContent = String(error); }}
@@ -17561,7 +17658,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           }}
         }});
         document.getElementById('refresh-connector-registry')?.addEventListener('click', async () => {{
-          result.textContent = '正在扫描 res-repo...';
+          result.textContent = '正在扫描 source-repo...';
           try {{ await callAdmin('/v1/admin/connector-registry/refresh', 'POST', {{}}); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('load-connector-guide')?.addEventListener('click', async () => {{

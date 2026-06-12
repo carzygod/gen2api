@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .catalog import TARGET_MODEL_TABLE
+from .config import settings
 from .provider_templates import PROVIDER_TEMPLATES
 from .utils import dumps, loads, redact_sensitive
 
@@ -690,7 +691,7 @@ class ConnectorRegistryService:
     def refresh_from_local_repos(self, db: Session, res_repo_path: str | None = None) -> dict[str, Any]:
         root = self._resolve_res_repo(res_repo_path)
         if not root.exists():
-            return {"object": "connector_registry.refresh", "status": "failed", "error": "RES_REPO_NOT_FOUND", "path": str(root)}
+            return {"object": "connector_registry.refresh", "status": "failed", "error": "SOURCE_REPO_NOT_FOUND", "path": str(root)}
         scanned = 0
         created = 0
         updated = 0
@@ -906,7 +907,7 @@ class ConnectorRegistryService:
             },
             "maintenance_status": "local_clone_present",
             "license": license_id,
-            "notes": "Generated from local res-repo scan; verify README claims with connector conformance before production.",
+            "notes": "Generated from local source-repo scan; verify README claims with connector conformance before production.",
             "last_scanned_at": datetime.utcnow(),
         }
 
@@ -984,7 +985,7 @@ class ConnectorRegistryService:
         if res_repo_path:
             path = Path(res_repo_path)
             return path if path.is_absolute() else self.project_root / path
-        return self.project_root / "res-repo"
+        return settings.source_repo_dir
 
     def _owner_repo_from_dir(self, repo_dir: Path) -> tuple[str, str]:
         if "__" in repo_dir.name:
