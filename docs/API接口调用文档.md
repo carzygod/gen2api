@@ -950,6 +950,22 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/regi
   -d '{"base_url":"http://127.0.0.1:19081","version":"vX.Y.Z","sha256":"64位十六进制sha256"}'
 ```
 
+查看路由计划，确认 provider、模型映射、账号和 runtime 还缺哪一环：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/routing-plan" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+应用定型路由映射。该接口不会创建账号或假凭据，只会初始化 provider 并创建/更新模板中的 `ProviderModelMapping`：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/apply-routing" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"active","enable_mappings":true,"priority_offset":0,"update_provider_base_url":true}'
+```
+
 如果希望由平台受控启动 release 资产，使用 `start-runtime`。`command` 必须是参数数组，`artifact_path` 必须位于 `MEDIA2API_PROXY_KERNEL_DIR` 下，并且必须出现在 `command` 中：
 
 ```bash
@@ -1070,7 +1086,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |
