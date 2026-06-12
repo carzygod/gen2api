@@ -181,7 +181,7 @@ request checklists, runtime delivery plans, release probe matrices, release
 checksum candidate matrices, checksum-resolved release candidate installation,
 bulk release candidate install planning, hash-verified release archive extraction,
 live workspace dry-run preflight, self-recording runtime health checks,
-provider-level live acceptance dry-runs, loopback
+provider-level live acceptance dry-runs, operator handoff packages, loopback
 runtime contract matrices, production readiness matrices, loopback contract
 self-tests, go-live checklists, process status, and stdout/stderr log inspection. The `/admin` dashboard has a
 dedicated "反代内核" workspace for the same workflow, so operators do not need

@@ -1102,6 +1102,26 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/materials-re
 - `routing_materials`: provider/model mapping 是否已准备。
 - `validation_materials`: 真实样本验收所需的 admin/user key、样本模型和操作范围。
 
+查看操作者交付包，直接拿到账号导入、release 安装、runtime 启动、dry-run/live 验收的可复制模板。该接口只读，不会调用上游：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/operator-handoff" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/operator-handoff" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+关键字段：
+
+- `operator_questions`: 当前仍需人工填写的账号或 runtime 字段。
+- `submission_templates.account_onboarding_inline_secret`: 直接提交账号材料的 JSON 模板。
+- `submission_templates.account_onboarding_secret_ref`: 已托管 `secret://` 或 `agent://` 引用时的 JSON 模板。
+- `submission_templates.install_release`: release asset 与 SHA256 安装模板。
+- `submission_templates.start_runtime`: loopback runtime 启动模板。
+- `submission_templates.live_acceptance_dry_run`: 不消耗额度的真实验收预检模板。
+- `submission_templates.live_acceptance`: 消耗真实额度的 live 样本验收模板，建议 `max_samples=1` 起步。
+
 运行 loopback 合同自检，验证平台能把图片/视频请求真实转发到本机反代内核合同并完成资产入库。该接口只启动临时本机 runner，不调用真实上游、不消耗额度：
 
 ```bash
@@ -1296,7 +1316,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |

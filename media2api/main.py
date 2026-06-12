@@ -7356,6 +7356,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
+    ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
     ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
     ("POST", "/v1/admin/proxy-kernels/install-release-candidates"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
@@ -7613,6 +7615,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
+                ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
                 ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
                 ("POST", "/v1/admin/proxy-kernels/install-release-candidates"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
@@ -13410,6 +13414,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
         ("全量材料清单", "GET", "/v1/admin/proxy-kernels/materials-request"),
         ("OpenAI Web 材料清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/materials-request"),
+        ("全量交付包", "GET", "/v1/admin/proxy-kernels/operator-handoff"),
+        ("OpenAI Web 交付包", "GET", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff"),
         ("Loopback 合同自检", "POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
         ("OpenAI Web 运行时交付计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan"),
         ("OpenAI Web 运行合同", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-contract"),
@@ -14014,6 +14020,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
                   <button class="op" type="button" id="kernel-go-live-all">查看全部上线清单</button>
                   <button class="op" type="button" id="kernel-materials-all">查看全部材料清单</button>
+                  <button class="op" type="button" id="kernel-handoff-all">查看全部交付包</button>
                   <button class="op" type="button" id="kernel-loopback-contract">Loopback 合同自检</button>
                   <button class="op" type="button" data-jump-tab="oauth">去导入账号</button>
                 </div>
@@ -14045,6 +14052,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
                   <button class="op" type="button" id="kernel-materials">查看材料清单</button>
+                  <button class="op" type="button" id="kernel-handoff">查看交付包</button>
                 </div>
               </div>
               <div class="kernel-rail">
@@ -14496,6 +14504,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const runtimeContract = hint.runtime_contract || {{}};
           const productionReadiness = hint.production_readiness || {{}};
           const liveWorkspace = hint.live_workspace || {{}};
+          const handoff = hint.operator_handoff || {{}};
           const runtimeHealth = hint.runtime_health_check || {{}};
           const liveAcceptance = hint.live_acceptance || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
@@ -14516,6 +14525,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>运行合同</dt><dd>${{escapeHtml(runtimeContract.status || '未读取')}}${{runtimeContract.next_action ? ' · 下一步：' + escapeHtml(runtimeContract.next_action) : ''}}</dd>
               <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
               <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
+              <dt>交付包</dt><dd>${{escapeHtml(handoff.status || '未读取')}}${{handoff.operator_questions?.length ? ' · 待填 ' + escapeHtml(handoff.operator_questions.length) + ' 项' : ''}}</dd>
               <dt>Runtime 健康</dt><dd>${{runtimeHealth.health_check ? escapeHtml(runtimeHealth.health_check.status || (runtimeHealth.ok ? 'ok' : 'failed')) : '未检查'}}${{runtimeHealth.health_check?.message ? ' · ' + escapeHtml(runtimeHealth.health_check.message) : ''}}</dd>
               <dt>真实验收</dt><dd>${{escapeHtml(liveAcceptance.status || '未运行')}}${{liveAcceptance.next_step?.label ? ' · 下一步：' + escapeHtml(liveAcceptance.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
@@ -14939,6 +14949,31 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function loadAllKernelMaterialsRequests() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/materials-request');
           mergeKernelMaterialsRequests(payload);
+          return payload;
+        }}
+        function mergeKernelOperatorHandoffs(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              operator_handoff: item,
+              materials_request: item.evidence?.materials_request || kernelHint(item.provider_id).materials_request || {{}},
+              production_readiness: item.evidence?.production_readiness || kernelHint(item.provider_id).production_readiness || {{}},
+              runtime_delivery_plan: item.evidence?.runtime_delivery || kernelHint(item.provider_id).runtime_delivery_plan || {{}},
+              go_live: item.evidence?.go_live || kernelHint(item.provider_id).go_live || {{}},
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelOperatorHandoff(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/operator-handoff');
+          mergeKernelOperatorHandoffs(payload);
+          return payload;
+        }}
+        async function loadAllKernelOperatorHandoffs() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/operator-handoff');
+          mergeKernelOperatorHandoffs(payload);
           return payload;
         }}
         async function runKernelLoopbackContractTest() {{
@@ -15662,6 +15697,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-materials-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelMaterialsRequests(); }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-handoff-all')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelOperatorHandoffs();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-loopback-contract')?.addEventListener('click', async () => {{
           try {{ await runKernelLoopbackContractTest(); }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -15679,6 +15720,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-materials')?.addEventListener('click', async () => {{
           try {{ await loadKernelMaterialsRequest(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-handoff')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelOperatorHandoff();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-load-process')?.addEventListener('click', async () => {{
           const provider = selectedKernelProvider();
@@ -19628,6 +19675,17 @@ def admin_proxy_kernels_materials_request(provider_ids: str = "", ctx: AuthConte
         raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/operator-handoff")
+def admin_proxy_kernels_operator_handoff(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_operator_handoffs(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "handoff_policy": "only finalized proxy kernel provider ids may be packaged for operator handoff"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/runtime-delivery-plan")
 def admin_proxy_kernels_runtime_delivery_plan(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -19743,6 +19801,14 @@ def admin_proxy_kernel_go_live_checklist(provider_id: str, ctx: AuthContext = De
 def admin_proxy_kernel_materials_request(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_materials_request(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/operator-handoff")
+def admin_proxy_kernel_operator_handoff(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_operator_handoff(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -20612,6 +20678,223 @@ def build_proxy_kernel_materials_requests(db: Session, provider_ids: list[str] |
         "object": "media2api.proxy_kernel.materials_request.list",
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "summary": proxy_kernel_materials_request_summary(rows),
+        "data": rows,
+    }
+
+
+def proxy_kernel_operator_account_payload_template(provider_id: str, template: Any, materials: dict[str, Any], guide: dict[str, Any]) -> dict[str, Any]:
+    account_materials = materials.get("account_materials") or {}
+    auth_methods = list(account_materials.get("auth_methods") or guide.get("recommended_auth_methods") or guide.get("auth_methods") or [])
+    auth_method = str(auth_methods[0] if auth_methods else "agent_provider_credential")
+    resource_type = str(account_materials.get("resource_type") or guide.get("resource_type") or ("web_cookie_provider" if auth_method == "cookie_secret" else "agent_provider"))
+    credential_kind = "cookie" if auth_method == "cookie_secret" else "agent_provider"
+    provider_models = sorted({str(item.provider_model) for item in template.mappings if getattr(item, "provider_model", "")})
+    return {
+        "provider_id": provider_id,
+        "account_id": f"acct_{provider_id}_01",
+        "label": f"{template.name} primary account",
+        "resource_type": resource_type,
+        "auth_method": auth_method,
+        "credential_kind": credential_kind,
+        "credential_value": "<paste provider-specific JSON/env/profile material here>",
+        "credential_ref": "",
+        "resource_profile": account_materials.get("resource_profile_template") or platform_resource_profile_template(provider_id),
+        "supported_operations": list(template.operations),
+        "supported_provider_models": provider_models,
+        "quota_buckets": [],
+        "concurrency_limit": 1,
+        "status": "active",
+        "sync_capabilities": False,
+        "run_health_check": False,
+    }
+
+
+def proxy_kernel_operator_material_questions(materials: dict[str, Any]) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    account_materials = materials.get("account_materials") or {}
+    runtime_materials = materials.get("runtime_materials") or {}
+    if account_materials.get("status") != "ready":
+        for field in account_materials.get("required_fields") or []:
+            questions.append(
+                {
+                    "section": "account",
+                    "name": field.get("name"),
+                    "label": field.get("label") or field.get("name"),
+                    "required": True,
+                    "where_to_put": field.get("where_to_put") or "credential_value/resource_profile",
+                    "example": field.get("example") or field.get("placeholder") or "",
+                }
+            )
+        for group in account_materials.get("any_of_groups") or []:
+            questions.append(
+                {
+                    "section": "account",
+                    "name": group.get("group"),
+                    "label": " / ".join(str(field.get("label") or field.get("name")) for field in group.get("fields", [])),
+                    "required": bool(group.get("required")),
+                    "choose": group.get("choose") or "one_of",
+                    "where_to_put": "credential_value or credential_ref",
+                    "fields": group.get("fields", []),
+                }
+            )
+    if runtime_materials.get("status") != "ready":
+        for field in runtime_materials.get("release_required_fields") or []:
+            questions.append(
+                {
+                    "section": "runtime_release",
+                    "name": field.get("name"),
+                    "label": field.get("name"),
+                    "required": bool(field.get("required")),
+                    "where_to_put": "install_release",
+                }
+            )
+        for field in runtime_materials.get("start_runtime_required_fields") or []:
+            questions.append(
+                {
+                    "section": "runtime_start",
+                    "name": field.get("name"),
+                    "label": field.get("name"),
+                    "required": bool(field.get("required")),
+                    "where_to_put": "start_runtime",
+                    "default": field.get("default"),
+                    "example": field.get("example") or "",
+                }
+            )
+    return questions
+
+
+def build_proxy_kernel_operator_handoff(db: Session, provider_id: str) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise KeyError(provider_id)
+    materials = build_proxy_kernel_materials_request(db, provider_id)
+    delivery = build_proxy_kernel_runtime_delivery_plan(db, provider_id)
+    readiness = build_proxy_kernel_production_readiness(db, provider_id)
+    go_live = build_proxy_kernel_go_live_checklist(db, provider_id)
+    guide = connector_registry_service.provider_guide(db, provider_id)
+    account_payload = proxy_kernel_operator_account_payload_template(provider_id, template, materials, guide)
+    account_ref_payload = {**account_payload, "credential_value": "", "credential_ref": guide.get("credential_ref_example") or "secret://<credential-secret-id>"}
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    onboarding_command_payload = {key: value for key, value in account_payload.items() if value not in ("", None)}
+    onboarding_ref_command_payload = {key: value for key, value in account_ref_payload.items() if value not in ("", None)}
+    install_payload = (delivery.get("runtime") or {}).get("install_payload_template") or {}
+    start_payload = (delivery.get("runtime") or {}).get("start_payload_template") or {}
+    live_dry_payload = {"dry_run": True, "operations": list(template.operations), "run_runtime_health": True, "require_runtime_health": True, "run_samples": True, "max_samples": 1}
+    live_payload = {**live_dry_payload, "dry_run": False}
+    steps = [
+        {
+            "id": "apply_routing",
+            "label": "补齐 provider/model 路由",
+            "status": "done" if (materials.get("routing_materials") or {}).get("status") == "ready" else "action_required",
+            "operator_required": False,
+            "platform_can_run": True,
+            "command": (materials.get("commands") or {}).get("apply_routing"),
+            "payload_template": (materials.get("routing_materials") or {}).get("apply_payload"),
+        },
+        {
+            "id": "submit_account_material",
+            "label": "提交真实账号材料",
+            "status": "done" if (materials.get("account_materials") or {}).get("status") == "ready" else "action_required",
+            "operator_required": (materials.get("account_materials") or {}).get("status") != "ready",
+            "platform_can_run": False,
+            "command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-onboarding -d '{json.dumps(onboarding_command_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "credential_ref_command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-onboarding -d '{json.dumps(onboarding_ref_command_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "payload_template": account_payload,
+            "credential_ref_payload_template": account_ref_payload,
+        },
+        {
+            "id": "install_or_register_runtime",
+            "label": "安装或登记 loopback runtime",
+            "status": "done" if (materials.get("runtime_materials") or {}).get("status") == "ready" else "action_required",
+            "operator_required": (materials.get("runtime_materials") or {}).get("status") != "ready",
+            "platform_can_run": True,
+            "install_payload_template": install_payload,
+            "start_payload_template": start_payload,
+            "install_command": (delivery.get("commands") or {}).get("install_release"),
+            "start_command": (delivery.get("commands") or {}).get("start_runtime"),
+            "runtime_health_command": (delivery.get("commands") or {}).get("runtime_health_check"),
+        },
+        {
+            "id": "dry_run_live_acceptance",
+            "label": "Dry-run 真实样本验收",
+            "status": "ready" if readiness.get("ready_for_live_acceptance") else "waiting",
+            "operator_required": False,
+            "platform_can_run": True,
+            "payload_template": live_dry_payload,
+            "command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{json.dumps(live_dry_payload, ensure_ascii=False, separators=(',', ':'))}'",
+        },
+        {
+            "id": "live_acceptance",
+            "label": "Live 运行 1 条真实样本",
+            "status": "ready" if readiness.get("ready_for_live_acceptance") else "waiting",
+            "operator_required": False,
+            "platform_can_run": True,
+            "payload_template": live_payload,
+            "command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{json.dumps(live_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "quota_warning": "Live mode calls the real upstream runtime and may consume account quota.",
+        },
+    ]
+    return {
+        "object": "media2api.proxy_kernel.operator_handoff",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": materials.get("selection_id"),
+        "status": "ready_for_live_acceptance" if readiness.get("ready_for_live_acceptance") else "materials_required",
+        "production_ready": bool(readiness.get("production_ready")),
+        "next_step": readiness.get("next_step") or go_live.get("next_step") or delivery.get("next_step"),
+        "operator_questions": proxy_kernel_operator_material_questions(materials),
+        "steps": steps,
+        "submission_templates": {
+            "account_onboarding_inline_secret": account_payload,
+            "account_onboarding_secret_ref": account_ref_payload,
+            "install_release": install_payload,
+            "start_runtime": start_payload,
+            "live_acceptance_dry_run": live_dry_payload,
+            "live_acceptance": live_payload,
+        },
+        "evidence": {
+            "materials_request": materials,
+            "runtime_delivery": {
+                "status": delivery.get("status"),
+                "state": delivery.get("state"),
+                "next_step": delivery.get("next_step"),
+            },
+            "production_readiness": {
+                "status": readiness.get("status"),
+                "state": readiness.get("state"),
+                "next_step": readiness.get("next_step"),
+            },
+            "go_live": {
+                "status": go_live.get("status"),
+                "steps": go_live.get("steps"),
+            },
+        },
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "managed_runtime_listener": "loopback_only",
+            "no_fake_account_created": True,
+            "live_mode_consumes_real_quota": True,
+        },
+    }
+
+
+def build_proxy_kernel_operator_handoffs(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_operator_handoff(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.operator_handoff.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": {
+            "total": len(rows),
+            "ready_for_live_acceptance": sum(1 for row in rows if row.get("status") == "ready_for_live_acceptance"),
+            "materials_required": sum(1 for row in rows if row.get("status") == "materials_required"),
+            "operator_question_count": sum(len(row.get("operator_questions") or []) for row in rows),
+        },
         "data": rows,
     }
 
