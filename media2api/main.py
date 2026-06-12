@@ -13761,6 +13761,36 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .kernel-summary dd {{ margin:0; overflow-wrap:anywhere; }}
         .kernel-blockers {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }}
         .kernel-blockers span {{ border:1px solid rgba(224,177,90,.3); border-radius:999px; padding:5px 8px; color:#ffe1a3; background:rgba(224,177,90,.08); font-size:12px; font-weight:900; }}
+        .kernel-side {{ display:grid; gap:12px; }}
+        .activation-panel {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0d131b); box-shadow:var(--shadow-soft); }}
+        .activation-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }}
+        .activation-head h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
+        .activation-head p {{ margin:5px 0 0; color:var(--muted); line-height:1.5; font-size:12px; }}
+        .activation-badges {{ display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }}
+        .activation-badge {{ display:inline-flex; align-items:center; min-height:26px; padding:4px 8px; border-radius:999px; border:1px solid var(--line); background:#0b1118; color:var(--soft); font-size:12px; font-weight:900; }}
+        .activation-badge.done {{ color:var(--green); border-color:rgba(112,217,139,.34); background:rgba(112,217,139,.1); }}
+        .activation-badge.needs-input,.activation-badge.action-required {{ color:var(--amber); border-color:rgba(224,177,90,.36); background:rgba(224,177,90,.1); }}
+        .activation-badge.blocked {{ color:var(--red); border-color:rgba(255,123,114,.34); background:rgba(255,123,114,.1); }}
+        .activation-stage-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+        .activation-stage {{ border:1px solid var(--line); border-radius:var(--radius); padding:12px; background:linear-gradient(145deg,#121923,#0b1017); min-height:150px; }}
+        .activation-stage.next {{ border-color:var(--accent-line); box-shadow:inset 0 1px 0 rgba(255,255,255,.04), 0 10px 26px rgba(67,214,178,.08); }}
+        .activation-stage-title {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
+        .activation-stage-title b {{ display:block; font-family:var(--font-display); letter-spacing:0; }}
+        .activation-stage-title small {{ color:var(--muted); font-family:var(--font-data); font-size:11px; }}
+        .activation-meta {{ display:grid; grid-template-columns:82px minmax(0,1fr); gap:5px 8px; color:var(--soft); font-size:12px; line-height:1.45; }}
+        .activation-meta b {{ color:var(--muted); }}
+        .activation-meta span {{ overflow-wrap:anywhere; }}
+        .activation-json {{ margin-top:8px; max-height:120px; font-size:11px; }}
+        .activation-stage details {{ margin-top:8px; }}
+        .activation-stage summary {{ color:var(--accent-2); cursor:pointer; font-size:12px; font-weight:900; }}
+        .activation-samples {{ margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+        .activation-sample {{ border:1px solid var(--line); border-radius:var(--radius); padding:10px; background:#0b1017; }}
+        .activation-sample b {{ display:block; margin-bottom:6px; color:var(--soft); }}
+        .activation-empty {{ color:var(--muted); line-height:1.55; }}
+        .activation-provider-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
+        .activation-provider-card {{ border:1px solid var(--line); border-radius:var(--radius); padding:12px; background:#0b1017; min-height:112px; }}
+        .activation-provider-card b {{ display:block; margin-bottom:6px; overflow-wrap:anywhere; }}
+        .activation-provider-card p {{ margin:0; color:var(--muted); line-height:1.45; font-size:12px; }}
         .kernel-command-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
         .kernel-command-grid textarea {{ min-height:154px; }}
         .kernel-path-note {{ font-family:var(--font-data); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }}
@@ -13830,7 +13860,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -14107,6 +14137,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div><span class="eyebrow">缺运行时</span><b>{admin_escape(proxy_kernel_summary.get("needs_runtime", 0))}</b></div>
                 <div><span class="eyebrow">缺健康</span><b>{admin_escape(proxy_kernel_summary.get("needs_health", 0))}</b></div>
               </div>
+              <div class="activation-panel" id="kernel-activation-overview" style="margin-top:14px">
+                <div class="activation-empty">点击“上线执行向导”，这里会按 provider 汇总下一步；普通操作者先看这里，再去对应 Tab 补材料。</div>
+              </div>
               <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>操作</th><th>选型</th><th>Provider</th><th>仓库</th><th>能力</th><th>状态</th><th>Runtime</th><th>进程</th><th>阻塞项</th></tr></thead><tbody>{proxy_kernel_rows}</tbody></table></div>
             </div>
             <div class="panel subtab" id="kernels-start-pane">
@@ -14190,9 +14223,14 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                     <button class="primary" type="button" id="kernel-run-live-acceptance">运行真实验收</button>
                   </div>
                 </div>
-                <div class="kernel-summary" id="kernel-provider-summary">
-                  <h3>选择一个内核</h3>
-                  <p class="note">选择左侧 Provider 后，这里会显示仓库、媒体能力、账号边界、runtime 和阻塞项。</p>
+                <div class="kernel-side">
+                  <div class="kernel-summary" id="kernel-provider-summary">
+                    <h3>选择一个内核</h3>
+                    <p class="note">选择左侧 Provider 后，这里会显示仓库、媒体能力、账号边界、runtime 和阻塞项。</p>
+                  </div>
+                  <div class="activation-panel" id="kernel-activation-panel">
+                    <div class="activation-empty">点击“上线执行向导”，这里会展示该 provider 的 6 步上线顺序和下一步操作。</div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -14572,6 +14610,138 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         function kernelHint(providerId) {{
           return proxyKernelHints[providerId] || {{}};
         }}
+        function activationStatusClass(status) {{
+          const normalized = String(status || 'waiting').replace(/_/g, '-');
+          if (normalized === 'production-ready') return 'done';
+          if (normalized === 'ready-for-live-acceptance') return 'action-required';
+          if (['done', 'needs-input', 'action-required', 'waiting', 'blocked'].includes(normalized)) return normalized;
+          return 'waiting';
+        }}
+        function activationStatusLabel(status) {{
+          const labels = {{
+            done: '已完成',
+            needs_input: '需要材料',
+            action_required: '需要操作',
+            waiting: '等待前置',
+            blocked: '被阻塞',
+            production_ready: '生产可用',
+            ready_for_live_acceptance: '可跑真实验收',
+          }};
+          return labels[status] || labels[String(status || '').replace(/-/g, '_')] || String(status || '未读取');
+        }}
+        function activationStageText(stage) {{
+          if (!stage) return '等待读取';
+          if (stage.status === 'done') return '这一步已经完成。';
+          if (stage.status === 'needs_input') return '需要先提供真实账号、session 或 profile 材料。';
+          if (stage.status === 'action_required') return stage.platform_can_run ? '平台可执行这一步，请检查请求模板后操作。' : '需要操作者在对应页面补充信息。';
+          if (stage.status === 'blocked') return '前置条件不足，先完成前面的步骤。';
+          return '等待前置步骤完成。';
+        }}
+        function activationPayloadHtml(payload) {{
+          const value = payload && typeof payload === 'object' ? payload : {{}};
+          if (!Object.keys(value).length) return '';
+          return `<details><summary>查看请求模板</summary><pre class="activation-json">${{escapeHtml(JSON.stringify(value, null, 2))}}</pre></details>`;
+        }}
+        function activationStageHtml(stage, index, nextId) {{
+          const statusClass = activationStatusClass(stage.status);
+          const isNext = stage.id === nextId;
+          return `
+            <div class="activation-stage ${{statusClass}}${{isNext ? ' next' : ''}}">
+              <div class="activation-stage-title">
+                <div><small>${{String(index + 1).padStart(2, '0')}} / 06</small><b>${{escapeHtml(stage.label || stage.id)}}</b></div>
+                <span class="activation-badge ${{statusClass}}">${{escapeHtml(activationStatusLabel(stage.status))}}</span>
+              </div>
+              <p class="note">${{escapeHtml(activationStageText(stage))}}</p>
+              <div class="activation-meta">
+                <b>位置</b><span>${{escapeHtml(stage.ui_tab || '-')}}</span>
+                <b>接口</b><span>${{escapeHtml(stage.primary_api || '-')}}</span>
+                <b>人工</b><span>${{stage.operator_required ? '需要' : '不需要'}}</span>
+                <b>平台</b><span>${{stage.platform_can_run ? '可执行' : '只读/待材料'}}</span>
+              </div>
+              ${{activationPayloadHtml(stage.payload_template)}}
+            </div>
+          `;
+        }}
+        function activationSamplesHtml(workflow) {{
+          const samples = workflow.sample_requests || {{}};
+          const image = samples.image_generation || {{}};
+          const video = samples.video_generation || {{}};
+          if (!image.url && !video.url) return '';
+          return `
+            <div class="activation-samples">
+              <div class="activation-sample"><b>下游生图样例</b><pre class="activation-json">${{escapeHtml(JSON.stringify(image, null, 2))}}</pre></div>
+              <div class="activation-sample"><b>下游生视频样例</b><pre class="activation-json">${{escapeHtml(JSON.stringify(video, null, 2))}}</pre></div>
+            </div>
+          `;
+        }}
+        function renderActivationWorkflowPanel(providerId, workflow) {{
+          const panel = document.getElementById('kernel-activation-panel');
+          if (!panel) return;
+          if (!workflow || !workflow.object) {{
+            panel.innerHTML = '<div class="activation-empty">点击“上线执行向导”，这里会展示该 provider 的 6 步上线顺序和下一步操作。</div>';
+            return;
+          }}
+          const stages = Array.isArray(workflow.stages) ? workflow.stages : [];
+          const nextStage = workflow.next_stage || {{}};
+          const inputs = Array.isArray(workflow.required_user_inputs) ? workflow.required_user_inputs : [];
+          const inputText = inputs.length
+            ? inputs.slice(0, 4).map(item => item.label || item.name || item.id || item.section || '待填材料').join('、') + (inputs.length > 4 ? ` 等 ${{inputs.length}} 项` : '')
+            : '暂无待填字段';
+          panel.innerHTML = `
+            <div class="activation-head">
+              <div>
+                <h3>${{escapeHtml(providerId)}} 上线执行向导</h3>
+                <p>下一步：${{escapeHtml(nextStage.label || '等待读取')}}。先完成当前阶段，再进入真实样本验收和下游 API Key。</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge ${{activationStatusClass(workflow.status)}}">${{escapeHtml(activationStatusLabel(workflow.status))}}</span>
+                <span class="activation-badge ${{workflow.usable ? 'done' : 'action-required'}}">${{workflow.usable ? '可直接用' : '未生产可用'}}</span>
+              </div>
+            </div>
+            <div class="activation-meta" style="margin-bottom:12px">
+              <b>待填材料</b><span>${{escapeHtml(inputText)}}</span>
+              <b>约束</b><span>官方 SDK/API 禁止；release 二进制优先；source-repo 只在必要时兜底。</span>
+            </div>
+            <div class="activation-stage-grid">${{stages.map((stage, index) => activationStageHtml(stage, index, nextStage.id)).join('')}}</div>
+            ${{activationSamplesHtml(workflow)}}
+          `;
+        }}
+        function renderActivationWorkflowOverview(payload) {{
+          const panel = document.getElementById('kernel-activation-overview');
+          if (!panel) return;
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          if (!rows.length) {{
+            panel.innerHTML = '<div class="activation-empty">点击“上线执行向导”，这里会按 provider 汇总下一步；普通操作者先看这里，再去对应 Tab 补材料。</div>';
+            return;
+          }}
+          const summary = payload.summary || {{}};
+          const cards = rows.map(row => {{
+            const nextStage = row.next_stage || {{}};
+            return `
+              <div class="activation-provider-card">
+                <b>${{escapeHtml(row.provider_id || '-')}}</b>
+                <span class="activation-badge ${{activationStatusClass(row.status)}}">${{escapeHtml(activationStatusLabel(row.status))}}</span>
+                <p>${{escapeHtml('下一步：' + (nextStage.label || '等待读取'))}}</p>
+                <p>待填：${{escapeHtml(String((row.required_user_inputs || []).length))}} 项 · 验收：${{row.ready_for_live_acceptance ? '可运行' : '未就绪'}}</p>
+              </div>
+            `;
+          }}).join('');
+          panel.innerHTML = `
+            <div class="activation-head">
+              <div>
+                <h3>全量上线执行向导</h3>
+                <p>按 provider 展示当前最短路径。先处理“需要材料”和“需要操作”，再跑健康检查与真实样本。</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge">总数 ${{escapeHtml(summary.total || rows.length)}}</span>
+                <span class="activation-badge action-required">需操作 ${{escapeHtml(summary.action_required || 0)}}</span>
+                <span class="activation-badge needs-input">需材料 ${{escapeHtml(summary.needs_user_input || 0)}}</span>
+                <span class="activation-badge done">生产可用 ${{escapeHtml(summary.production_ready || 0)}}</span>
+              </div>
+            </div>
+            <div class="activation-provider-grid">${{cards}}</div>
+          `;
+        }}
         function renderKernelSummary(providerId) {{
           const provider = providerId || selectedKernelProvider();
           const hint = kernelHint(provider);
@@ -14649,6 +14819,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (releaseSha && !releaseSha.value && (installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256)) releaseSha.value = installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256;
           if (installPreview) installPreview.value = installed.path || '';
           if (base && hint.runtime_base_url) base.value = hint.runtime_base_url;
+          renderActivationWorkflowPanel(provider, activation);
         }}
         function kernelCommandParts() {{
           const raw = document.getElementById('kernel-command')?.value.trim() || '';
@@ -15170,6 +15341,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             }});
           }});
           renderKernelSummary(selectedKernelProvider());
+          if (Array.isArray(payload?.data)) renderActivationWorkflowOverview(payload);
+          else if (payload?.provider_id) renderActivationWorkflowPanel(payload.provider_id, payload);
         }}
         async function loadKernelActivationWorkflow(providerId = null) {{
           const provider = providerId || selectedKernelProvider();

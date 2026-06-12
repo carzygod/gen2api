@@ -968,6 +968,8 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/activation-w
 - `sample_requests`: 真实上线后，下游用户调用 `/v1/images/generations`、`/v1/videos/generations` 的样例请求。
 - `policy.release_binary_preferred=true`: 优先使用 release 二进制；只有 release 不足以运行或需要协议参考时才进入 `source-repo/`。
 
+管理后台的“上线执行向导”按钮会把同一响应渲染成阶段面板：全量视图按 provider 汇总下一步，单 provider 视图固定展示 6 个阶段；原始 JSON 仍保留在底部结果框用于复制请求模板。
+
 上线工作台预检把路由、release 候选、runtime、账号、健康检查和真实样本验收缺口聚合到同一个响应里。默认 dry-run，不创建账号、不下载二进制、不调用上游：
 
 ```bash
