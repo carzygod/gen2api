@@ -495,8 +495,19 @@ class ProxyKernelRuntimeService:
                 return self.record_install(provider_id, release, asset, target, expected, current_sha, reused=True, extraction=extraction)
             raise ValueError("TARGET_EXISTS_WITH_DIFFERENT_HASH")
         request = urllib.request.Request(asset["browser_download_url"], headers=self.github_headers())
-        with urllib.request.urlopen(request, timeout=120) as response:
-            target.write_bytes(response.read())
+        partial_target = target.with_name(target.name + ".part")
+        partial_target.unlink(missing_ok=True)
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response, partial_target.open("wb") as fh:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+            partial_target.replace(target)
+        except Exception:
+            partial_target.unlink(missing_ok=True)
+            raise
         actual = self.file_sha256(target)
         if actual != expected:
             target.unlink(missing_ok=True)
