@@ -1550,7 +1550,7 @@ class ProxyKernelRuntimeService:
         extracted_files: list[Path] = []
         if resolved_extract_dir.exists():
             extracted_files = [item for item in resolved_extract_dir.rglob("*") if item.is_file()]
-        else:
+        if not extracted_files:
             resolved_extract_dir.mkdir(parents=True, exist_ok=True)
             if kind == "zip":
                 extracted_files = self.extract_zip_release(archive_path, resolved_extract_dir, max_files=max_files, max_bytes=max_bytes)
