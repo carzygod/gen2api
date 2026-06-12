@@ -13827,7 +13827,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <div class="page-intro">
                 <div>
                   <h2>启动受控执行器</h2>
-                  <p class="note">release 资产必须先放在 `MEDIA2API_PROXY_KERNEL_DIR` 下，并提供 SHA256。启动命令按“每行一个参数”填写，平台不会通过 shell 执行。</p>
+                  <p class="note">优先从 GitHub release 下载并校验资产；安装成功后再启动 loopback runtime。启动命令按“每行一个参数”填写，平台不会通过 shell 执行。</p>
                 </div>
                 <div class="ops" style="min-width:260px">
                   <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
@@ -13840,6 +13840,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                     <div><label>Provider</label><select id="kernel-provider">{proxy_kernel_options}</select></div>
                     <div><label>Loopback Base URL</label><input id="kernel-base-url" value="http://127.0.0.1:19081" /></div>
                     <div><label>版本</label><input id="kernel-version" placeholder="vX.Y.Z / release tag" /></div>
+                  </div>
+                  <div class="formline" style="margin-top:10px">
+                    <div><label>Release tag</label><input id="kernel-release-tag" placeholder="留空使用最新 release" /></div>
+                    <div><label>Release asset 名称</label><input id="kernel-release-asset" placeholder="example-linux-amd64.tar.gz" /></div>
+                    <div><label>Release SHA256</label><input id="kernel-release-sha256" placeholder="64 位十六进制 sha256" /></div>
+                    <button class="primary" type="button" id="kernel-install-release">安装 Release</button>
+                  </div>
+                  <div class="formline" style="margin-top:10px">
+                    <div><label>覆盖已有资产</label><select id="kernel-release-force"><option value="false">不覆盖</option><option value="true">重新下载覆盖</option></select></div>
+                    <div><label>安装结果</label><input id="kernel-install-path-preview" readonly placeholder="安装后自动显示本地资产路径" /></div>
+                    <div></div>
                   </div>
                   <div class="formline" style="margin-top:10px">
                     <div><label>已校验资产路径</label><input id="kernel-artifact-path" placeholder="/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/runner" /></div>
@@ -14267,9 +14278,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           `;
           const artifact = document.getElementById('kernel-artifact-path');
           const sha = document.getElementById('kernel-expected-sha256');
+          const releaseTag = document.getElementById('kernel-release-tag');
+          const releaseAsset = document.getElementById('kernel-release-asset');
+          const releaseSha = document.getElementById('kernel-release-sha256');
+          const installPreview = document.getElementById('kernel-install-path-preview');
           const base = document.getElementById('kernel-base-url');
           if (artifact && !artifact.value && installed.path) artifact.value = installed.path;
           if (sha && !sha.value && (installed.expected_sha256 || installed.sha256)) sha.value = installed.expected_sha256 || installed.sha256;
+          if (releaseTag && !releaseTag.value && installed.tag_name) releaseTag.value = installed.tag_name;
+          if (releaseAsset && !releaseAsset.value && installed.asset_name) releaseAsset.value = installed.asset_name;
+          if (releaseSha && !releaseSha.value && (installed.expected_sha256 || installed.sha256)) releaseSha.value = installed.expected_sha256 || installed.sha256;
+          if (installPreview) installPreview.value = installed.path || '';
           if (base && hint.runtime_base_url) base.value = hint.runtime_base_url;
         }}
         function kernelCommandParts() {{
@@ -14349,6 +14368,42 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output');
           if (output) output.textContent = JSON.stringify(response, null, 2);
           renderKernelSummary(provider);
+        }}
+        async function probeKernelRelease(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/release-probe', 'POST', {{}});
+          const tag = document.getElementById('kernel-release-tag');
+          const asset = document.getElementById('kernel-release-asset');
+          if (tag && payload.release?.tag_name) tag.value = payload.release.tag_name;
+          const preferred = Array.isArray(payload.preferred_assets) && payload.preferred_assets.length ? payload.preferred_assets[0] : null;
+          const first = preferred || (Array.isArray(payload.assets) && payload.assets.length ? payload.assets[0] : null);
+          if (asset && first?.name) asset.value = first.name;
+          return payload;
+        }}
+        async function installKernelRelease() {{
+          const provider = selectedKernelProvider();
+          const body = {{
+            tag_name: document.getElementById('kernel-release-tag')?.value.trim() || null,
+            asset_name: document.getElementById('kernel-release-asset')?.value.trim() || null,
+            expected_sha256: document.getElementById('kernel-release-sha256')?.value.trim() || document.getElementById('kernel-expected-sha256')?.value.trim() || '',
+            force: document.getElementById('kernel-release-force')?.value === 'true',
+          }};
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/install-release', 'POST', body);
+          const install = payload.install || {{}};
+          const artifact = document.getElementById('kernel-artifact-path');
+          const sha = document.getElementById('kernel-expected-sha256');
+          const version = document.getElementById('kernel-version');
+          const preview = document.getElementById('kernel-install-path-preview');
+          if (artifact && install.path) artifact.value = install.path;
+          if (sha && (install.expected_sha256 || install.sha256)) sha.value = install.expected_sha256 || install.sha256;
+          if (version && install.tag_name) version.value = install.tag_name;
+          if (preview && install.path) preview.value = install.path;
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            installed: install,
+            installed_verified: Boolean(install.sha256 && install.expected_sha256 && install.sha256 === install.expected_sha256),
+          }});
+          renderKernelSummary(provider);
+          return payload;
         }}
         async function startKernelRuntime() {{
           const provider = selectedKernelProvider();
@@ -14836,8 +14891,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           try {{ fillKernelCommandFromArtifact(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-probe-release')?.addEventListener('click', async () => {{
-          const provider = selectedKernelProvider();
-          try {{ await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/release-probe', 'POST', {{}}); }} catch (error) {{ result.textContent = String(error); }}
+          try {{ await probeKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-install-release')?.addEventListener('click', async () => {{
+          try {{ await installKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-load-process')?.addEventListener('click', async () => {{
           const provider = selectedKernelProvider();
