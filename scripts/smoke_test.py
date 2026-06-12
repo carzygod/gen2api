@@ -470,12 +470,18 @@ def main() -> None:
             info.size = len(runner_bytes)
             info.mode = 0o755
             archive.addfile(info, BytesIO(runner_bytes))
+            cname_bytes = b"example.invalid\n"
+            cname = tarfile.TarInfo("wwwroot/CNAME")
+            cname.size = len(cname_bytes)
+            cname.mode = 0o644
+            archive.addfile(cname, BytesIO(cname_bytes))
         empty_extract_dir = extract_install_dir / f"{extract_service.safe_filename(archive_path.name)}.extracted-{hashlib.sha256(archive_path.read_bytes()).hexdigest()[:12]}"
         empty_extract_dir.mkdir(parents=True, exist_ok=True)
         extraction = extract_service.extract_release_asset("openai_web_session", archive_path, extract_install_dir)
         assert extraction["archive_extracted"] is True and extraction["archive_kind"] == "tar", extraction
         assert extraction["extracted_file_count"] >= 1, extraction
         assert extraction["executable_candidates"] and extraction["executable_candidates"][0]["relative_path"] == "bin/runner", extraction
+        assert all(item["relative_path"] != "wwwroot/CNAME" for item in extraction["executable_candidates"]), extraction
         assert extraction["executable_candidates"][0]["sha256"] == hashlib.sha256(runner_bytes).hexdigest(), extraction
         unsafe_archive_path = extract_install_dir / "unsafe.tar.gz"
         with tarfile.open(unsafe_archive_path, "w:gz") as archive:

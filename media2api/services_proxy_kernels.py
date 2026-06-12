@@ -1659,6 +1659,10 @@ class ProxyKernelRuntimeService:
                 continue
             if lower.endswith((".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".html", ".css")):
                 continue
+            if lower in {"cname", "dockerfile", "makefile", "procfile"}:
+                continue
+            if any(part.lower() in {"wwwroot", "static", "public", "assets"} for part in path.parts):
+                continue
             try:
                 mode = path.stat().st_mode
                 size = path.stat().st_size
