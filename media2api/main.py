@@ -1211,6 +1211,18 @@ class ProxyKernelReleaseInstallRequest(BaseModel):
     force: bool = False
 
 
+class ProxyKernelReleaseCandidateInstallRequest(BaseModel):
+    asset_name: str = ""
+    expected_sha256: str = ""
+    tag_name: str = ""
+    source_asset: str = ""
+    force: bool = False
+    dry_run: bool = True
+    resolve_release: bool = False
+    allow_non_preferred: bool = False
+    max_checksum_bytes: int = 1024 * 1024
+
+
 class ProxyKernelRuntimeRegisterRequest(BaseModel):
     base_url: str
     version: str = ""
@@ -7300,6 +7312,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/release-checksums"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release-candidate"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/apply-routing"),
@@ -7552,6 +7565,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/release-checksums"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release-candidate"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/apply-routing"),
@@ -13342,6 +13356,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 生产就绪", "GET", "/v1/admin/proxy-kernels/openai_web_session/production-readiness"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("OpenAI Web Hash 候选", "GET", "/v1/admin/proxy-kernels/openai_web_session/release-checksums"),
+        ("OpenAI Web 安装 Hash 候选", "POST", "/v1/admin/proxy-kernels/openai_web_session/install-release-candidate"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
         ("应用 OpenAI Web 路由", "POST", "/v1/admin/proxy-kernels/openai_web_session/apply-routing"),
@@ -13416,6 +13431,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/release-checksums",
+        "/v1/admin/proxy-kernels/openai_web_session/install-release-candidate",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
         "/v1/admin/proxy-kernels/openai_web_session/process",
@@ -13459,6 +13475,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/release-checksums",
+        "/v1/admin/proxy-kernels/openai_web_session/install-release-candidate",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13952,6 +13969,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:260px">
                   <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
                   <button class="op" type="button" id="kernel-release-checksums">Hash 候选</button>
+                  <button class="op" type="button" id="kernel-install-release-candidate">安装 Hash 候选</button>
                   <button class="op" type="button" id="kernel-runtime-delivery">运行时交付计划</button>
                   <button class="op" type="button" id="kernel-runtime-contract">运行合同</button>
                   <button class="op" type="button" id="kernel-production-readiness">生产就绪</button>
@@ -14824,6 +14842,42 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           renderKernelSummary(provider);
           return payload;
         }}
+        async function installKernelReleaseCandidate() {{
+          const provider = selectedKernelProvider();
+          if (!window.confirm('将从已解析的 Hash 候选中选择 release 资产，下载并校验 SHA256。确认继续？')) return null;
+          const body = {{
+            tag_name: document.getElementById('kernel-release-tag')?.value.trim() || '',
+            asset_name: document.getElementById('kernel-release-asset')?.value.trim() || '',
+            expected_sha256: document.getElementById('kernel-release-sha256')?.value.trim() || document.getElementById('kernel-expected-sha256')?.value.trim() || '',
+            force: document.getElementById('kernel-release-force')?.value === 'true',
+            dry_run: false,
+            resolve_release: true,
+            allow_non_preferred: false,
+          }};
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/install-release-candidate', 'POST', body);
+          const install = payload.install || {{}};
+          const artifact = document.getElementById('kernel-artifact-path');
+          const sha = document.getElementById('kernel-expected-sha256');
+          const releaseSha = document.getElementById('kernel-release-sha256');
+          const releaseTag = document.getElementById('kernel-release-tag');
+          const releaseAsset = document.getElementById('kernel-release-asset');
+          const version = document.getElementById('kernel-version');
+          const preview = document.getElementById('kernel-install-path-preview');
+          if (artifact && install.path) artifact.value = install.path;
+          if (sha && (install.expected_sha256 || install.sha256)) sha.value = install.expected_sha256 || install.sha256;
+          if (releaseSha && (install.expected_sha256 || install.sha256)) releaseSha.value = install.expected_sha256 || install.sha256;
+          if (releaseTag && install.tag_name) releaseTag.value = install.tag_name;
+          if (releaseAsset && install.asset_name) releaseAsset.value = install.asset_name;
+          if (version && install.tag_name) version.value = install.tag_name;
+          if (preview && install.path) preview.value = install.path;
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            installed: install,
+            installed_verified: Boolean(install.sha256 && install.expected_sha256 && install.sha256 === install.expected_sha256),
+            release_checksums: payload.release_checksums || kernelHint(provider).release_checksums || {{}},
+          }});
+          renderKernelSummary(provider);
+          return payload;
+        }}
         async function startKernelRuntime() {{
           const provider = selectedKernelProvider();
           const body = {{
@@ -15332,6 +15386,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-install-release')?.addEventListener('click', async () => {{
           try {{ await installKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-install-release-candidate')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await installKernelReleaseCandidate();
+            if (payload) result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-routing-plan-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelRoutingPlan(); }} catch (error) {{ result.textContent = String(error); }}
@@ -19469,6 +19529,21 @@ def admin_proxy_kernel_release_checksums(
         raise HTTPException(status_code=400, detail={"error": str(exc), "release_checksum_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.post("/v1/admin/proxy-kernels/{provider_id}/install-release-candidate")
+def admin_proxy_kernel_install_release_candidate(
+    provider_id: str,
+    req: ProxyKernelReleaseCandidateInstallRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_release_candidate_install(db, provider_id, req)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "hash_policy": "only checksum-resolved release candidates may be installed without a manually supplied SHA256"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}")
 def admin_proxy_kernel(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -21084,6 +21159,183 @@ def build_proxy_kernel_release_checksum_matrix(
             "max_checksum_bytes": max_bytes,
             "source_repo_root": str(settings.source_repo_dir),
             "proxy_kernel_root": str(settings.proxy_kernel_dir),
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+        },
+    }
+
+
+def proxy_kernel_select_release_install_candidate(
+    candidates: list[dict[str, Any]],
+    asset_name: str = "",
+    expected_sha256: str = "",
+    tag_name: str = "",
+    source_asset: str = "",
+    allow_non_preferred: bool = False,
+) -> dict[str, Any] | None:
+    selected = [item for item in candidates if isinstance(item, dict)]
+    if asset_name:
+        selected = [item for item in selected if str(item.get("asset_name") or "") == asset_name]
+    if expected_sha256:
+        selected = [item for item in selected if str(item.get("expected_sha256") or "").lower() == expected_sha256.lower()]
+    if tag_name:
+        selected = [item for item in selected if str(item.get("tag_name") or "") == tag_name]
+    if source_asset:
+        selected = [item for item in selected if str(item.get("source_asset") or "") == source_asset]
+    preferred = [item for item in selected if item.get("preferred")]
+    if preferred:
+        selected = preferred
+    elif selected and not allow_non_preferred:
+        return None
+    selected.sort(key=lambda item: (1 if item.get("preferred") else 0, int(item.get("candidate_score") or 0)), reverse=True)
+    return selected[0] if selected else None
+
+
+def build_proxy_kernel_release_candidate_install(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelReleaseCandidateInstallRequest,
+) -> dict[str, Any]:
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    max_bytes = max(1024, min(int(req.max_checksum_bytes or 1024 * 1024), 5 * 1024 * 1024))
+    should_resolve = bool(req.resolve_release or not req.dry_run)
+    if not should_resolve:
+        return {
+            "object": "media2api.proxy_kernel.release_candidate_install",
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "provider_id": provider_id,
+            "selection_id": kernel.get("selection_id"),
+            "dry_run": True,
+            "resolved_release": False,
+            "status": "planned",
+            "message": "dry_run=true and resolve_release=false; no GitHub request, binary download, or install was performed.",
+            "candidate": {},
+            "install_payload_template": {
+                "asset_name": req.asset_name or "release-asset-linux-amd64.tar.gz",
+                "tag_name": req.tag_name or "vX.Y.Z",
+                "expected_sha256": req.expected_sha256 or "64-hex-sha256",
+                "force": bool(req.force),
+            },
+            "next_step": {
+                "id": "resolve_release_checksums",
+                "label": "读取 Hash 候选",
+                "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-checksums",
+            },
+            "commands": {
+                "release_checksums": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-checksums",
+            },
+            "policy": {
+                "read_only": True,
+                "release_binary_first": True,
+                "hash_required": True,
+                "downloaded_binaries": False,
+                "official_sdk_api": "forbidden",
+                "third_party_public_service": "forbidden",
+                "managed_runtime_listener": "loopback_only",
+            },
+        }
+    checksums = build_proxy_kernel_release_checksums(db, provider_id, dry_run=False, max_checksum_bytes=max_bytes)
+    candidates = [item for item in checksums.get("resolved_sha256_candidates") or [] if isinstance(item, dict)]
+    candidate = proxy_kernel_select_release_install_candidate(
+        candidates,
+        asset_name=req.asset_name.strip(),
+        expected_sha256=req.expected_sha256.strip().lower(),
+        tag_name=req.tag_name.strip(),
+        source_asset=req.source_asset.strip(),
+        allow_non_preferred=bool(req.allow_non_preferred),
+    )
+    if not candidate:
+        status = "candidate_not_found"
+        if candidates and not req.allow_non_preferred and not any(item.get("preferred") for item in candidates):
+            status = "non_preferred_candidate_requires_override"
+        response = {
+            "object": "media2api.proxy_kernel.release_candidate_install",
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "provider_id": provider_id,
+            "selection_id": kernel.get("selection_id"),
+            "dry_run": bool(req.dry_run),
+            "resolved_release": True,
+            "status": status,
+            "message": "No checksum-resolved preferred release asset matched the requested filters.",
+            "release_checksums": checksums,
+            "candidate": {},
+            "install_payload_template": {},
+            "policy": {
+                "read_only": bool(req.dry_run),
+                "release_binary_first": True,
+                "hash_required": True,
+                "downloaded_binaries": False,
+                "official_sdk_api": "forbidden",
+                "third_party_public_service": "forbidden",
+                "managed_runtime_listener": "loopback_only",
+            },
+        }
+        if req.dry_run:
+            return response
+        raise ValueError(status.upper())
+    install_payload = {
+        "tag_name": candidate.get("tag_name") or None,
+        "asset_name": candidate.get("asset_name"),
+        "expected_sha256": candidate.get("expected_sha256"),
+        "force": bool(req.force),
+    }
+    install_command = f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{json.dumps(install_payload, ensure_ascii=False, separators=(',', ':'))}'"
+    if req.dry_run:
+        return {
+            "object": "media2api.proxy_kernel.release_candidate_install",
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "provider_id": provider_id,
+            "selection_id": kernel.get("selection_id"),
+            "dry_run": True,
+            "resolved_release": True,
+            "status": "installable",
+            "message": "A checksum-resolved release asset was selected. Set dry_run=false to download and verify it.",
+            "release_checksums": checksums,
+            "candidate": candidate,
+            "install_payload_template": install_payload,
+            "commands": {
+                "install_release": install_command,
+                "release_checksums": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-checksums",
+            },
+            "policy": {
+                "read_only": True,
+                "release_binary_first": True,
+                "hash_required": True,
+                "downloaded_binaries": False,
+                "official_sdk_api": "forbidden",
+                "third_party_public_service": "forbidden",
+                "managed_runtime_listener": "loopback_only",
+            },
+        }
+    install_result = proxy_kernel_service.install_release(
+        provider_id=provider_id,
+        expected_sha256=str(candidate.get("expected_sha256") or ""),
+        asset_name=str(candidate.get("asset_name") or ""),
+        tag_name=str(candidate.get("tag_name") or "") or None,
+        force=bool(req.force),
+    )
+    return {
+        "object": "media2api.proxy_kernel.release_candidate_install",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "dry_run": False,
+        "resolved_release": True,
+        "status": "installed",
+        "message": "Checksum-resolved release asset was downloaded, SHA256-verified, and recorded.",
+        "release_checksums": checksums,
+        "candidate": candidate,
+        "install_payload_template": install_payload,
+        "install": install_result.get("install") if isinstance(install_result, dict) else {},
+        "install_result": install_result,
+        "policy": {
+            "read_only": False,
+            "release_binary_first": True,
+            "hash_required": True,
+            "downloaded_binaries": True,
             "official_sdk_api": "forbidden",
             "third_party_public_service": "forbidden",
             "managed_runtime_listener": "loopback_only",

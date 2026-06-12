@@ -178,7 +178,7 @@ The admin API exposes the runtime lifecycle through
 loopback runtime registration, controlled subprocess start/stop, routing-plan
 inspection, bulk no-fake-account provider/model mapping application, material
 request checklists, runtime delivery plans, release probe matrices, release
-checksum candidate matrices, loopback
+checksum candidate matrices, checksum-resolved release candidate installation, loopback
 runtime contract matrices, production readiness matrices, loopback contract
 self-tests, go-live checklists, process status, and stdout/stderr log inspection. The `/admin` dashboard has a
 dedicated "反代内核" workspace for the same workflow, so operators do not need
