@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 from media2api import models as db_models
 from media2api.config import settings
 from media2api.database import SessionLocal
-from media2api.main import app, proxy_kernel_best_release_candidate
+from media2api.main import app, build_proxy_kernel_release_checksums, proxy_kernel_asset_digest_sha256, proxy_kernel_best_release_candidate, proxy_kernel_service
 from media2api.services_core import AccountScheduler, ModelRouter
 from media2api.services_proxy_kernels import ProxyKernelRuntimeService
 from media2api.utils import dumps
@@ -76,6 +76,10 @@ class StaticAssetHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    digest_value = "a" * 64
+    assert proxy_kernel_asset_digest_sha256({"digest": f"sha256:{digest_value}"}) == digest_value
+    assert proxy_kernel_asset_digest_sha256({"digest": digest_value.upper()}) == digest_value
+    assert proxy_kernel_asset_digest_sha256({"digest": "sha512:" + digest_value}) == ""
     best_gemini_candidate = proxy_kernel_best_release_candidate(
         [
             {"asset_name": "CLIProxyAPI_7.1.68_darwin_aarch64.tar.gz", "candidate_score": 1, "preferred": True},
@@ -118,6 +122,35 @@ def main() -> None:
     try:
       with TestClient(app) as client:
         assert_ok(client.get("/health"))
+        original_probe_release = proxy_kernel_service.probe_release
+        digest_asset = {
+            "name": "codex-register-v2-linux-x64.zip",
+            "size": 1024,
+            "browser_download_url": "https://example.invalid/codex-register-v2-linux-x64.zip",
+            "candidate_score": 8,
+            "candidate_reason": "possible linux/amd64 release asset",
+            "digest": f"sha256:{digest_value}",
+        }
+        try:
+            proxy_kernel_service.probe_release = lambda provider_id: {
+                "object": "media2api.proxy_kernel.release_probe",
+                "provider_id": provider_id,
+                "status": "ok",
+                "release": {"tag_name": "v.test"},
+                "assets": [digest_asset],
+                "preferred_assets": [digest_asset],
+            }
+            db = SessionLocal()
+            try:
+                digest_checksums = build_proxy_kernel_release_checksums(db, "openai_codex", dry_run=False)
+            finally:
+                db.close()
+            assert digest_checksums["github_asset_digest_count"] == 1, digest_checksums
+            assert digest_checksums["install_ready_candidate_count"] == 1, digest_checksums
+            assert digest_checksums["resolved_sha256_candidates"][0]["expected_sha256"] == digest_value, digest_checksums
+            assert digest_checksums["resolved_sha256_candidates"][0]["source_type"] == "github_release_asset_digest", digest_checksums
+        finally:
+            proxy_kernel_service.probe_release = original_probe_release
         assert_ok(client.patch("/v1/admin/users/usr_admin", headers=headers, json={"wallet_balance": 1000000, "status": "active"}))
         models = assert_ok(client.get("/v1/models", headers=headers))
         assert models["data"]

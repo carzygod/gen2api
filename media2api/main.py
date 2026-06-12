@@ -24634,6 +24634,16 @@ def proxy_kernel_normalized_asset_name(value: str) -> str:
     return name.lower()
 
 
+def proxy_kernel_asset_digest_sha256(asset: dict[str, Any]) -> str:
+    raw = str(asset.get("digest") or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("sha256:"):
+        raw = raw.split(":", 1)[1].strip()
+    match = PROXY_KERNEL_SHA256_RE.fullmatch(raw)
+    return match.group(0).lower() if match else ""
+
+
 def proxy_kernel_is_signature_asset(asset: dict[str, Any]) -> bool:
     lower = proxy_kernel_asset_name(asset).lower()
     return lower.endswith(PROXY_KERNEL_SIGNATURE_SUFFIXES) or "signature" in lower
@@ -24945,6 +24955,29 @@ def build_proxy_kernel_release_checksums(
                 if not normalized:
                     continue
                 checksums_by_asset.setdefault(normalized, []).append({**entry, "source_asset": proxy_kernel_asset_name(asset)})
+        for asset in runtime_assets:
+            asset_name = proxy_kernel_asset_name(asset)
+            sha = proxy_kernel_asset_digest_sha256(asset)
+            if not asset_name or not sha:
+                continue
+            normalized = proxy_kernel_normalized_asset_name(asset_name)
+            entry = {
+                "normalized_asset_name": normalized,
+                "expected_sha256": sha,
+                "source_asset": asset_name,
+                "source_type": "github_release_asset_digest",
+                "source_line": "GitHub Release asset digest",
+                "source_digest": str(asset.get("digest") or ""),
+            }
+            checksums_by_asset.setdefault(normalized, []).append(entry)
+            checksum_sources.append({
+                "asset_name": asset_name,
+                "status": "parsed",
+                "source_type": "github_release_asset_digest",
+                "size": asset.get("size"),
+                "parsed_count": 1,
+                "entries": [entry],
+            })
     preferred_names = {proxy_kernel_asset_name(item) for item in preferred_assets}
     resolved_candidates = []
     seen_candidate_keys: set[tuple[str, str]] = set()
@@ -24973,6 +25006,8 @@ def build_proxy_kernel_release_checksums(
                 "asset_name": asset_name,
                 "expected_sha256": sha,
                 "source_asset": entry.get("source_asset"),
+                "source_type": entry.get("source_type") or "checksum_asset",
+                "source_digest": entry.get("source_digest") or "",
                 "source_line": entry.get("source_line"),
                 "candidate_score": int(asset.get("candidate_score") or 0),
                 "candidate_reason": asset.get("candidate_reason") or "",
@@ -25021,6 +25056,7 @@ def build_proxy_kernel_release_checksums(
         "runtime_asset_count": len(runtime_assets),
         "preferred_asset_count": len(preferred_assets),
         "checksum_asset_count": len(checksum_assets),
+        "github_asset_digest_count": sum(1 for item in runtime_assets if proxy_kernel_asset_digest_sha256(item)),
         "checksum_sources": checksum_sources,
         "resolved_sha256_candidates": resolved_candidates,
         "install_ready_candidate_count": len(resolved_candidates),
@@ -25070,6 +25106,7 @@ def proxy_kernel_release_checksum_matrix_summary(rows: list[dict[str, Any]]) -> 
         "no_release": status_counts.get("no_release", 0),
         "failed": status_counts.get("failed", 0),
         "with_checksum_assets": sum(1 for row in rows if int(row.get("checksum_asset_count") or 0) > 0),
+        "with_github_asset_digests": sum(1 for row in rows if int(row.get("github_asset_digest_count") or 0) > 0),
         "install_ready_candidates": sum(int(row.get("install_ready_candidate_count") or 0) for row in rows),
         "rows_with_install_ready_candidates": sum(1 for row in rows if int(row.get("install_ready_candidate_count") or 0) > 0),
         "manual_sha256_required": sum(1 for row in rows if (row.get("next_step") or {}).get("id") == "manual_sha256_required"),
@@ -25499,6 +25536,7 @@ def build_proxy_kernel_runtime_acquisition_plan(
             "runtime_asset_count": int(release_state.get("runtime_asset_count") or 0),
             "preferred_asset_count": int(release_state.get("preferred_asset_count") or 0),
             "checksum_asset_count": int(release_state.get("checksum_asset_count") or 0),
+            "github_asset_digest_count": int(release_state.get("github_asset_digest_count") or 0),
             "install_ready_candidate_count": int(release_state.get("install_ready_candidate_count") or 0),
             "preferred_candidate": preferred_candidate,
             "unresolved_preferred_assets": unresolved_preferred,

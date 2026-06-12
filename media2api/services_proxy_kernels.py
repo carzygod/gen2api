@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -410,7 +411,7 @@ class ProxyKernelRuntimeService:
 
     def probe_release(self, provider_id: str) -> dict[str, Any]:
         spec = self.require_spec(provider_id)
-        releases = self.github_json(f"https://api.github.com/repos/{spec.repo}/releases")
+        releases = self.github_json(f"https://api.github.com/repos/{spec.repo}/releases?per_page=1")
         if isinstance(releases, dict) and releases.get("error"):
             return {"object": "media2api.proxy_kernel.release_probe", "provider_id": provider_id, "status": "failed", **releases}
         if not isinstance(releases, list):
@@ -1538,13 +1539,23 @@ class ProxyKernelRuntimeService:
 
     def github_json(self, url: str) -> Any:
         request = urllib.request.Request(url, headers=self.github_headers())
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            return {"error": "GITHUB_HTTP_ERROR", "status_code": exc.code, "message": exc.read().decode("utf-8", errors="replace")[:500]}
-        except Exception as exc:
-            return {"error": "GITHUB_REQUEST_FAILED", "message": str(exc)}
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                return {"error": "GITHUB_HTTP_ERROR", "status_code": exc.code, "message": exc.read().decode("utf-8", errors="replace")[:500]}
+            except (http.client.IncompleteRead, TimeoutError, urllib.error.URLError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+            except Exception as exc:
+                return {"error": "GITHUB_REQUEST_FAILED", "message": str(exc)}
+        if last_error:
+            return {"error": "GITHUB_REQUEST_FAILED", "message": str(last_error)}
+        return {"error": "GITHUB_REQUEST_FAILED", "message": "GitHub request failed without a response."}
 
     def github_headers(self) -> dict[str, str]:
         return {"Accept": "application/vnd.github+json", "User-Agent": "media2api-proxy-kernel-runtime"}
@@ -1557,6 +1568,7 @@ class ProxyKernelRuntimeService:
             "size": asset.get("size"),
             "content_type": asset.get("content_type"),
             "browser_download_url": asset.get("browser_download_url"),
+            "digest": asset.get("digest") or "",
             "created_at": asset.get("created_at"),
             "updated_at": asset.get("updated_at"),
             "candidate_score": score,

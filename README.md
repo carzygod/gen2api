@@ -206,7 +206,8 @@ answers the operator question directly: keep using the preferred Release
 binary path, install a checksum-resolved asset, manually supply SHA256, or only
 then fall back to `source-repo/` for protocol inspection/build/rewrite. The
 endpoint is read-only: even with `resolve_release=true` it only reads Release
-metadata and small checksum files, never downloads binaries or clones source.
+metadata, GitHub Release asset `digest` values, and small checksum files; it
+never downloads binaries or clones source.
 The production gap report is the stricter "can users actually use this now?"
 view: real account material, loopback runtime, health evidence, live sample
 acceptance, and a downstream user API key must all be present before a provider
