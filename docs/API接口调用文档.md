@@ -972,6 +972,9 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/runtime-acqu
 上线执行向导是面向操作者的主入口，会把路由、真实账号、release/source runtime、健康检查、真实样本验收和下游 API Key 串成同一条可执行顺序。它只读，不会下载二进制、不创建账号、不调用上游：
 
 ```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/production-activation-dashboard" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
 curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/activation-workflow" \
   -H "Authorization: Bearer $MEDIA2API_API_KEY"
 
@@ -987,7 +990,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/activation-w
 - `sample_requests`: 真实上线后，下游用户调用 `/v1/images/generations`、`/v1/videos/generations` 的样例请求。
 - `policy.release_binary_preferred=true`: 优先使用 release 二进制；只有 release 不足以运行或需要协议参考时才进入 `source-repo/`。
 
-管理后台的“上线执行向导”按钮会把同一响应渲染成阶段面板：全量视图按 provider 汇总下一步，单 provider 视图固定展示 6 个阶段。阶段按钮会跳到账号导入、启动执行器、用户 API Key 页面，或执行补路由、健康检查、验收 dry-run 等平台可安全处理的动作；原始 JSON 仍保留在底部结果框用于复制请求模板。
+管理后台的“生产激活总控”按钮是普通操作者首入口，会按 provider 汇总当前最该做的一步：导入真实账号、准备/启动 loopback runtime、运行健康检查、运行真实样本验收，或已经可直接调用。“上线执行向导”按钮则展示阶段面板：全量视图按 provider 汇总下一步，单 provider 视图固定展示 6 个阶段。阶段按钮会跳到账号导入、启动执行器、用户 API Key 页面，或执行补路由、健康检查、验收 dry-run 等平台可安全处理的动作；原始 JSON 仍保留在底部结果框用于复制请求模板。
 
 生产启用缺口报告使用最终可用口径：除 provider 本身可用外，还要求真实账号、loopback runtime、健康检查、live 样本验收和下游 API Key 阶段全部完成：
 
@@ -1621,6 +1624,7 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/connector-registry/refresh" \
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
 | Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/activation-workflow`、`/v1/admin/proxy-kernels/production-gap-report`、`/v1/admin/proxy-kernels/go-live-package`、`/v1/admin/proxy-kernels/downstream-call-package`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/source-repo/sync`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/account-materials`、`/v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync`、`/v1/admin/proxy-kernels/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/activation-workflow`、`/v1/admin/proxy-kernels/{provider_id}/production-gap-report`、`/v1/admin/proxy-kernels/{provider_id}/go-live-package`、`/v1/admin/proxy-kernels/{provider_id}/downstream-call-package`、`/v1/admin/proxy-kernels/{provider_id}/activation-run`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Proxy Kernel Source Runtime Matrix | `/v1/admin/proxy-kernels/source-runtime-plan` |
+| Proxy Kernel Production Activation Dashboard | `/v1/admin/proxy-kernels/production-activation-dashboard` |
 | Proxy Kernel Runtime Preflight | `/v1/admin/proxy-kernels/{provider_id}/runtime-preflight` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |

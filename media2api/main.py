@@ -7489,6 +7489,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
     ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
+    ("GET", "/v1/admin/proxy-kernels/production-activation-dashboard"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
     ("GET", "/v1/admin/proxy-kernels/go-live-package"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-package"),
@@ -7770,6 +7771,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
                 ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
+                ("GET", "/v1/admin/proxy-kernels/production-activation-dashboard"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-package"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-package"),
@@ -13607,6 +13609,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量路由计划", "GET", "/v1/admin/proxy-kernels/routing-plan"),
         ("全量运行时交付计划", "GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
         ("反代内核上线工作台", "POST", "/v1/admin/proxy-kernels/live-workspace"),
+        ("生产激活总控", "GET", "/v1/admin/proxy-kernels/production-activation-dashboard"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
         ("全量 Runtime 获取决策", "GET", "/v1/admin/proxy-kernels/runtime-acquisition-plan"),
@@ -13696,6 +13699,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
+        "/v1/admin/proxy-kernels/production-activation-dashboard",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
         "/v1/admin/proxy-kernels/runtime-acquisition-plan",
@@ -13744,6 +13748,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
+        "/v1/admin/proxy-kernels/production-activation-dashboard",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
         "/v1/admin/proxy-kernels/runtime-acquisition-plan",
@@ -14327,6 +14332,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:360px">
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="primary" type="button" id="kernel-activation-workflow-all">上线执行向导</button>
+                  <button class="primary" type="button" id="kernel-production-activation-dashboard">生产激活总控</button>
                   <button class="op" type="button" id="kernel-go-live-package-all-status">全量上线包</button>
                   <button class="op" type="button" id="kernel-production-gap-report-all">生产缺口报告</button>
                   <button class="op" type="button" id="kernel-downstream-package-all">下游调用包</button>
@@ -15187,6 +15193,93 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             </div>
             <div class="activation-provider-grid">${{cards}}</div>
           `;
+        }}
+        function activationDashboardActionHtml(row) {{
+          const action = row.next_action || {{}};
+          const provider = escapeHtml(row.provider_id || '');
+          const label = escapeHtml(action.label || '查看下一步');
+          const buttonAction = escapeHtml(action.button_action || 'inspect-provider');
+          return `<button class="primary" type="button" data-activation-action="${{buttonAction}}" data-provider-id="${{provider}}">${{label}}</button>`;
+        }}
+        function renderProductionActivationDashboard(payload) {{
+          const panel = document.getElementById('kernel-activation-overview');
+          if (!panel) return;
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          const summary = payload?.summary || {{}};
+          if (!rows.length) {{
+            panel.innerHTML = '<div class="activation-empty">暂无生产激活数据。先确认定型 provider 已初始化。</div>';
+            return;
+          }}
+          rows.forEach(row => {{
+            const item = row.workspace_item || {{}};
+            const evidence = item.evidence || {{}};
+            if (!row.provider_id) return;
+            proxyKernelHints[row.provider_id] = Object.assign(kernelHint(row.provider_id), {{
+              live_workspace: item,
+              runtime_delivery_plan: evidence.runtime_delivery || kernelHint(row.provider_id).runtime_delivery_plan || {{}},
+              production_readiness: evidence.production_readiness || kernelHint(row.provider_id).production_readiness || {{}},
+              materials_request: evidence.materials_request || kernelHint(row.provider_id).materials_request || {{}},
+              go_live: evidence.go_live || kernelHint(row.provider_id).go_live || {{}},
+            }});
+          }});
+          const topRows = [...rows].sort((a, b) => {{
+            const order = {{ account: 0, runtime: 1, route: 2, health: 3, live_acceptance: 4, user_api_key: 5, ready: 9 }};
+            const ai = order[a.next_action?.id || 'runtime'] ?? 6;
+            const bi = order[b.next_action?.id || 'runtime'] ?? 6;
+            return ai - bi || String(a.provider_id || '').localeCompare(String(b.provider_id || ''));
+          }});
+          const tableRows = topRows.map(row => {{
+            const state = row.state || {{}};
+            const action = row.next_action || {{}};
+            const materials = row.materials || {{}};
+            const parallel = Array.isArray(row.parallel_actions) ? row.parallel_actions.map(item => item.label || item.id).join(' / ') : '';
+            return `
+              <tr>
+                <td><code>${{escapeHtml(row.provider_id || '')}}</code></td>
+                <td>${{escapeHtml(row.plain_status || '')}}</td>
+                <td>${{escapeHtml(action.label || '')}}</td>
+                <td>${{Number(state.active_account_count || 0)}}</td>
+                <td>${{state.runtime_registered ? '已登记' : '未登记'}} / ${{state.managed_process_running ? '运行中' : '未运行'}}</td>
+                <td>${{escapeHtml(materials.account || '-')}} / ${{escapeHtml(materials.runtime || '-')}}</td>
+                <td>${{escapeHtml(parallel || '-')}}</td>
+                <td>${{activationDashboardActionHtml(row)}}</td>
+              </tr>
+            `;
+          }}).join('');
+          const first = topRows[0] || {{}};
+          const firstAction = first.next_action || {{}};
+          panel.innerHTML = `
+            <div class="activation-head">
+              <div>
+                <h3>生产激活总控</h3>
+                <p>当前先做：${{escapeHtml(first.provider_id || '-')}} · ${{escapeHtml(firstAction.label || '等待下一步')}}。这里只读汇总证据，不会调用上游、不会下载二进制、不会创建假账号。</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge">Provider ${{Number(summary.total || rows.length)}}</span>
+                <span class="activation-badge needs-input">缺账号 ${{Number(summary.needs_account || 0)}}</span>
+                <span class="activation-badge action-required">缺 runtime ${{Number(summary.needs_runtime || 0)}}</span>
+                <span class="activation-badge done">生产可用 ${{Number(summary.production_ready || 0)}}</span>
+              </div>
+            </div>
+            <div class="source-plan-grid">
+              <div class="source-plan-card"><b>真实账号</b><span>${{Number(summary.active_account || 0)}} / ${{Number(summary.total || rows.length)}}</span><code>cookie/session/profile</code></div>
+              <div class="source-plan-card"><b>Loopback runtime</b><span>${{Number(summary.runtime_registered || 0)}} / ${{Number(summary.total || rows.length)}}</span><code>release first</code></div>
+              <div class="source-plan-card"><b>可跑验收</b><span>${{Number(summary.ready_for_live_acceptance || 0)}}</span><code>dry-run then live</code></div>
+              <div class="source-plan-card"><b>最终可用</b><span>${{Number(summary.production_ready || 0)}}</span><code>/v1/images /v1/videos</code></div>
+            </div>
+            <div class="table-scroll" style="margin-top:12px">
+              <table>
+                <thead><tr><th>Provider</th><th>状态</th><th>下一步</th><th>账号</th><th>Runtime</th><th>材料</th><th>可并行处理</th><th>操作</th></tr></thead>
+                <tbody>${{tableRows}}</tbody>
+              </table>
+            </div>
+          `;
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadProductionActivationDashboard() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/production-activation-dashboard');
+          renderProductionActivationDashboard(payload);
+          return payload;
         }}
         function downstreamStatusLabel(status) {{
           const labels = {{
@@ -17368,6 +17461,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-activation-workflow-all')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelActivationWorkflows();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-production-activation-dashboard')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadProductionActivationDashboard();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -21591,6 +21690,17 @@ def admin_proxy_kernels_production_gap_report(provider_ids: str = "", ctx: AuthC
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc), "production_gap_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/production-activation-dashboard")
+def admin_proxy_kernels_production_activation_dashboard(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_production_activation_dashboard(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "activation_dashboard_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
 @app.get("/v1/admin/proxy-kernels/go-live-package")
@@ -26935,6 +27045,198 @@ def proxy_kernel_live_workspace_summary(rows: list[dict[str, Any]]) -> dict[str,
         "action_required": sum(1 for row in rows if row.get("blocking_phases")),
         "next_step_counts": next_step_counts,
         "blocking_phase_counts": blocking_phase_counts,
+    }
+
+
+PROXY_KERNEL_ACTIVATION_DASHBOARD_ACTIONS = {
+    "route": {
+        "label": "补齐模型路由",
+        "description": "先把定型 provider 和 provider-model mapping 写入平台。",
+        "target_tab": "kernels",
+        "target_subtab": "kernels-status-pane",
+        "button_action": "apply-routing",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/apply-routing",
+    },
+    "account": {
+        "label": "导入真实账号材料",
+        "description": "粘贴 Web session、Cookie、OAuth/profile 或 agent credential，并保存为账号池资源。",
+        "target_tab": "oauth",
+        "target_subtab": "oauth-guide-pane",
+        "button_action": "open-account",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/account-materials",
+    },
+    "runtime": {
+        "label": "准备并启动 loopback runtime",
+        "description": "优先使用 release 二进制；必要时使用 source-repo 生成受控启动器。",
+        "target_tab": "kernels",
+        "target_subtab": "kernels-start-pane",
+        "button_action": "open-runtime",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan",
+    },
+    "health": {
+        "label": "运行 runtime 健康检查",
+        "description": "确认本地 loopback 执行器可响应平台健康检查。",
+        "target_tab": "kernels",
+        "target_subtab": "kernels-start-pane",
+        "button_action": "health-check",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check",
+    },
+    "live_acceptance": {
+        "label": "运行真实样本验收",
+        "description": "先 dry-run，再显式切到 live；live 会调用真实上游并可能消耗额度。",
+        "target_tab": "kernels",
+        "target_subtab": "kernels-start-pane",
+        "button_action": "live-acceptance",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/live-acceptance",
+    },
+    "user_api_key": {
+        "label": "发放下游用户 API Key",
+        "description": "生产样本通过后，为普通用户创建调用 key 和余额。",
+        "target_tab": "users",
+        "target_subtab": "",
+        "button_action": "open-users",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package",
+    },
+    "ready": {
+        "label": "可直接调用",
+        "description": "路由、账号、runtime、健康检查、真实样本和下游 key 均有证据。",
+        "target_tab": "kernels",
+        "target_subtab": "kernels-go-live-pane",
+        "button_action": "inspect-go-live-package",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/go-live-package",
+    },
+}
+
+
+def proxy_kernel_activation_dashboard_next_action(row: dict[str, Any]) -> dict[str, Any]:
+    state = row.get("state") if isinstance(row.get("state"), dict) else {}
+    materials = row.get("materials") if isinstance(row.get("materials"), dict) else {}
+    phases = [str(item.get("id") or "") for item in row.get("blocking_phases", []) if isinstance(item, dict)]
+    if state.get("production_ready"):
+        action_id = "ready"
+    elif not state.get("route_config_ready"):
+        action_id = "route"
+    elif int(state.get("active_account_count") or 0) <= 0 or materials.get("account") != "ready":
+        action_id = "account"
+    elif not state.get("runtime_registered") or not state.get("runtime_loopback_only") or not state.get("managed_process_running"):
+        action_id = "runtime"
+    elif "health" in phases:
+        action_id = "health"
+    elif state.get("ready_for_live_acceptance"):
+        action_id = "live_acceptance"
+    elif "live_acceptance" in phases:
+        action_id = "live_acceptance"
+    else:
+        action_id = "runtime"
+    action = dict(PROXY_KERNEL_ACTIVATION_DASHBOARD_ACTIONS[action_id])
+    action["id"] = action_id
+    return action
+
+
+def proxy_kernel_activation_dashboard_parallel_actions(row: dict[str, Any]) -> list[dict[str, Any]]:
+    state = row.get("state") if isinstance(row.get("state"), dict) else {}
+    materials = row.get("materials") if isinstance(row.get("materials"), dict) else {}
+    phases = {str(item.get("id") or "") for item in row.get("blocking_phases", []) if isinstance(item, dict)}
+    action_ids: list[str] = []
+    if not state.get("route_config_ready"):
+        action_ids.append("route")
+    if int(state.get("active_account_count") or 0) <= 0 or materials.get("account") != "ready":
+        action_ids.append("account")
+    if not state.get("runtime_registered") or not state.get("runtime_loopback_only") or not state.get("managed_process_running"):
+        action_ids.append("runtime")
+    if "health" in phases:
+        action_ids.append("health")
+    if state.get("ready_for_live_acceptance") or "live_acceptance" in phases:
+        action_ids.append("live_acceptance")
+    if state.get("production_ready"):
+        action_ids.append("ready")
+    unique_ids = list(dict.fromkeys(action_ids))
+    return [{**PROXY_KERNEL_ACTIVATION_DASHBOARD_ACTIONS[action_id], "id": action_id} for action_id in unique_ids]
+
+
+def proxy_kernel_activation_dashboard_row(row: dict[str, Any]) -> dict[str, Any]:
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    materials_request = evidence.get("materials_request") if isinstance(evidence.get("materials_request"), dict) else {}
+    required_materials = materials_request.get("must_be_provided_by_operator") or materials_request.get("required_materials") or []
+    next_action = proxy_kernel_activation_dashboard_next_action(row)
+    state = row.get("state") if isinstance(row.get("state"), dict) else {}
+    plain_status = "已可直接调用" if state.get("production_ready") else "需要真实材料或运行证据"
+    if next_action["id"] == "account":
+        plain_status = "先导入真实账号材料"
+    elif next_action["id"] == "runtime":
+        plain_status = "先准备并启动本地执行内核"
+    elif next_action["id"] == "health":
+        plain_status = "先确认 runtime 健康"
+    elif next_action["id"] == "live_acceptance":
+        plain_status = "可以开始真实样本验收"
+    elif next_action["id"] == "route":
+        plain_status = "先补齐平台路由"
+    return {
+        "provider_id": row.get("provider_id"),
+        "selection_id": row.get("selection_id"),
+        "status": row.get("status"),
+        "plain_status": plain_status,
+        "next_action": next_action,
+        "parallel_actions": proxy_kernel_activation_dashboard_parallel_actions(row),
+        "state": state,
+        "materials": row.get("materials") or {},
+        "blocking_phases": row.get("blocking_phases") or [],
+        "required_material_count": len(required_materials),
+        "required_materials": required_materials[:8],
+        "go_live_next_step": (evidence.get("go_live") or {}).get("next_step") if isinstance(evidence.get("go_live"), dict) else {},
+        "readiness_next_step": (evidence.get("production_readiness") or {}).get("next_step") if isinstance(evidence.get("production_readiness"), dict) else {},
+        "workspace_item": row,
+    }
+
+
+def proxy_kernel_activation_dashboard_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    next_action_counts: dict[str, int] = {}
+    for row in rows:
+        action_id = str((row.get("next_action") or {}).get("id") or "unknown")
+        next_action_counts[action_id] = next_action_counts.get(action_id, 0) + 1
+    return {
+        "total": len(rows),
+        "production_ready": sum(1 for row in rows if (row.get("state") or {}).get("production_ready")),
+        "ready_for_live_acceptance": sum(1 for row in rows if (row.get("state") or {}).get("ready_for_live_acceptance")),
+        "needs_account": sum(1 for row in rows if (row.get("next_action") or {}).get("id") == "account"),
+        "needs_runtime": sum(1 for row in rows if (row.get("next_action") or {}).get("id") == "runtime"),
+        "needs_health": sum(1 for row in rows if (row.get("next_action") or {}).get("id") == "health"),
+        "needs_live_acceptance": sum(1 for row in rows if (row.get("next_action") or {}).get("id") == "live_acceptance"),
+        "route_ready": sum(1 for row in rows if (row.get("state") or {}).get("route_config_ready")),
+        "active_account": sum(1 for row in rows if int((row.get("state") or {}).get("active_account_count") or 0) > 0),
+        "runtime_registered": sum(1 for row in rows if (row.get("state") or {}).get("runtime_registered")),
+        "next_action_counts": next_action_counts,
+    }
+
+
+def build_proxy_kernel_production_activation_dashboard(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    workspace_rows = [proxy_kernel_live_workspace_row(db, provider_id) for provider_id in selected]
+    rows = [proxy_kernel_activation_dashboard_row(row) for row in workspace_rows]
+    readiness = build_readiness_snapshot(db)
+    return {
+        "object": "media2api.proxy_kernel.production_activation_dashboard",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_ids": selected,
+        "status": "production_ready" if all((row.get("state") or {}).get("production_ready") for row in rows) and rows else "action_required",
+        "summary": proxy_kernel_activation_dashboard_summary(rows),
+        "readiness": {
+            "status": readiness.get("status"),
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": readiness.get("action_items", []),
+        },
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "upstream_calls": False,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "no_fake_account_created": True,
+        },
     }
 
 

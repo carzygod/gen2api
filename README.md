@@ -197,7 +197,12 @@ loopback contract self-tests, go-live checklists, process status, and
 stdout/stderr log inspection. The `/admin` dashboard has a
 dedicated "反代内核" workspace for the same workflow, so operators do not need
 to hand-write JSON for routine runtime start/stop checks. The first user-facing
-entry is the go-live package:
+entry is the production activation dashboard:
+`GET /v1/admin/proxy-kernels/production-activation-dashboard`. It groups all
+finalized providers by the next human-readable action: import real account
+material, prepare/start a loopback runtime, run health checks, run live sample
+acceptance, or hand the provider to downstream users. For single-provider
+detail, use the go-live package:
 `GET /v1/admin/proxy-kernels/{provider_id}/go-live-package`. It compresses
 account material, release/source runtime, health evidence, live sample
 acceptance, downstream user API Key, and `/v1/images/*` / `/v1/videos/*`
