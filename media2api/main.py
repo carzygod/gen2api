@@ -25034,10 +25034,11 @@ def build_proxy_kernel_release_checksums(
     resolved_candidates.sort(key=proxy_kernel_release_candidate_sort_key, reverse=True)
     unresolved_preferred_assets.sort(key=proxy_kernel_release_candidate_sort_key, reverse=True)
     status = str(probe.get("status") or "unknown")
+    resolved_preferred_count = sum(1 for item in resolved_candidates if item.get("preferred"))
     next_step = proxy_kernel_release_checksum_next_step(
         status,
         dry_run=bool(dry_run),
-        resolved_count=len(resolved_candidates),
+        resolved_count=resolved_preferred_count,
         preferred_count=len(preferred_assets),
         checksum_count=len(checksum_assets),
     )
@@ -25059,8 +25060,9 @@ def build_proxy_kernel_release_checksums(
         "github_asset_digest_count": sum(1 for item in runtime_assets if proxy_kernel_asset_digest_sha256(item)),
         "checksum_sources": checksum_sources,
         "resolved_sha256_candidates": resolved_candidates,
-        "install_ready_candidate_count": len(resolved_candidates),
-        "resolved_preferred_asset_count": sum(1 for item in resolved_candidates if item.get("preferred")),
+        "resolved_sha256_candidate_count": len(resolved_candidates),
+        "install_ready_candidate_count": resolved_preferred_count,
+        "resolved_preferred_asset_count": resolved_preferred_count,
         "unresolved_preferred_assets": unresolved_preferred_assets,
         "hash_required": True,
         "installed": installed,
@@ -25458,19 +25460,19 @@ def proxy_kernel_runtime_acquisition_next_action(
             "reason": "A likely runtime asset exists, but no matching checksum file was found. Provide a trusted SHA256 manually.",
             "primary_api": "/v1/admin/proxy-kernels/{provider_id}/install-release",
         }
-    if source_fallback or release_status in {"release_without_assets", "no_release"}:
-        return {
-            "id": "source_repo_reference",
-            "label": "Use source-repo reference path",
-            "reason": "No installable release binary was found. Source checkout is now allowed for protocol inspection, build input, or adapter rewrite.",
-            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync",
-        }
     if source_ready:
         return {
             "id": "source_runtime_plan",
             "label": "Inspect source runtime plan",
             "reason": "A source checkout is already present. Inspect dependency, build, and launcher candidates before running anything.",
             "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan",
+        }
+    if source_fallback or release_status in {"ok", "release_without_assets", "no_release"}:
+        return {
+            "id": "source_repo_reference",
+            "label": "Use source-repo reference path",
+            "reason": "No installable Linux/x64 release binary was found. Source checkout is now allowed for protocol inspection, build input, or adapter rewrite.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync",
         }
     return {
         "id": "inspect_release_assets",
@@ -25505,7 +25507,7 @@ def build_proxy_kernel_runtime_acquisition_plan(
     source_repo_allowed = next_action.get("id") in {"source_repo_reference", "source_runtime_plan"} or bool(source_repo.get("is_git_repo"))
     candidates = [item for item in release_state.get("resolved_sha256_candidates") or [] if isinstance(item, dict)]
     unresolved_preferred = [item for item in release_state.get("unresolved_preferred_assets") or [] if isinstance(item, dict)]
-    preferred_candidate = proxy_kernel_best_release_candidate(candidates, require_preferred=True) or proxy_kernel_best_release_candidate(candidates)
+    preferred_candidate = proxy_kernel_best_release_candidate(candidates, require_preferred=True)
     base = settings.public_base_url
     admin_key = "$MEDIA2API_API_KEY"
     provider_path = f"/v1/admin/proxy-kernels/{provider_id}"

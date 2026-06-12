@@ -1577,21 +1577,26 @@ class ProxyKernelRuntimeService:
 
     def asset_candidate_score(self, name: str) -> int:
         lower = name.lower()
-        score = 0
-        if any(token in lower for token in ["linux", "ubuntu", "debian"]):
-            score += 4
-        if any(token in lower for token in ["amd64", "x86_64", "x64"]):
-            score += 3
-        if any(lower.endswith(ext) for ext in [".tar.gz", ".tgz", ".zip", ".gz", ".bin", ".exe"]):
-            score += 1
         if any(token in lower for token in ["sha256", "checksum", "checksums"]):
-            score -= 5
+            return 0
+        if any(token in lower for token in ["darwin", "macos", "osx", "windows", "win32", "win64", "winget"]):
+            return 0
+        if "docker" in lower:
+            return 0
+        linux = any(token in lower for token in ["linux", "ubuntu", "debian"])
+        x64 = any(token in lower for token in ["amd64", "x86_64", "x64"])
+        archive = any(lower.endswith(ext) for ext in [".tar.gz", ".tgz", ".zip", ".gz", ".bin"])
+        if not (linux and x64 and archive):
+            return 0
+        score = 8
+        if any(token in lower for token in ["server", "proxy", "api", "runtime"]):
+            score += 1
         return score
 
     def asset_candidate_reason(self, name: str, score: int) -> str:
         if score <= 0:
-            return "not a preferred linux/amd64 runtime asset"
-        return "possible linux/amd64 release asset; verify manually and provide expected SHA256"
+            return "not an automatic Linux/x64 runtime asset for this server"
+        return "Linux/x64 release asset; verify SHA256 before installing"
 
     def pick_asset(self, assets: list[dict[str, Any]], asset_name: str | None) -> dict[str, Any] | None:
         if asset_name:

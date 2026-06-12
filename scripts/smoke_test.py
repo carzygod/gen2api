@@ -80,6 +80,13 @@ def main() -> None:
     assert proxy_kernel_asset_digest_sha256({"digest": f"sha256:{digest_value}"}) == digest_value
     assert proxy_kernel_asset_digest_sha256({"digest": digest_value.upper()}) == digest_value
     assert proxy_kernel_asset_digest_sha256({"digest": "sha512:" + digest_value}) == ""
+    assert proxy_kernel_service.asset_candidate_score("codex-register-v2-linux-x64.zip") > 0
+    assert proxy_kernel_service.asset_candidate_score("CLIProxyAPI_7.1.68_linux_amd64.tar.gz") > 0
+    assert proxy_kernel_service.asset_candidate_score("anti-api-winget-x64.zip") == 0
+    assert proxy_kernel_service.asset_candidate_score("tool-windows-x64.zip") == 0
+    assert proxy_kernel_service.asset_candidate_score("tool-darwin-aarch64.tar.gz") == 0
+    assert proxy_kernel_service.asset_candidate_score("tool-linux-arm64.tar.gz") == 0
+    assert proxy_kernel_service.asset_candidate_score("tool-linux-x64-docker.tar.gz") == 0
     best_gemini_candidate = proxy_kernel_best_release_candidate(
         [
             {"asset_name": "CLIProxyAPI_7.1.68_darwin_aarch64.tar.gz", "candidate_score": 1, "preferred": True},

@@ -1155,10 +1155,11 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/release-chec
 
 响应中的关键字段：
 
-- `summary.install_ready_candidates`: 已解析出可直接带入安装请求的候选数。
+- `summary.install_ready_candidates`: 已解析出可直接带入安装请求的 Linux/x64 preferred 候选数。
 - `summary.with_github_asset_digests`: Release asset metadata already provided a `sha256:<hash>` digest for at least one runtime asset.
 - `data[].github_asset_digest_count`: 当前 provider 的 GitHub Release asset digest 数量。
-- `data[].resolved_sha256_candidates`: 每个候选的 `asset_name`、`expected_sha256`、`source_type`、来源 checksum/digest 和 `install_payload_template`。
+- `data[].resolved_sha256_candidate_count`: 已解析出的 SHA256 候选总数，可能包含非 Linux/x64 资产。
+- `data[].resolved_sha256_candidates`: 每个候选的 `asset_name`、`expected_sha256`、`source_type`、来源 checksum/digest 和 `install_payload_template`；自动安装默认只选择 `preferred=true` 的 Linux/x64 候选。
 - `data[].unresolved_preferred_assets`: 仍需人工提供 SHA256 的 preferred release 资产。
 - `policy.downloaded_binaries=false`: 该接口不会下载 release 二进制。
 
