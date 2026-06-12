@@ -13780,6 +13780,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .activation-meta {{ display:grid; grid-template-columns:82px minmax(0,1fr); gap:5px 8px; color:var(--soft); font-size:12px; line-height:1.45; }}
         .activation-meta b {{ color:var(--muted); }}
         .activation-meta span {{ overflow-wrap:anywhere; }}
+        .activation-action-row {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }}
+        .activation-action-row .op,.activation-action-row .primary {{ min-height:34px; padding:5px 9px; font-size:12px; }}
         .activation-json {{ margin-top:8px; max-height:120px; font-size:11px; }}
         .activation-stage details {{ margin-top:8px; }}
         .activation-stage summary {{ color:var(--accent-2); cursor:pointer; font-size:12px; font-weight:900; }}
@@ -14565,6 +14567,16 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (title) title.textContent = navButton.dataset.title || navButton.textContent.trim();
           target.scrollIntoView({{ block: 'start' }});
         }}
+        function activateSubtab(subtabId) {{
+          const target = document.getElementById(subtabId);
+          if (!target) return;
+          const parent = target.closest('.tab');
+          if (!parent) return;
+          parent.querySelectorAll('.subnav-item').forEach(item => item.classList.toggle('active', item.dataset.subtab === subtabId));
+          parent.querySelectorAll('.subtab').forEach(item => item.classList.remove('active'));
+          target.classList.add('active');
+          target.scrollIntoView({{ block: 'start' }});
+        }}
         document.querySelectorAll('[data-jump-tab]').forEach(button => button.addEventListener('click', () => {{
           activateMainTab(button.dataset.jumpTab);
         }}));
@@ -14607,6 +14619,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             if (select && providerId) select.value = providerId;
           }});
         }}
+        function syncProviderEntryFields(providerId) {{
+          ['wizard-provider', 'cookie-provider', 'agent-provider', 'oauth-guide-provider', 'connector-provider'].forEach(id => {{
+            const select = document.getElementById(id);
+            if (select && providerId) select.value = providerId;
+          }});
+          try {{ renderOAuthGuide(providerId); }} catch (_) {{}}
+        }}
         function kernelHint(providerId) {{
           return proxyKernelHints[providerId] || {{}};
         }}
@@ -14642,7 +14661,29 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (!Object.keys(value).length) return '';
           return `<details><summary>查看请求模板</summary><pre class="activation-json">${{escapeHtml(JSON.stringify(value, null, 2))}}</pre></details>`;
         }}
-        function activationStageHtml(stage, index, nextId) {{
+        function activationActionHtml(stage, providerId) {{
+          const providerAttr = escapeHtml(providerId || selectedKernelProvider());
+          const button = (label, action, primary = false) => `<button class="${{primary ? 'primary' : 'op'}}" type="button" data-activation-action="${{escapeHtml(action)}}" data-provider-id="${{providerAttr}}">${{escapeHtml(label)}}</button>`;
+          const status = stage.status || '';
+          const actions = [];
+          if (stage.id === 'route') {{
+            actions.push(button(status === 'done' ? '查看路由' : '补齐路由', status === 'done' ? 'routing-plan' : 'apply-routing', status !== 'done'));
+          }} else if (stage.id === 'account') {{
+            actions.push(button('去导入账号', 'open-account', true));
+            actions.push(button('查看材料', 'materials-request'));
+          }} else if (stage.id === 'runtime') {{
+            actions.push(button('打开启动执行器', 'open-runtime', true));
+            actions.push(button('交付包 dry-run', 'run-handoff'));
+          }} else if (stage.id === 'health') {{
+            actions.push(button(stage.platform_can_run ? '运行健康检查' : '打开 Runtime', stage.platform_can_run ? 'health-check' : 'open-runtime', stage.platform_can_run));
+          }} else if (stage.id === 'live_acceptance') {{
+            actions.push(button(stage.platform_can_run ? '运行验收 dry-run' : '查看上线清单', stage.platform_can_run ? 'live-acceptance' : 'go-live'));
+          }} else if (stage.id === 'user_api_key') {{
+            actions.push(button('打开发放 Key', 'open-users', true));
+          }}
+          return actions.length ? `<div class="activation-action-row">${{actions.join('')}}</div>` : '';
+        }}
+        function activationStageHtml(stage, index, nextId, providerId) {{
           const statusClass = activationStatusClass(stage.status);
           const isNext = stage.id === nextId;
           return `
@@ -14658,6 +14699,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <b>人工</b><span>${{stage.operator_required ? '需要' : '不需要'}}</span>
                 <b>平台</b><span>${{stage.platform_can_run ? '可执行' : '只读/待材料'}}</span>
               </div>
+              ${{activationActionHtml(stage, providerId)}}
               ${{activationPayloadHtml(stage.payload_template)}}
             </div>
           `;
@@ -14702,7 +14744,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <b>待填材料</b><span>${{escapeHtml(inputText)}}</span>
               <b>约束</b><span>官方 SDK/API 禁止；release 二进制优先；source-repo 只在必要时兜底。</span>
             </div>
-            <div class="activation-stage-grid">${{stages.map((stage, index) => activationStageHtml(stage, index, nextStage.id)).join('')}}</div>
+            <div class="activation-stage-grid">${{stages.map((stage, index) => activationStageHtml(stage, index, nextStage.id, providerId)).join('')}}</div>
             ${{activationSamplesHtml(workflow)}}
           `;
         }}
@@ -14723,6 +14765,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <span class="activation-badge ${{activationStatusClass(row.status)}}">${{escapeHtml(activationStatusLabel(row.status))}}</span>
                 <p>${{escapeHtml('下一步：' + (nextStage.label || '等待读取'))}}</p>
                 <p>待填：${{escapeHtml(String((row.required_user_inputs || []).length))}} 项 · 验收：${{row.ready_for_live_acceptance ? '可运行' : '未就绪'}}</p>
+                <div class="activation-action-row"><button class="op" type="button" data-activation-action="inspect-provider" data-provider-id="${{escapeHtml(row.provider_id || '')}}">查看阶段</button></div>
               </div>
             `;
           }}).join('');
@@ -15374,6 +15417,43 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           }});
           renderKernelSummary(provider);
           return payload;
+        }}
+        async function runActivationAction(action, providerId) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          if (action === 'inspect-provider') {{
+            activateMainTab('kernels');
+            activateSubtab('kernels-start-pane');
+            await loadKernelActivationWorkflow(provider);
+            return;
+          }}
+          if (action === 'open-account') {{
+            syncProviderEntryFields(provider);
+            activateMainTab('oauth');
+            activateSubtab('oauth-guide-pane');
+            result.textContent = provider + '：请按指南导入真实账号材料。';
+            return;
+          }}
+          if (action === 'open-runtime') {{
+            activateMainTab('kernels');
+            activateSubtab('kernels-start-pane');
+            await loadKernelRuntimeDeliveryPlan(provider);
+            return;
+          }}
+          if (action === 'open-users') {{
+            activateMainTab('users');
+            activateSubtab('users-create-pane');
+            result.textContent = '请在“用户与 API Key”里创建用户或发放下游 API Key。';
+            return;
+          }}
+          if (action === 'apply-routing') await applyKernelRouting();
+          else if (action === 'routing-plan') await loadKernelRoutingPlan(provider);
+          else if (action === 'materials-request') await loadKernelMaterialsRequest(provider);
+          else if (action === 'run-handoff') await runKernelOperatorHandoff(provider);
+          else if (action === 'health-check') await checkKernelRuntimeHealth(provider);
+          else if (action === 'live-acceptance') await runKernelLiveAcceptance(provider);
+          else if (action === 'go-live') await loadKernelGoLiveChecklist(provider);
+          await loadKernelActivationWorkflow(provider);
         }}
         async function runKernelLoopbackContractTest() {{
           return await callAdmin('/v1/admin/proxy-kernels/loopback-contract-test', 'POST', {{
@@ -16031,6 +16111,15 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             const payload = await runKernelLiveAcceptance();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.addEventListener('click', async event => {{
+          const button = event.target.closest('[data-activation-action]');
+          if (!button) return;
+          event.preventDefault();
+          const action = button.dataset.activationAction || '';
+          const provider = button.dataset.providerId || selectedKernelProvider();
+          result.textContent = '正在执行向导动作：' + action + ' / ' + provider;
+          try {{ await runActivationAction(action, provider); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-activation-workflow')?.addEventListener('click', async () => {{
           try {{

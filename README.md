@@ -192,7 +192,8 @@ to hand-write JSON for routine runtime start/stop checks. The first user-facing
 entry is the activation workflow: route, real account material, release/source
 runtime, health check, live sample acceptance, then downstream user API Key.
 The dashboard renders that workflow as stage cards instead of requiring
-operators to read raw JSON first.
+operators to read raw JSON first, and those cards can jump to the matching
+account, runtime, or user-key workspace or run safe platform-side checks.
 Runtime onboarding
 prefers fixed release binaries with explicit SHA256 verification. Full source
 repositories are synced into `source-repo/` only when release assets are
