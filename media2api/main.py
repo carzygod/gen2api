@@ -1281,6 +1281,21 @@ class ProxyKernelBulkRoutingApplyRequest(ProxyKernelRoutingApplyRequest):
     provider_ids: list[str] = Field(default_factory=list)
 
 
+class ProxyKernelLiveWorkspaceRequest(BaseModel):
+    provider_ids: list[str] = Field(default_factory=list)
+    dry_run: bool = True
+    prepare_routing: bool = True
+    routing_status: str = "active"
+    enable_mappings: bool = True
+    priority_offset: int = 0
+    update_provider_base_url: bool = True
+    include_release_candidates: bool = True
+    resolve_release_candidates: bool = False
+    install_release_candidates: bool = False
+    run_loopback_contract: bool = False
+    continue_on_error: bool = True
+
+
 class TemplateInstallRequest(BaseModel):
     base_url: str | None = None
     credential_ref: str = "agent://providers/template/acct_01"
@@ -7311,6 +7326,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
     ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
+    ("POST", "/v1/admin/proxy-kernels/live-workspace"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -7565,6 +7581,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
+                ("POST", "/v1/admin/proxy-kernels/live-workspace"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -13353,6 +13370,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("反代内核清单", "GET", "/v1/admin/proxy-kernels"),
         ("全量路由计划", "GET", "/v1/admin/proxy-kernels/routing-plan"),
         ("全量运行时交付计划", "GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
+        ("反代内核上线工作台", "POST", "/v1/admin/proxy-kernels/live-workspace"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
         ("全量安装 Hash 候选计划", "POST", "/v1/admin/proxy-kernels/install-release-candidates"),
@@ -13956,6 +13974,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:360px">
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
+                  <button class="op" type="button" id="kernel-live-workspace-plan">上线工作台预检</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
                   <button class="op" type="button" id="kernel-release-checksum-matrix">全量 Hash 候选</button>
                   <button class="op" type="button" id="kernel-install-release-candidates-plan">批量安装候选计划</button>
@@ -14432,6 +14451,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const releaseChecksums = hint.release_checksums || {{}};
           const runtimeContract = hint.runtime_contract || {{}};
           const productionReadiness = hint.production_readiness || {{}};
+          const liveWorkspace = hint.live_workspace || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14449,6 +14469,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>Hash 候选</dt><dd>${{escapeHtml(releaseChecksums.status || '未读取')}}${{Number(releaseChecksums.install_ready_candidate_count || 0) ? ' · 可安装候选 ' + escapeHtml(releaseChecksums.install_ready_candidate_count) : ''}}${{releaseChecksums.next_step?.label ? ' · 下一步：' + escapeHtml(releaseChecksums.next_step.label) : ''}}</dd>
               <dt>运行合同</dt><dd>${{escapeHtml(runtimeContract.status || '未读取')}}${{runtimeContract.next_action ? ' · 下一步：' + escapeHtml(runtimeContract.next_action) : ''}}</dd>
               <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
+              <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>交付计划</dt><dd>${{escapeHtml(runtimePlan.status || '未读取')}}${{runtimePlan.next_step?.label ? ' · 下一步：' + escapeHtml(runtimePlan.next_step.label) : ''}}</dd>
@@ -14654,6 +14675,39 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function loadAllKernelRuntimeDeliveryPlans() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/runtime-delivery-plan');
           mergeKernelRuntimeDeliveryPlans(payload);
+          return payload;
+        }}
+        function mergeKernelLiveWorkspace(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            const evidence = item.evidence || {{}};
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              live_workspace: item,
+              runtime_delivery_plan: evidence.runtime_delivery || kernelHint(item.provider_id).runtime_delivery_plan || {{}},
+              production_readiness: evidence.production_readiness || kernelHint(item.provider_id).production_readiness || {{}},
+              materials_request: evidence.materials_request || kernelHint(item.provider_id).materials_request || {{}},
+              go_live: evidence.go_live || kernelHint(item.provider_id).go_live || {{}},
+              blockers: Array.isArray(item.blocking_phases) ? item.blocking_phases.map(phase => ({{ code: phase.id, message: phase.action }})) : kernelHint(item.provider_id).blockers || [],
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelLiveWorkspacePlan() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/live-workspace', 'POST', {{
+            provider_ids: [],
+            dry_run: true,
+            prepare_routing: true,
+            routing_status: document.getElementById('kernel-routing-status')?.value || 'active',
+            enable_mappings: document.getElementById('kernel-routing-enable')?.value !== 'false',
+            priority_offset: Number(document.getElementById('kernel-routing-priority-offset')?.value || 0),
+            update_provider_base_url: document.getElementById('kernel-update-provider')?.value !== 'false',
+            include_release_candidates: true,
+            resolve_release_candidates: false,
+            install_release_candidates: false,
+            run_loopback_contract: false,
+            continue_on_error: true,
+          }});
+          mergeKernelLiveWorkspace(payload);
           return payload;
         }}
         function mergeKernelReleaseProbeMatrix(payload) {{
@@ -15438,6 +15492,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-runtime-delivery-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelRuntimeDeliveryPlans(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-live-workspace-plan')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelLiveWorkspacePlan();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-release-probe-matrix')?.addEventListener('click', async () => {{
           try {{
@@ -19533,6 +19593,20 @@ def admin_proxy_kernels_install_release_candidates(
         raise HTTPException(status_code=400, detail={"error": str(exc), "hash_policy": "only checksum-resolved release candidates may be installed without a manually supplied SHA256"}) from exc
 
 
+@app.post("/v1/admin/proxy-kernels/live-workspace")
+def admin_proxy_kernels_live_workspace(
+    req: ProxyKernelLiveWorkspaceRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_live_workspace(db, ctx, req)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "workspace_policy": "only finalized proxy kernel provider ids may be initialized, routing status must be active or disabled, and release installs still require checksum evidence"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}/go-live-checklist")
 def admin_proxy_kernel_go_live_checklist(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -21478,6 +21552,163 @@ def build_proxy_kernel_release_candidate_install_matrix(
             "third_party_public_service": "forbidden",
             "managed_runtime_listener": "loopback_only",
             "default_mode": "dry_run_planning",
+        },
+    }
+
+
+def proxy_kernel_live_workspace_row(db: Session, provider_id: str) -> dict[str, Any]:
+    delivery = build_proxy_kernel_runtime_delivery_plan(db, provider_id)
+    readiness = build_proxy_kernel_production_readiness(db, provider_id)
+    materials = build_proxy_kernel_materials_request(db, provider_id)
+    go_live = build_proxy_kernel_go_live_checklist(db, provider_id)
+    state = delivery.get("state") if isinstance(delivery.get("state"), dict) else {}
+    blockers = [
+        phase
+        for phase in readiness.get("phases", [])
+        if isinstance(phase, dict) and not phase.get("ok")
+    ]
+    return {
+        "object": "media2api.proxy_kernel.live_workspace.item",
+        "provider_id": provider_id,
+        "selection_id": delivery.get("selection_id"),
+        "status": readiness.get("status") or delivery.get("status"),
+        "next_step": delivery.get("next_step") or readiness.get("next_step") or go_live.get("next_step"),
+        "state": {
+            "route_config_ready": bool(state.get("route_config_ready")),
+            "installed_verified": bool(state.get("installed_verified")),
+            "runtime_registered": bool(state.get("runtime_registered")),
+            "runtime_loopback_only": bool(state.get("runtime_loopback_only")),
+            "managed_process_running": bool(state.get("managed_process_running")),
+            "active_account_count": int(state.get("active_account_count") or 0),
+            "ready_for_live_acceptance": bool(readiness.get("ready_for_live_acceptance")),
+            "production_ready": bool(readiness.get("production_ready")),
+        },
+        "blocking_phases": [
+            {"id": item.get("id"), "label": item.get("label"), "action": item.get("action")}
+            for item in blockers
+        ],
+        "materials": {
+            "account": (materials.get("account_materials") or {}).get("status"),
+            "runtime": (materials.get("runtime_materials") or {}).get("status"),
+            "routing": (materials.get("routing_materials") or {}).get("status"),
+            "validation": (materials.get("validation_materials") or {}).get("status"),
+        },
+        "evidence": {
+            "runtime_delivery": delivery,
+            "production_readiness": readiness,
+            "materials_request": materials,
+            "go_live": go_live,
+        },
+    }
+
+
+def proxy_kernel_live_workspace_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    next_step_counts: dict[str, int] = {}
+    blocking_phase_counts: dict[str, int] = {}
+    for row in rows:
+        next_id = str((row.get("next_step") or {}).get("id") or "unknown")
+        next_step_counts[next_id] = next_step_counts.get(next_id, 0) + 1
+        for phase in row.get("blocking_phases", []):
+            phase_id = str(phase.get("id") or "unknown")
+            blocking_phase_counts[phase_id] = blocking_phase_counts.get(phase_id, 0) + 1
+    return {
+        "total": len(rows),
+        "route_ready": sum(1 for row in rows if (row.get("state") or {}).get("route_config_ready")),
+        "runtime_registered": sum(1 for row in rows if (row.get("state") or {}).get("runtime_registered")),
+        "runtime_loopback": sum(1 for row in rows if (row.get("state") or {}).get("runtime_loopback_only")),
+        "active_account": sum(1 for row in rows if int((row.get("state") or {}).get("active_account_count") or 0) > 0),
+        "ready_for_live_acceptance": sum(1 for row in rows if (row.get("state") or {}).get("ready_for_live_acceptance")),
+        "production_ready": sum(1 for row in rows if (row.get("state") or {}).get("production_ready")),
+        "action_required": sum(1 for row in rows if row.get("blocking_phases")),
+        "next_step_counts": next_step_counts,
+        "blocking_phase_counts": blocking_phase_counts,
+    }
+
+
+def build_proxy_kernel_live_workspace(
+    db: Session,
+    ctx: AuthContext,
+    req: ProxyKernelLiveWorkspaceRequest,
+) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, req.provider_ids)
+    if req.routing_status not in {"active", "disabled"}:
+        raise ValueError("ROUTING_STATUS_UNSUPPORTED")
+    route_result: dict[str, Any] = {
+        "status": "skipped" if not req.prepare_routing else "planned",
+        "dry_run": True,
+        "provider_ids": selected,
+    }
+    if req.prepare_routing and not req.dry_run:
+        route_result = apply_proxy_kernel_bulk_routing(
+            db,
+            selected,
+            status=req.routing_status,
+            enable_mappings=req.enable_mappings,
+            priority_offset=req.priority_offset,
+            update_provider_base_url=req.update_provider_base_url,
+        )
+        route_result["dry_run"] = False
+
+    release_candidate_matrix: dict[str, Any] = {
+        "status": "skipped",
+        "dry_run": True,
+        "data": [],
+        "summary": {},
+    }
+    if req.include_release_candidates:
+        candidate_req = ProxyKernelReleaseCandidateBulkInstallRequest(
+            provider_ids=selected,
+            dry_run=bool(req.dry_run or not req.install_release_candidates),
+            resolve_release=bool(req.resolve_release_candidates or req.install_release_candidates),
+            allow_non_preferred=False,
+            force=False,
+            continue_on_error=bool(req.continue_on_error),
+        )
+        release_candidate_matrix = build_proxy_kernel_release_candidate_install_matrix(db, candidate_req)
+
+    loopback_contract: dict[str, Any] = {"status": "skipped", "dry_run": bool(req.dry_run)}
+    if req.run_loopback_contract:
+        if req.dry_run:
+            loopback_contract = {
+                "status": "planned",
+                "dry_run": True,
+                "operations": ["text_to_image", "image_edit", "text_to_video"],
+            }
+        else:
+            loopback_contract = run_proxy_kernel_loopback_contract_test(
+                db,
+                ctx,
+                ProxyKernelLoopbackContractTestRequest(operations=["text_to_image", "image_edit", "text_to_video"]),
+            )
+
+    rows = [proxy_kernel_live_workspace_row(db, provider_id) for provider_id in selected]
+    downloaded_binaries = bool((release_candidate_matrix.get("policy") or {}).get("downloaded_binaries"))
+    return {
+        "object": "media2api.proxy_kernel.live_workspace",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "dry_run": bool(req.dry_run),
+        "provider_ids": selected,
+        "summary": proxy_kernel_live_workspace_summary(rows),
+        "routing": route_result,
+        "release_candidates": release_candidate_matrix,
+        "loopback_contract": loopback_contract,
+        "data": rows,
+        "next_actions": [
+            "Apply routing templates if route_ready is lower than total.",
+            "Install or register loopback runtimes with fixed release assets and SHA256.",
+            "Import real Web session or Agent Provider credentials for providers with active_account=0.",
+            "Run provider health checks, then live image/video acceptance samples.",
+        ],
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "hash_required": True,
+            "downloaded_binaries": downloaded_binaries,
+            "no_fake_account_created": True,
+            "upstream_calls": False,
         },
     }
 
