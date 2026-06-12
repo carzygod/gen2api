@@ -7459,6 +7459,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
     ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
     ("GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
+    ("GET", "/v1/admin/proxy-kernels/runtime-acquisition-plan"),
     ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
     ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
@@ -7489,6 +7490,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/release-checksums"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release-candidate"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -7735,6 +7737,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
+                ("GET", "/v1/admin/proxy-kernels/runtime-acquisition-plan"),
                 ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
@@ -7766,6 +7769,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/release-checksums"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release-candidate"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -13553,6 +13557,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("反代内核上线工作台", "POST", "/v1/admin/proxy-kernels/live-workspace"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
+        ("全量 Runtime 获取决策", "GET", "/v1/admin/proxy-kernels/runtime-acquisition-plan"),
         ("全量安装 Hash 候选计划", "POST", "/v1/admin/proxy-kernels/install-release-candidates"),
         ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
         ("全量生产就绪矩阵", "GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
@@ -13575,6 +13580,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 生产就绪", "GET", "/v1/admin/proxy-kernels/openai_web_session/production-readiness"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("OpenAI Web Hash 候选", "GET", "/v1/admin/proxy-kernels/openai_web_session/release-checksums"),
+        ("OpenAI Web Runtime 获取决策", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-acquisition-plan"),
         ("OpenAI Web 安装 Hash 候选", "POST", "/v1/admin/proxy-kernels/openai_web_session/install-release-candidate"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
@@ -13639,6 +13645,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
+        "/v1/admin/proxy-kernels/runtime-acquisition-plan",
         "/v1/admin/proxy-kernels/install-release-candidates",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
@@ -13653,6 +13660,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/release-checksums",
+        "/v1/admin/proxy-kernels/openai_web_session/runtime-acquisition-plan",
         "/v1/admin/proxy-kernels/openai_web_session/install-release-candidate",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13684,6 +13692,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
+        "/v1/admin/proxy-kernels/runtime-acquisition-plan",
         "/v1/admin/proxy-kernels/install-release-candidates",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
@@ -13698,6 +13707,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/release-checksums",
+        "/v1/admin/proxy-kernels/openai_web_session/runtime-acquisition-plan",
         "/v1/admin/proxy-kernels/openai_web_session/install-release-candidate",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
@@ -14261,6 +14271,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-live-workspace-plan">上线工作台预检</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
                   <button class="op" type="button" id="kernel-release-checksum-matrix">全量 Hash 候选</button>
+                  <button class="op" type="button" id="kernel-runtime-acquisition-all">全量获取决策</button>
                   <button class="op" type="button" id="kernel-install-release-candidates-plan">批量安装候选计划</button>
                   <button class="op" type="button" id="kernel-runtime-contract-matrix">运行合同矩阵</button>
                   <button class="op" type="button" id="kernel-production-readiness-matrix">生产就绪矩阵</button>
@@ -14336,6 +14347,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:260px">
                   <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
                   <button class="op" type="button" id="kernel-release-checksums">Hash 候选</button>
+                  <button class="op" type="button" id="kernel-runtime-acquisition">获取决策</button>
                   <button class="op" type="button" id="kernel-install-release-candidate">安装 Hash 候选</button>
                   <button class="op" type="button" id="kernel-runtime-delivery">运行时交付计划</button>
                   <button class="op" type="button" id="kernel-runtime-contract">运行合同</button>
@@ -15331,6 +15343,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const goLive = hint.go_live || {{}};
           const materials = hint.materials_request || {{}};
           const runtimePlan = hint.runtime_delivery_plan || {{}};
+          const runtimeAcquisition = hint.runtime_acquisition_plan || {{}};
           const releaseProbe = hint.release_probe || {{}};
           const releaseChecksums = hint.release_checksums || {{}};
           const sourceSync = hint.source_repo_sync || {{}};
@@ -15361,6 +15374,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>Hash</dt><dd>${{installed.sha256 ? '已记录' : '未记录'}}${{hint.installed_verified ? ' · 已校验' : ''}}</dd>
               <dt>Release 探测</dt><dd>${{escapeHtml(releaseProbe.status || '未探测')}}${{releaseProbe.next_step?.label ? ' · 下一步：' + escapeHtml(releaseProbe.next_step.label) : ''}}</dd>
               <dt>Hash 候选</dt><dd>${{escapeHtml(releaseChecksums.status || '未读取')}}${{Number(releaseChecksums.install_ready_candidate_count || 0) ? ' · 可安装候选 ' + escapeHtml(releaseChecksums.install_ready_candidate_count) : ''}}${{releaseChecksums.next_step?.label ? ' · 下一步：' + escapeHtml(releaseChecksums.next_step.label) : ''}}</dd>
+              <dt>获取决策</dt><dd>${{escapeHtml(runtimeAcquisition.status || '未读取')}}${{runtimeAcquisition.next_action?.label ? ' · 下一步：' + escapeHtml(runtimeAcquisition.next_action.label) : ''}}${{runtimeAcquisition.decision?.source_repo_allowed_now ? ' · source-repo 可用' : ''}}</dd>
               <dt>运行合同</dt><dd>${{escapeHtml(runtimeContract.status || '未读取')}}${{runtimeContract.next_action ? ' · 下一步：' + escapeHtml(runtimeContract.next_action) : ''}}</dd>
               <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
               <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
@@ -15390,7 +15404,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const installPreview = document.getElementById('kernel-install-path-preview');
           const base = document.getElementById('kernel-base-url');
           const checksumCandidates = Array.isArray(releaseChecksums.resolved_sha256_candidates) ? releaseChecksums.resolved_sha256_candidates : [];
-          const preferredChecksum = checksumCandidates.find(item => item.preferred) || checksumCandidates[0] || {{}};
+          const acquisitionCandidate = runtimeAcquisition.release?.preferred_candidate || {{}};
+          const preferredChecksum = acquisitionCandidate.asset_name ? acquisitionCandidate : (checksumCandidates.find(item => item.preferred) || checksumCandidates[0] || {{}});
           const executableCandidates = Array.isArray(installed.executable_candidates) ? installed.executable_candidates : [];
           const preferredExecutable = executableCandidates[0] || {{}};
           if (artifact && !artifact.value && (preferredExecutable.path || installed.path)) artifact.value = preferredExecutable.path || installed.path;
@@ -15752,6 +15767,35 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const suffix = dryRun ? '?dry_run=true' : '';
           const payload = await callAdmin('/v1/admin/proxy-kernels/release-checksum-matrix' + suffix);
           mergeKernelReleaseChecksumMatrix(payload);
+          return payload;
+        }}
+        function mergeKernelRuntimeAcquisitionPlans(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              runtime_acquisition_plan: item,
+              release_checksums: item.release?.release_checksums || kernelHint(item.provider_id).release_checksums || {{}},
+              source_repo: item.source_repo?.status || kernelHint(item.provider_id).source_repo || {{}},
+              runtime_contract: item.runtime_contract || kernelHint(item.provider_id).runtime_contract || {{}},
+              runtime_base_url: item.state?.runtime_base_url || kernelHint(item.provider_id).runtime_base_url || '',
+              runtime_registered: Boolean(item.state?.runtime_registered),
+              installed_verified: Boolean(item.state?.installed_verified),
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelRuntimeAcquisitionPlan(providerId = null, resolveRelease = true) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const suffix = '?resolve_release=' + (resolveRelease ? 'true' : 'false');
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-acquisition-plan' + suffix);
+          mergeKernelRuntimeAcquisitionPlans(payload);
+          return payload;
+        }}
+        async function loadAllKernelRuntimeAcquisitionPlans(resolveRelease = true) {{
+          const suffix = '?resolve_release=' + (resolveRelease ? 'true' : 'false');
+          const payload = await callAdmin('/v1/admin/proxy-kernels/runtime-acquisition-plan' + suffix);
+          mergeKernelRuntimeAcquisitionPlans(payload);
           return payload;
         }}
         function mergeKernelReleaseCandidateInstallMatrix(payload) {{
@@ -16904,6 +16948,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-runtime-acquisition')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelRuntimeAcquisitionPlan(null, true);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-runtime-contract')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelRuntimeContract();
@@ -17034,6 +17084,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-release-checksum-matrix')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelReleaseChecksumMatrix(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-runtime-acquisition-all')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelRuntimeAcquisitionPlans(true);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -21240,6 +21296,23 @@ def admin_proxy_kernels_release_checksum_matrix(
         raise HTTPException(status_code=400, detail={"error": str(exc), "release_checksum_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/runtime-acquisition-plan")
+def admin_proxy_kernels_runtime_acquisition_plan(
+    provider_ids: str = "",
+    resolve_release: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_runtime_acquisition_plans(db, selected, resolve_release=resolve_release, max_checksum_bytes=max_checksum_bytes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_acquisition_policy": "release binaries are preferred; source-repo is a fallback only when release assets are missing or insufficient"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/runtime-contract-matrix")
 def admin_proxy_kernels_runtime_contract_matrix(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -21450,6 +21523,22 @@ def admin_proxy_kernel_release_checksums(
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc), "release_checksum_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan")
+def admin_proxy_kernel_runtime_acquisition_plan(
+    provider_id: str,
+    resolve_release: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_runtime_acquisition_plan(db, provider_id, resolve_release=resolve_release, max_checksum_bytes=max_checksum_bytes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_acquisition_policy": "release binaries are preferred; source-repo is a fallback only when release assets are missing or insufficient"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/install-release-candidate")
@@ -25246,6 +25335,241 @@ def build_proxy_kernel_release_candidate_install_matrix(
             "third_party_public_service": "forbidden",
             "managed_runtime_listener": "loopback_only",
             "default_mode": "dry_run_planning",
+        },
+    }
+
+
+def proxy_kernel_runtime_acquisition_next_action(
+    *,
+    kernel: dict[str, Any],
+    release_state: dict[str, Any],
+    source_repo: dict[str, Any],
+    resolve_release: bool,
+) -> dict[str, Any]:
+    installed = kernel.get("installed") if isinstance(kernel.get("installed"), dict) else {}
+    runtime_registered = bool(kernel.get("runtime_registered") and kernel.get("runtime_loopback_only"))
+    source_ready = bool(source_repo.get("exists") and source_repo.get("is_git_repo"))
+    installed_verified = bool(kernel.get("installed_verified"))
+    install_ready = int(release_state.get("install_ready_candidate_count") or 0) > 0
+    preferred_assets = int(release_state.get("preferred_asset_count") or 0)
+    source_fallback = bool(release_state.get("source_repo_fallback"))
+    release_status = str(release_state.get("status") or "planned")
+    if runtime_registered:
+        return {
+            "id": "runtime_registered",
+            "label": "Runtime registered",
+            "reason": "A loopback runtime is already registered. Continue with account import, health check, and live acceptance.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check",
+        }
+    if installed and installed_verified:
+        return {
+            "id": "start_runtime",
+            "label": "Start verified runtime",
+            "reason": "A fixed release artifact is already installed and SHA256-verified.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/start-runtime",
+        }
+    if install_ready:
+        return {
+            "id": "install_release_candidate",
+            "label": "Install resolved release binary",
+            "reason": "A release asset has a matching SHA256 candidate. Install it before starting runtime.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/install-release-candidate",
+        }
+    if not resolve_release:
+        return {
+            "id": "resolve_release",
+            "label": "Resolve release and checksum",
+            "reason": "Default inspection is offline. Set resolve_release=true to read GitHub Release metadata and small checksum files.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan?resolve_release=true",
+        }
+    if preferred_assets:
+        return {
+            "id": "manual_sha256_required",
+            "label": "Provide SHA256 for release asset",
+            "reason": "A likely runtime asset exists, but no matching checksum file was found. Provide a trusted SHA256 manually.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/install-release",
+        }
+    if source_fallback or release_status in {"release_without_assets", "no_release"}:
+        return {
+            "id": "source_repo_reference",
+            "label": "Use source-repo reference path",
+            "reason": "No installable release binary was found. Source checkout is now allowed for protocol inspection, build input, or adapter rewrite.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync",
+        }
+    if source_ready:
+        return {
+            "id": "source_runtime_plan",
+            "label": "Inspect source runtime plan",
+            "reason": "A source checkout is already present. Inspect dependency, build, and launcher candidates before running anything.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan",
+        }
+    return {
+        "id": "inspect_release_assets",
+        "label": "Inspect release assets manually",
+        "reason": "Release metadata did not produce a directly installable runtime candidate. Confirm whether an asset can be used or move to source-repo only if needed.",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-checksums",
+    }
+
+
+def build_proxy_kernel_runtime_acquisition_plan(
+    db: Session,
+    provider_id: str,
+    *,
+    resolve_release: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+) -> dict[str, Any]:
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    contract = build_proxy_kernel_runtime_contract(db, provider_id)
+    source_repo = proxy_kernel_service.source_repo_status(provider_id)
+    release_state = build_proxy_kernel_release_checksums(
+        db,
+        provider_id,
+        dry_run=not bool(resolve_release),
+        max_checksum_bytes=max_checksum_bytes,
+    )
+    next_action = proxy_kernel_runtime_acquisition_next_action(
+        kernel=kernel,
+        release_state=release_state,
+        source_repo=source_repo,
+        resolve_release=bool(resolve_release),
+    )
+    source_repo_allowed = next_action.get("id") in {"source_repo_reference", "source_runtime_plan"} or bool(source_repo.get("is_git_repo"))
+    candidates = [item for item in release_state.get("resolved_sha256_candidates") or [] if isinstance(item, dict)]
+    unresolved_preferred = [item for item in release_state.get("unresolved_preferred_assets") or [] if isinstance(item, dict)]
+    preferred_candidate = next((item for item in candidates if item.get("preferred")), None) or (candidates[0] if candidates else {})
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    provider_path = f"/v1/admin/proxy-kernels/{provider_id}"
+    return {
+        "object": "media2api.proxy_kernel.runtime_acquisition_plan",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "repo": (kernel.get("spec") or {}).get("repo"),
+        "repo_url": (kernel.get("spec") or {}).get("repo_url"),
+        "resolve_release": bool(resolve_release),
+        "status": "ready_to_start" if next_action.get("id") in {"runtime_registered", "start_runtime"} else "action_required",
+        "next_action": next_action,
+        "decision": {
+            "preferred_path": "release_binary",
+            "actual_path": "source_repo_reference" if source_repo_allowed and next_action.get("id") in {"source_repo_reference", "source_runtime_plan"} else "release_binary",
+            "source_repo_allowed_now": bool(source_repo_allowed),
+            "source_repo_reason": "Allowed only because release binary is missing/insufficient or a checkout already exists for inspection." if source_repo_allowed else "Not allowed yet. Resolve Release first and prefer a fixed binary when possible.",
+            "requires_manual_sha256": next_action.get("id") == "manual_sha256_required",
+            "can_install_resolved_release": bool(preferred_candidate),
+            "downloaded_binaries": False,
+            "synced_source_repo": False,
+        },
+        "release": {
+            "status": release_state.get("status"),
+            "release": release_state.get("release") if isinstance(release_state.get("release"), dict) else {},
+            "asset_count": int(release_state.get("asset_count") or 0),
+            "runtime_asset_count": int(release_state.get("runtime_asset_count") or 0),
+            "preferred_asset_count": int(release_state.get("preferred_asset_count") or 0),
+            "checksum_asset_count": int(release_state.get("checksum_asset_count") or 0),
+            "install_ready_candidate_count": int(release_state.get("install_ready_candidate_count") or 0),
+            "preferred_candidate": preferred_candidate,
+            "unresolved_preferred_assets": unresolved_preferred,
+            "install_payload_template": preferred_candidate.get("install_payload_template") or (unresolved_preferred[0].get("manual_install_payload_template") if unresolved_preferred else {}),
+            "release_checksums": release_state,
+        },
+        "source_repo": {
+            "allowed_now": bool(source_repo_allowed),
+            "status": source_repo,
+            "sync_payload_template": {"ref": "", "force": False},
+            "runtime_plan_api": f"{provider_path}/source-runtime-plan",
+        },
+        "runtime_contract": {
+            "contract_ready": bool(contract.get("contract_ready")),
+            "contract_kind": (contract.get("adapter_contract") or {}).get("contract_kind"),
+            "submit_method": (contract.get("adapter_contract") or {}).get("submit_method"),
+            "health_endpoint": (contract.get("adapter_contract") or {}).get("health_endpoint"),
+            "endpoints": (contract.get("adapter_contract") or {}).get("endpoints") or {},
+            "image_operations": (contract.get("adapter_contract") or {}).get("image_operations") or [],
+            "video_operations": (contract.get("adapter_contract") or {}).get("video_operations") or [],
+            "auth_headers": (contract.get("auth_contract") or {}).get("header_names") or {},
+            "standard_payload_fields": (contract.get("adapter_contract") or {}).get("standard_payload_fields") or [],
+        },
+        "state": {
+            "installed_verified": bool(kernel.get("installed_verified")),
+            "runtime_registered": bool(kernel.get("runtime_registered")),
+            "runtime_loopback_only": bool(kernel.get("runtime_loopback_only")),
+            "runtime_base_url": kernel.get("runtime_base_url") or proxy_kernel_runtime_default_base_url(provider_id),
+            "process": kernel.get("process") if isinstance(kernel.get("process"), dict) else {},
+            "source_repo_synced": bool(source_repo.get("exists") and source_repo.get("is_git_repo")),
+        },
+        "commands": {
+            "inspect": f"curl -H \"Authorization: Bearer {admin_key}\" \"{base}{provider_path}/runtime-acquisition-plan?resolve_release=false\"",
+            "resolve_release": f"curl -H \"Authorization: Bearer {admin_key}\" \"{base}{provider_path}/runtime-acquisition-plan?resolve_release=true\"",
+            "release_checksums": f"curl -H \"Authorization: Bearer {admin_key}\" \"{base}{provider_path}/release-checksums\"",
+            "install_release_candidate": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}{provider_path}/install-release-candidate -d '{{\"dry_run\":false,\"resolve_release\":true}}'",
+            "manual_install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}{provider_path}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64-hex-sha256\"}}'",
+            "source_repo_sync": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}{provider_path}/source-repo/sync -d '{{\"ref\":\"\",\"force\":false}}'",
+            "source_runtime_plan": f"curl -H \"Authorization: Bearer {admin_key}\" {base}{provider_path}/source-runtime-plan",
+        },
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "downloaded_binaries": False,
+            "synced_source_repo": False,
+            "checksum_download_only": bool(resolve_release),
+            "max_checksum_bytes": max(1024, min(int(max_checksum_bytes or 1024 * 1024), 5 * 1024 * 1024)),
+            "managed_runtime_listener": "loopback_only",
+            "third_party_public_service": "forbidden",
+        },
+    }
+
+
+def proxy_kernel_runtime_acquisition_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    action_counts: dict[str, int] = {}
+    for row in rows:
+        action = str((row.get("next_action") or {}).get("id") or "unknown")
+        action_counts[action] = action_counts.get(action, 0) + 1
+    return {
+        "total": len(rows),
+        "ready_to_start": sum(1 for row in rows if row.get("status") == "ready_to_start"),
+        "can_install_resolved_release": sum(1 for row in rows if (row.get("decision") or {}).get("can_install_resolved_release")),
+        "requires_manual_sha256": sum(1 for row in rows if (row.get("decision") or {}).get("requires_manual_sha256")),
+        "source_repo_allowed_now": sum(1 for row in rows if (row.get("decision") or {}).get("source_repo_allowed_now")),
+        "runtime_registered": sum(1 for row in rows if (row.get("state") or {}).get("runtime_registered")),
+        "source_repo_synced": sum(1 for row in rows if (row.get("state") or {}).get("source_repo_synced")),
+        "next_action_counts": action_counts,
+    }
+
+
+def build_proxy_kernel_runtime_acquisition_plans(
+    db: Session,
+    provider_ids: list[str] | None = None,
+    *,
+    resolve_release: bool = False,
+    max_checksum_bytes: int = 1024 * 1024,
+) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [
+        build_proxy_kernel_runtime_acquisition_plan(
+            db,
+            provider_id,
+            resolve_release=resolve_release,
+            max_checksum_bytes=max_checksum_bytes,
+        )
+        for provider_id in selected
+    ]
+    return {
+        "object": "media2api.proxy_kernel.runtime_acquisition_plan.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "resolve_release": bool(resolve_release),
+        "summary": proxy_kernel_runtime_acquisition_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "downloaded_binaries": False,
+            "synced_source_repo": False,
+            "managed_runtime_listener": "loopback_only",
         },
     }
 

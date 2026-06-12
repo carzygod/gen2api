@@ -200,6 +200,13 @@ health check, live sample acceptance, then downstream user API Key. The
 dashboard renders both paths as stage cards instead of requiring operators to
 read raw JSON first, and those cards can jump to the matching account, runtime,
 or user-key workspace or run safe platform-side checks.
+For runtime acquisition, use
+`GET /v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan`. It
+answers the operator question directly: keep using the preferred Release
+binary path, install a checksum-resolved asset, manually supply SHA256, or only
+then fall back to `source-repo/` for protocol inspection/build/rewrite. The
+endpoint is read-only: even with `resolve_release=true` it only reads Release
+metadata and small checksum files, never downloads binaries or clones source.
 The production gap report is the stricter "can users actually use this now?"
 view: real account material, loopback runtime, health evidence, live sample
 acceptance, and a downstream user API key must all be present before a provider
