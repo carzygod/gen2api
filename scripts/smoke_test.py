@@ -175,7 +175,17 @@ def main() -> None:
         openai_handoff = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/operator-handoff", headers=headers))
         assert openai_handoff["object"] == "media2api.proxy_kernel.operator_handoff" and openai_handoff["provider_id"] == "openai_web_session", openai_handoff
         assert {"account_onboarding_inline_secret", "install_release", "start_runtime", "live_acceptance_dry_run"}.issubset(openai_handoff["submission_templates"]), openai_handoff
+        assert "operator_handoff_run" in openai_handoff["submission_templates"], openai_handoff
         assert openai_handoff["policy"]["read_only"] is True and openai_handoff["policy"]["release_binary_preferred"] is True, openai_handoff
+        handoff_run = assert_ok(
+            client.post(
+                "/v1/admin/proxy-kernels/openai_web_session/operator-handoff/run",
+                headers=headers,
+                json={"dry_run": True},
+            )
+        )
+        assert handoff_run["object"] == "media2api.proxy_kernel.operator_handoff_run" and handoff_run["dry_run"] is True, handoff_run
+        assert all(item["status"] == "planned" for item in handoff_run["results"]), handoff_run
         openai_runtime_delivery = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan", headers=headers))
         assert openai_runtime_delivery["object"] == "media2api.proxy_kernel.runtime_delivery_plan" and openai_runtime_delivery["provider_id"] == "openai_web_session", openai_runtime_delivery
         assert {"install_payload_template", "start_payload_template", "source_repo_payload_template"}.issubset(openai_runtime_delivery["runtime"]), openai_runtime_delivery
@@ -339,7 +349,7 @@ def main() -> None:
             assert kernel_live_acceptance_text in admin_page.text, kernel_live_acceptance_text
         for kernel_live_acceptance_dom in ["kernel-live-acceptance", "kernel-run-live-acceptance", "kernel-live-acceptance-mode", "kernel-live-acceptance-max-samples", "kernel-live-acceptance-operations", "/v1/admin/proxy-kernels/openai_web_session/live-acceptance", "/live-acceptance"]:
             assert kernel_live_acceptance_dom in admin_page.text, kernel_live_acceptance_dom
-        for kernel_handoff_dom in ["kernel-handoff-all", "kernel-handoff", "/v1/admin/proxy-kernels/operator-handoff", "/operator-handoff", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff"]:
+        for kernel_handoff_dom in ["kernel-handoff-all", "kernel-handoff", "kernel-run-handoff", "/v1/admin/proxy-kernels/operator-handoff", "/operator-handoff", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff/run", "/operator-handoff/run"]:
             assert kernel_handoff_dom in admin_page.text, kernel_handoff_dom
         for banned_oauth_copy in ["如果该平台没有官方 API Key 或公开 OAuth", "通用第三方连接器", "无公开获取入口", "Google OAuth 2.0 Playground", "https://developers.google.com/oauthplayground/", "https://bailian.console.aliyun.com/", "https://platform.openai.com/api-keys", "OpenAI API Keys", "refresh_token"]:
             assert banned_oauth_copy not in admin_page.text, banned_oauth_copy

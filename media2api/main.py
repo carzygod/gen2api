@@ -1280,6 +1280,18 @@ class ProxyKernelLiveAcceptanceRequest(BaseModel):
     require_production_ready: bool = False
 
 
+class ProxyKernelOperatorHandoffRunRequest(BaseModel):
+    dry_run: bool = True
+    steps: list[str] = Field(default_factory=list)
+    continue_on_error: bool = False
+    account_onboarding: dict[str, Any] = Field(default_factory=dict)
+    apply_routing: dict[str, Any] = Field(default_factory=dict)
+    install_release: dict[str, Any] = Field(default_factory=dict)
+    start_runtime: dict[str, Any] = Field(default_factory=dict)
+    runtime_health_check: dict[str, Any] = Field(default_factory=dict)
+    live_acceptance: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProxyKernelRuntimeStopRequest(BaseModel):
     grace_seconds: float = 5
 
@@ -7358,6 +7370,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run"),
     ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
     ("POST", "/v1/admin/proxy-kernels/install-release-candidates"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
@@ -7617,6 +7630,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run"),
                 ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
                 ("POST", "/v1/admin/proxy-kernels/install-release-candidates"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
@@ -13416,6 +13430,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 材料清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/materials-request"),
         ("全量交付包", "GET", "/v1/admin/proxy-kernels/operator-handoff"),
         ("OpenAI Web 交付包", "GET", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff"),
+        ("OpenAI Web 执行交付包", "POST", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff/run"),
         ("Loopback 合同自检", "POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
         ("OpenAI Web 运行时交付计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan"),
         ("OpenAI Web 运行合同", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-contract"),
@@ -14053,6 +14068,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
                   <button class="op" type="button" id="kernel-materials">查看材料清单</button>
                   <button class="op" type="button" id="kernel-handoff">查看交付包</button>
+                  <button class="op" type="button" id="kernel-run-handoff">执行交付包 dry-run</button>
                 </div>
               </div>
               <div class="kernel-rail">
@@ -14976,6 +14992,25 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           mergeKernelOperatorHandoffs(payload);
           return payload;
         }}
+        async function runKernelOperatorHandoff(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const hint = kernelHint(provider);
+          const template = hint.operator_handoff?.submission_templates?.operator_handoff_run || {{
+            dry_run: true,
+            steps: ['apply_routing', 'submit_account_material', 'install_release', 'start_runtime', 'runtime_health_check', 'live_acceptance_dry_run'],
+            continue_on_error: true,
+          }};
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/operator-handoff/run', 'POST', Object.assign({{}}, template, {{
+            dry_run: true,
+            continue_on_error: true,
+          }}));
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            operator_handoff_run: payload,
+          }});
+          renderKernelSummary(provider);
+          return payload;
+        }}
         async function runKernelLoopbackContractTest() {{
           return await callAdmin('/v1/admin/proxy-kernels/loopback-contract-test', 'POST', {{
             operations: ['text_to_image', 'image_edit', 'text_to_video'],
@@ -15724,6 +15759,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-handoff')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelOperatorHandoff();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-run-handoff')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await runKernelOperatorHandoff();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -19813,6 +19854,21 @@ def admin_proxy_kernel_operator_handoff(provider_id: str, ctx: AuthContext = Dep
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
 
+@app.post("/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run")
+def admin_proxy_kernel_operator_handoff_run(
+    provider_id: str,
+    req: ProxyKernelOperatorHandoffRunRequest = ProxyKernelOperatorHandoffRunRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return run_proxy_kernel_operator_handoff(db, provider_id, req, ctx)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "handoff_policy": "only finalized proxy kernel providers and known handoff steps may be executed"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan")
 def admin_proxy_kernel_runtime_delivery_plan(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -20782,6 +20838,16 @@ def build_proxy_kernel_operator_handoff(db: Session, provider_id: str) -> dict[s
     start_payload = (delivery.get("runtime") or {}).get("start_payload_template") or {}
     live_dry_payload = {"dry_run": True, "operations": list(template.operations), "run_runtime_health": True, "require_runtime_health": True, "run_samples": True, "max_samples": 1}
     live_payload = {**live_dry_payload, "dry_run": False}
+    run_payload = {
+        "dry_run": True,
+        "steps": ["apply_routing", "submit_account_material", "install_release", "start_runtime", "runtime_health_check", "live_acceptance_dry_run"],
+        "account_onboarding": onboarding_command_payload,
+        "apply_routing": (materials.get("routing_materials") or {}).get("apply_payload") or {},
+        "install_release": install_payload,
+        "start_runtime": start_payload,
+        "runtime_health_check": {"sync_provider_base_url": True, "require_running_process": False, "fail_on_health_check": False},
+        "live_acceptance": live_dry_payload,
+    }
     steps = [
         {
             "id": "apply_routing",
@@ -20834,6 +20900,15 @@ def build_proxy_kernel_operator_handoff(db: Session, provider_id: str) -> dict[s
             "command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{json.dumps(live_payload, ensure_ascii=False, separators=(',', ':'))}'",
             "quota_warning": "Live mode calls the real upstream runtime and may consume account quota.",
         },
+        {
+            "id": "run_handoff",
+            "label": "执行交付包 dry-run",
+            "status": "ready",
+            "operator_required": False,
+            "platform_can_run": True,
+            "payload_template": run_payload,
+            "command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run -d '{json.dumps(run_payload, ensure_ascii=False, separators=(',', ':'))}'",
+        },
     ]
     return {
         "object": "media2api.proxy_kernel.operator_handoff",
@@ -20852,6 +20927,7 @@ def build_proxy_kernel_operator_handoff(db: Session, provider_id: str) -> dict[s
             "start_runtime": start_payload,
             "live_acceptance_dry_run": live_dry_payload,
             "live_acceptance": live_payload,
+            "operator_handoff_run": run_payload,
         },
         "evidence": {
             "materials_request": materials,
@@ -20896,6 +20972,197 @@ def build_proxy_kernel_operator_handoffs(db: Session, provider_ids: list[str] | 
             "operator_question_count": sum(len(row.get("operator_questions") or []) for row in rows),
         },
         "data": rows,
+    }
+
+
+PROXY_KERNEL_HANDOFF_DEFAULT_STEPS = [
+    "apply_routing",
+    "submit_account_material",
+    "install_release",
+    "start_runtime",
+    "runtime_health_check",
+    "live_acceptance_dry_run",
+]
+
+
+def proxy_kernel_payload_has_placeholder(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        return any(
+            marker in lowered
+            for marker in [
+                "<",
+                ">",
+                "paste provider-specific",
+                "v x.y.z",
+                "vx.y.z",
+                "64-hex",
+                "release-asset-name",
+                "verified-artifact-path",
+                "example-linux",
+            ]
+        )
+    if isinstance(value, list):
+        return any(proxy_kernel_payload_has_placeholder(item) for item in value)
+    if isinstance(value, dict):
+        return any(proxy_kernel_payload_has_placeholder(item) for item in value.values())
+    return False
+
+
+def proxy_kernel_handoff_step_result(step: str, status: str, *, executed: bool = False, detail: dict[str, Any] | None = None, message: str = "") -> dict[str, Any]:
+    return {
+        "step": step,
+        "status": status,
+        "executed": executed,
+        "message": message,
+        "detail": detail or {},
+    }
+
+
+def run_proxy_kernel_operator_handoff(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelOperatorHandoffRunRequest,
+    ctx: AuthContext,
+) -> dict[str, Any]:
+    if provider_id not in PROVIDER_TEMPLATES:
+        raise KeyError(provider_id)
+    proxy_kernel_service.require_spec(provider_id)
+    handoff_before = build_proxy_kernel_operator_handoff(db, provider_id)
+    templates = handoff_before.get("submission_templates") or {}
+    requested_steps = [str(step).strip() for step in req.steps if str(step).strip()] or list(PROXY_KERNEL_HANDOFF_DEFAULT_STEPS)
+    allowed_steps = set(PROXY_KERNEL_HANDOFF_DEFAULT_STEPS + ["live_acceptance"])
+    unknown_steps = [step for step in requested_steps if step not in allowed_steps]
+    if unknown_steps:
+        raise ValueError("UNKNOWN_HANDOFF_STEPS:" + ",".join(unknown_steps))
+
+    payloads = {
+        "apply_routing": req.apply_routing or (templates.get("operator_handoff_run") or {}).get("apply_routing") or {},
+        "submit_account_material": req.account_onboarding or {},
+        "install_release": req.install_release or {},
+        "start_runtime": req.start_runtime or {},
+        "runtime_health_check": req.runtime_health_check or {"sync_provider_base_url": True, "require_running_process": False, "fail_on_health_check": False},
+        "live_acceptance_dry_run": {**(templates.get("live_acceptance_dry_run") or {}), **(req.live_acceptance or {})},
+        "live_acceptance": {**(templates.get("live_acceptance") or {}), **(req.live_acceptance or {})},
+    }
+    if not payloads["submit_account_material"]:
+        payloads["submit_account_material"] = templates.get("account_onboarding_inline_secret") or {}
+    if not payloads["install_release"]:
+        payloads["install_release"] = templates.get("install_release") or {}
+    if not payloads["start_runtime"]:
+        payloads["start_runtime"] = templates.get("start_runtime") or {}
+
+    results: list[dict[str, Any]] = []
+    for step in requested_steps:
+        payload = payloads.get(step) or {}
+        try:
+            if req.dry_run:
+                results.append(
+                    proxy_kernel_handoff_step_result(
+                        step,
+                        "planned",
+                        detail={"payload": payload, "has_placeholder": proxy_kernel_payload_has_placeholder(payload)},
+                        message="Dry-run only; no state was changed.",
+                    )
+                )
+                continue
+
+            if step == "apply_routing":
+                routing_req = ProxyKernelRoutingApplyRequest(**payload)
+                result = apply_proxy_kernel_routing(
+                    db,
+                    provider_id,
+                    status=routing_req.status,
+                    enable_mappings=routing_req.enable_mappings,
+                    priority_offset=routing_req.priority_offset,
+                    update_provider_base_url=routing_req.update_provider_base_url,
+                )
+                results.append(proxy_kernel_handoff_step_result(step, "executed", executed=True, detail=result))
+            elif step == "submit_account_material":
+                if proxy_kernel_payload_has_placeholder(payload):
+                    results.append(proxy_kernel_handoff_step_result(step, "skipped_placeholder", detail={"payload": payload}, message="Replace placeholder account material before live execution."))
+                    continue
+                account_req = AccountOnboardingRequest(**{**payload, "provider_id": provider_id})
+                result = apply_account_onboarding(db, account_req)
+                results.append(proxy_kernel_handoff_step_result(step, "executed", executed=True, detail=result))
+            elif step == "install_release":
+                if proxy_kernel_payload_has_placeholder(payload) or not str(payload.get("expected_sha256") or "").strip():
+                    results.append(proxy_kernel_handoff_step_result(step, "skipped_missing_material", detail={"payload": payload}, message="Provide release asset_name and expected_sha256 before live execution."))
+                    continue
+                install_req = ProxyKernelReleaseInstallRequest(**payload)
+                result = proxy_kernel_service.install_release(
+                    provider_id=provider_id,
+                    expected_sha256=install_req.expected_sha256,
+                    asset_name=install_req.asset_name,
+                    tag_name=install_req.tag_name,
+                    force=install_req.force,
+                )
+                results.append(proxy_kernel_handoff_step_result(step, "executed", executed=True, detail=result))
+            elif step == "start_runtime":
+                if proxy_kernel_payload_has_placeholder(payload) or not payload.get("command"):
+                    results.append(proxy_kernel_handoff_step_result(step, "skipped_missing_material", detail={"payload": payload}, message="Provide verified artifact path, command, base_url, and expected_sha256 before live execution."))
+                    continue
+                start_req = ProxyKernelRuntimeStartRequest(**payload)
+                result = admin_proxy_kernel_start_runtime(provider_id, start_req, ctx, db)
+                results.append(proxy_kernel_handoff_step_result(step, "executed", executed=True, detail=result))
+            elif step == "runtime_health_check":
+                health_req = ProxyKernelRuntimeHealthCheckRequest(**payload)
+                result = run_proxy_kernel_runtime_health_check(
+                    db,
+                    provider_id,
+                    sync_provider_base_url_value=health_req.sync_provider_base_url,
+                    require_running_process=health_req.require_running_process,
+                    fail_on_health_check=health_req.fail_on_health_check,
+                )
+                results.append(proxy_kernel_handoff_step_result(step, "executed", executed=True, detail=result))
+            elif step in {"live_acceptance_dry_run", "live_acceptance"}:
+                acceptance_payload = dict(payload)
+                if step == "live_acceptance_dry_run":
+                    acceptance_payload["dry_run"] = True
+                elif proxy_kernel_payload_has_placeholder(acceptance_payload):
+                    results.append(proxy_kernel_handoff_step_result(step, "skipped_placeholder", detail={"payload": acceptance_payload}, message="Replace placeholders before live acceptance."))
+                    continue
+                acceptance_req = ProxyKernelLiveAcceptanceRequest(**acceptance_payload)
+                result = run_proxy_kernel_live_acceptance(db, provider_id, acceptance_req, ctx)
+                results.append(proxy_kernel_handoff_step_result(step, "executed", executed=not acceptance_req.dry_run, detail=result))
+        except Exception as exc:
+            error_detail = {"error": str(getattr(exc, "detail", "") or exc), "type": type(exc).__name__}
+            results.append(proxy_kernel_handoff_step_result(step, "failed", detail=error_detail))
+            if not req.continue_on_error:
+                break
+
+    handoff_after = build_proxy_kernel_operator_handoff(db, provider_id)
+    return {
+        "object": "media2api.proxy_kernel.operator_handoff_run",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "dry_run": req.dry_run,
+        "requested_steps": requested_steps,
+        "results": results,
+        "ok": all(item.get("status") in {"planned", "executed", "skipped_placeholder", "skipped_missing_material"} for item in results),
+        "handoff_before": {
+            "status": handoff_before.get("status"),
+            "next_step": handoff_before.get("next_step"),
+            "operator_question_count": len(handoff_before.get("operator_questions") or []),
+        },
+        "handoff_after": {
+            "status": handoff_after.get("status"),
+            "next_step": handoff_after.get("next_step"),
+            "operator_question_count": len(handoff_after.get("operator_questions") or []),
+        },
+        "policy": {
+            "default_mode": "dry_run",
+            "dry_run_mutates_state": False,
+            "live_mode_requires_explicit_payloads": True,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+        },
     }
 
 
