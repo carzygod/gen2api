@@ -1285,6 +1285,20 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/account-materials-bulk"
 
 `account-materials-bulk` 默认不写库。只有 `summary.ready` 等于 `summary.total` 后，再把同一 payload 改成 `dry_run=false` 才会导入账号池；Gemini CLI OAuth 会继续走 runtime credential sync 预检/写入逻辑。
 
+生产解锁包用于回答“为了让最终生产验收不再 blocked，先接哪个真实账号”。它会按 `text_to_image`、`image_edit`、`text_to_video`、`image_to_video` 覆盖度排序，推荐最小 provider 集，并返回推荐 provider 的账号材料模板、runtime 状态和 live 验收命令。多个 provider 都能完整覆盖时，默认优先推荐 release/CLI/子进程路径更清晰的 Gemini CLI OAuth。该接口只读，不调用上游、不创建假账号：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/production-unblock-package" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+重点看：
+
+- `recommended_provider_ids`: 最小推荐接入集合；如果某个 provider 可完整覆盖四类操作，只会推荐一个。
+- `recommended[*].account_connection.copyable_request`: 可发给真实账号持有人的材料请求。
+- `account_connection_package.bulk_submission_json_template`: 推荐 provider 的批量预检模板。
+- `final_acceptance.blocked_by`: 当前生产阻塞原因，通常是 `authorized_external_connector_accounts`。
+
 账号材料预检用于把“我要粘什么”变成可校验的导入包。后台可在“反代内核 -> 启动执行器 -> 账号材料导入”卡片中直接读取模板、粘贴材料、预检和导入；API 也可以直接调用。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
 
 ```bash

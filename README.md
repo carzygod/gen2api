@@ -250,6 +250,14 @@ session and Gemini CLI OAuth materials to provide, plus a
 /v1/admin/proxy-kernels/account-materials-bulk` accepts that template after the
 operator replaces placeholders with real material; it defaults to dry-run and
 uses the same provider-specific validation as the single-provider import path.
+`GET /v1/admin/proxy-kernels/production-unblock-package` works backward from
+the final production acceptance requirement. It ranks finalized proxy kernels by
+coverage for `text_to_image`, `image_edit`, `text_to_video`, and
+`image_to_video`, recommends the smallest real-account path, and returns the
+matching account-material template, runtime status, and live-acceptance
+commands. When multiple providers cover every required operation, it prefers
+the clearest release/CLI/subprocess path first, currently Gemini CLI OAuth. It
+is read-only and does not create fake accounts.
 `GET/POST /v1/admin/proxy-kernels/{provider_id}/account-materials` gives the
 operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also

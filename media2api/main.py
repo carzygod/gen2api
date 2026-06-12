@@ -7533,6 +7533,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
     ("GET", "/v1/admin/proxy-kernels/account-connection-package"),
+    ("GET", "/v1/admin/proxy-kernels/production-unblock-package"),
     ("POST", "/v1/admin/proxy-kernels/account-materials-bulk"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
@@ -7818,6 +7819,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/account-connection-package"),
+                ("GET", "/v1/admin/proxy-kernels/production-unblock-package"),
                 ("POST", "/v1/admin/proxy-kernels/account-materials-bulk"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
@@ -13650,6 +13652,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("生产激活总控", "GET", "/v1/admin/proxy-kernels/production-activation-dashboard"),
         ("账号材料矩阵", "GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
         ("账号连接请求包", "GET", "/v1/admin/proxy-kernels/account-connection-package"),
+        ("生产解锁包", "GET", "/v1/admin/proxy-kernels/production-unblock-package"),
         ("账号材料批量预检", "POST", "/v1/admin/proxy-kernels/account-materials-bulk"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
@@ -13669,6 +13672,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量材料清单", "GET", "/v1/admin/proxy-kernels/materials-request"),
         ("账号材料矩阵", "GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
         ("账号连接请求包", "GET", "/v1/admin/proxy-kernels/account-connection-package"),
+        ("生产解锁包", "GET", "/v1/admin/proxy-kernels/production-unblock-package"),
         ("OpenAI Web 材料清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/materials-request"),
         ("全量交付包", "GET", "/v1/admin/proxy-kernels/operator-handoff"),
         ("OpenAI Web 交付包", "GET", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff"),
@@ -13745,6 +13749,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/production-activation-dashboard",
         "/v1/admin/proxy-kernels/account-materials-matrix",
         "/v1/admin/proxy-kernels/account-connection-package",
+        "/v1/admin/proxy-kernels/production-unblock-package",
         "/v1/admin/proxy-kernels/account-materials-bulk",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
@@ -13759,6 +13764,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/materials-request",
         "/v1/admin/proxy-kernels/account-materials-matrix",
         "/v1/admin/proxy-kernels/account-connection-package",
+        "/v1/admin/proxy-kernels/production-unblock-package",
         "/v1/admin/proxy-kernels/account-materials-bulk",
         "/v1/admin/proxy-kernels/openai_web_session/materials-request",
         "/v1/admin/proxy-kernels/loopback-contract-test",
@@ -14384,6 +14390,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="primary" type="button" id="kernel-production-activation-dashboard">生产激活总控</button>
                   <button class="op" type="button" id="kernel-account-materials-matrix">账号材料矩阵</button>
                   <button class="op" type="button" id="kernel-account-connection-package">账号连接请求包</button>
+                  <button class="op" type="button" id="kernel-production-unblock-package">生产解锁包</button>
                   <button class="op" type="button" id="kernel-go-live-package-all-status">全量上线包</button>
                   <button class="op" type="button" id="kernel-production-gap-report-all">生产缺口报告</button>
                   <button class="op" type="button" id="kernel-downstream-package-all">下游调用包</button>
@@ -15490,6 +15497,71 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function loadKernelAccountConnectionPackage() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/account-connection-package');
           renderKernelAccountConnectionPackage(payload);
+          return payload;
+        }}
+        function productionUnblockCandidateHtml(row, recommendedIds) {{
+          const isRecommended = recommendedIds.includes(row.provider_id);
+          const ops = Array.isArray(row.covered_operations) ? row.covered_operations : [];
+          const missing = Array.isArray(row.missing_operations) ? row.missing_operations : [];
+          const runtime = row.runtime || {{}};
+          const next = row.go_live_next_action || runtime.next_step || {{}};
+          return `
+            <div class="activation-provider-card">
+              <b>${{escapeHtml(row.provider_id || '-')}}</b>
+              <span class="activation-badge ${{row.complete_coverage ? 'done' : 'needs-input'}}">${{row.complete_coverage ? 'covers all' : 'partial'}}</span>
+              ${{isRecommended ? '<span class="activation-badge action-required">recommended</span>' : ''}}
+              <p>${{escapeHtml(row.name || row.selection_id || '')}}</p>
+              <div class="activation-meta">
+                <b>Coverage</b><span>${{escapeHtml(ops.join(', ') || '-')}}</span>
+                <b>Missing</b><span>${{escapeHtml(missing.join(', ') || 'none')}}</span>
+                <b>Accounts</b><span>${{Number(row.available_account_count || 0)}} / ${{Number(row.active_account_count || 0)}}</span>
+                <b>Runtime</b><span>${{escapeHtml(runtime.status || '-')}}</span>
+              </div>
+              <details style="margin-top:10px"><summary>Account request</summary><pre class="activation-json">${{escapeHtml(JSON.stringify(row.account_connection?.copyable_request || {{}}, null, 2))}}</pre></details>
+              <div class="activation-action-row">
+                <button class="primary" type="button" data-activation-action="open-account" data-provider-id="${{escapeHtml(row.provider_id || '')}}">Import account</button>
+                <button class="op" type="button" data-activation-action="open-runtime" data-provider-id="${{escapeHtml(row.provider_id || '')}}">Runtime</button>
+                <button class="op" type="button" data-activation-action="inspect-go-live-package" data-provider-id="${{escapeHtml(row.provider_id || '')}}">${{escapeHtml(next.label || 'Go live')}}</button>
+              </div>
+            </div>
+          `;
+        }}
+        function renderProductionUnblockPackage(payload) {{
+          const panel = document.getElementById('kernel-activation-overview');
+          if (!panel) return;
+          const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+          const recommended = Array.isArray(payload?.recommended_provider_ids) ? payload.recommended_provider_ids : [];
+          const summary = payload?.summary || {{}};
+          if (!candidates.length) {{
+            panel.innerHTML = '<div class="activation-empty">No production unblock candidates. Confirm finalized proxy kernels are initialized first.</div>';
+            return;
+          }}
+          panel.innerHTML = `
+            <div class="activation-head">
+              <div>
+                <h3>生产解锁包</h3>
+                <p>这一屏只服务一个问题：为了让最终验收从 blocked 变成可验收，先接哪个真实反代账号。它不会创建假账号，也不会调用上游。</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge">Candidates ${{Number(summary.candidate_count || candidates.length)}}</span>
+                <span class="activation-badge done">Full cover ${{Number(summary.complete_coverage_candidates || 0)}}</span>
+                <span class="activation-badge needs-input">Recommended ${{escapeHtml(recommended.join(', ') || '-')}}</span>
+              </div>
+            </div>
+            <div class="source-plan-grid">
+              <div class="source-plan-card"><b>Required</b><span>${{escapeHtml((payload.required_operations || []).join(', '))}}</span><code>AC-PROD-001</code></div>
+              <div class="source-plan-card"><b>Core</b><span>${{summary.core_ready ? 'ready' : 'not ready'}}</span><code>routing / queue / assets</code></div>
+              <div class="source-plan-card"><b>Production</b><span>${{summary.production_ready ? 'ready' : 'blocked'}}</span><code>real account required</code></div>
+              <div class="source-plan-card"><b>Boundary</b><span>no fake account</span><code>official SDK/API forbidden</code></div>
+            </div>
+            <details style="margin-top:12px"><summary>Recommended bulk submission template</summary><pre class="activation-json">${{escapeHtml(JSON.stringify(payload.account_connection_package?.bulk_submission_json_template || {{}}, null, 2))}}</pre></details>
+            <div class="activation-provider-grid" style="margin-top:12px">${{candidates.map(row => productionUnblockCandidateHtml(row, recommended)).join('')}}</div>
+          `;
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadProductionUnblockPackage() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/production-unblock-package');
+          renderProductionUnblockPackage(payload);
           return payload;
         }}
         function downstreamStatusLabel(status) {{
@@ -17690,6 +17762,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-account-connection-package')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelAccountConnectionPackage();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-production-unblock-package')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadProductionUnblockPackage();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -21867,6 +21945,17 @@ def admin_proxy_kernels_account_connection_package(provider_ids: str = "", ctx: 
         raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/production-unblock-package")
+def admin_proxy_kernels_production_unblock_package(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_production_unblock_package(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.post("/v1/admin/proxy-kernels/account-materials-bulk")
 def admin_proxy_kernels_account_materials_bulk(
     req: ProxyKernelAccountMaterialsBulkRequest,
@@ -24183,6 +24272,178 @@ def build_proxy_kernel_account_materials_bulk(
             "credential_value_echo": "redacted",
             "real_import_requires_dry_run_false": True,
             "no_fake_account_created": True,
+        },
+    }
+
+
+def proxy_kernel_production_unblock_priority(row: dict[str, Any]) -> int:
+    value = row.get("production_unblock_priority")
+    if value is None:
+        return 999
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 999
+
+
+def proxy_kernel_production_unblock_greedy(rows: list[dict[str, Any]], required_operations: set[str]) -> list[str]:
+    remaining = set(required_operations)
+    selected: list[str] = []
+    candidates = sorted(
+        rows,
+        key=lambda row: (
+            -len(set(row.get("covered_operations") or []) & remaining),
+            proxy_kernel_production_unblock_priority(row),
+            row.get("provider_id") or "",
+        ),
+    )
+    while remaining:
+        best = next((row for row in candidates if row.get("provider_id") not in selected and set(row.get("covered_operations") or []) & remaining), None)
+        if not best:
+            break
+        selected.append(str(best.get("provider_id") or ""))
+        remaining -= set(best.get("covered_operations") or [])
+    return selected
+
+
+def build_proxy_kernel_production_unblock_package(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    required_operations = set(PRODUCTION_EXTERNAL_REQUIRED_OPERATIONS)
+    preference = {
+        "gemini_cli_oauth": 0,
+        "gemini_web_session": 10,
+        "doubao_web_session": 20,
+        "qwen_ai_web_session": 30,
+        "qianwen_web_session": 31,
+        "antigravity": 40,
+        "openai_codex": 50,
+        "openai_web_session": 51,
+    }
+    matrix = build_proxy_kernel_account_materials_matrix(db, selected)
+    readiness = build_readiness_snapshot(db)
+    matrix_by_provider = {row.get("provider_id"): row for row in matrix.get("data") or []}
+    candidates: list[dict[str, Any]] = []
+    for provider_id in selected:
+        template = PROVIDER_TEMPLATES.get(provider_id)
+        if not template:
+            continue
+        operations = set(template.operations or [])
+        mapping_operations = {
+            operation
+            for mapping in template.mappings
+            for operation in getattr(mapping, "operations", [])
+        }
+        covered = sorted((operations | mapping_operations) & required_operations)
+        missing = sorted(required_operations - set(covered))
+        matrix_row = matrix_by_provider.get(provider_id) or {}
+        kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+        process = kernel.get("process") if isinstance(kernel.get("process"), dict) else {}
+        runtime_registered = bool(kernel.get("runtime_registered"))
+        runtime_loopback_only = bool(kernel.get("runtime_loopback_only"))
+        managed_process_running = bool(process.get("running"))
+        if runtime_registered and managed_process_running:
+            runtime_status = "running"
+        elif runtime_registered and runtime_loopback_only:
+            runtime_status = "registered"
+        elif runtime_registered:
+            runtime_status = "non_loopback_registered"
+        else:
+            runtime_status = "missing_runtime"
+        account_connection = proxy_kernel_account_connection_package_row(matrix_row)
+        complete_coverage = not missing
+        candidates.append(
+            {
+                "provider_id": provider_id,
+                "selection_id": matrix_row.get("selection_id"),
+                "name": matrix_row.get("name") or template.name,
+                "coverage_score": len(covered),
+                "complete_coverage": complete_coverage,
+                "production_unblock_priority": preference.get(provider_id, 999),
+                "covered_operations": covered,
+                "missing_operations": missing,
+                "account_ready": bool(matrix_row.get("account_ready")),
+                "active_account_count": int(matrix_row.get("active_account_count") or 0),
+                "available_account_count": int(matrix_row.get("available_account_count") or 0),
+                "route_config_ready": bool(matrix_row.get("route_config_ready")),
+                "runtime": {
+                    "status": runtime_status,
+                    "runtime_registered": bool(kernel.get("runtime_registered")),
+                    "runtime_loopback_only": bool(kernel.get("runtime_loopback_only")),
+                    "runtime_base_url": kernel.get("runtime_base_url") or "",
+                    "managed_process_running": managed_process_running,
+                    "installed_verified": bool(kernel.get("installed_verified")),
+                },
+                "account_connection": account_connection,
+                "go_live_next_action": {"label": "查看上线包", "id": "go_live_package"},
+                "commands": {
+                    "account_connection_package": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {settings.public_base_url}/v1/admin/proxy-kernels/account-connection-package?provider_ids={provider_id}",
+                    "runtime_delivery_plan": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {settings.public_base_url}/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan",
+                    "go_live_package": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {settings.public_base_url}/v1/admin/proxy-kernels/{provider_id}/go-live-package",
+                    "live_acceptance": f"curl -X POST -H \"Authorization: Bearer $MEDIA2API_API_KEY\" -H \"Content-Type: application/json\" {settings.public_base_url}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{{\"dry_run\":true,\"run_runtime_health\":true,\"require_runtime_health\":true,\"run_samples\":true,\"max_samples\":1}}'",
+                },
+            }
+        )
+    candidates.sort(key=lambda row: (not row.get("complete_coverage"), -int(row.get("coverage_score") or 0), proxy_kernel_production_unblock_priority(row), row.get("provider_id") or ""))
+    complete = [row for row in candidates if row.get("complete_coverage")]
+    recommended_provider_ids = [str(complete[0]["provider_id"])] if complete else proxy_kernel_production_unblock_greedy(candidates, required_operations)
+    recommended = [row for row in candidates if row.get("provider_id") in set(recommended_provider_ids)]
+    recommended_items = [
+        row.get("account_connection", {}).get("submission_item_template") or {}
+        for row in recommended
+        if row.get("account_connection", {}).get("submission_item_template")
+    ]
+    return {
+        "object": "media2api.proxy_kernel.production_unblock_package",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "blocked_by_real_account_material" if not readiness.get("production_ready") else "production_ready",
+        "required_operations": sorted(required_operations),
+        "recommended_provider_ids": recommended_provider_ids,
+        "summary": {
+            "candidate_count": len(candidates),
+            "complete_coverage_candidates": len(complete),
+            "recommended_count": len(recommended_provider_ids),
+            "production_ready": bool(readiness.get("production_ready")),
+            "core_ready": bool(readiness.get("core_ready")),
+        },
+        "recommended": recommended,
+        "candidates": candidates,
+        "account_connection_package": {
+            "object": "media2api.proxy_kernel.account_connection_package",
+            "summary": {
+                "total": len(recommended_items),
+                "needs_account_material": sum(1 for row in recommended if not row.get("account_ready")),
+            },
+            "bulk_submission_json_template": {
+                "dry_run": True,
+                "continue_on_error": True,
+                "items": recommended_items,
+            },
+        },
+        "final_acceptance": {
+            "blocked_by": "authorized_external_connector_accounts" if not readiness.get("production_ready") else "",
+            "core_ready": readiness.get("core_ready"),
+            "production_ready": readiness.get("production_ready"),
+            "action_items": [
+                item
+                for item in readiness.get("action_items", [])
+                if item.get("scope") == "production"
+            ],
+        },
+        "next_steps": [
+            "Pick one recommended provider with complete coverage, or use the greedy set if no single provider covers every required operation.",
+            "Send its account_connection copyable_request to the real account holder.",
+            "Replace placeholders in bulk_submission_json_template, run /account-materials-bulk with dry_run=true, then rerun with dry_run=false.",
+            "Install/register the loopback runtime, run runtime health, live acceptance, and downstream call package.",
+        ],
+        "policy": {
+            "read_only": True,
+            "upstream_calls": False,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "no_fake_account_created": True,
+            "real_account_material_required_for_production_ready": True,
         },
     }
 
