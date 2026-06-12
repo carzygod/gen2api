@@ -30,6 +30,7 @@ var/
 assets/
 downloads/
 remote-example-downloads/
+source-repo/
 *.db
 *.sqlite
 *.sqlite3
@@ -63,4 +64,3 @@ pnpm-debug.log*
 *.tar
 *.tar.gz
 *.zip
-

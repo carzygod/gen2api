@@ -1307,6 +1307,14 @@ class ProxyKernelSourceRepoSyncRequest(BaseModel):
     force: bool = False
 
 
+class ProxyKernelBulkSourceRepoSyncRequest(ProxyKernelSourceRepoSyncRequest):
+    provider_ids: list[str] = Field(default_factory=list)
+    dry_run: bool = True
+    only_when_needed: bool = True
+    resolve_release: bool = True
+    continue_on_error: bool = True
+
+
 class ProxyKernelRoutingApplyRequest(BaseModel):
     status: str = "active"
     enable_mappings: bool = True
@@ -1329,6 +1337,10 @@ class ProxyKernelLiveWorkspaceRequest(BaseModel):
     include_release_candidates: bool = True
     resolve_release_candidates: bool = False
     install_release_candidates: bool = False
+    sync_source_repos: bool = False
+    sync_source_repos_only_when_needed: bool = True
+    resolve_source_repo_release_state: bool = False
+    force_source_repo_sync: bool = False
     run_loopback_contract: bool = False
     continue_on_error: bool = True
 
@@ -7399,6 +7411,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
+    ("POST", "/v1/admin/proxy-kernels/source-repo/sync"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
     ("GET", "/v1/admin/account-guides"),
@@ -7641,6 +7654,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run"),
                 ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
                 ("POST", "/v1/admin/proxy-kernels/install-release-candidates"),
+                ("POST", "/v1/admin/proxy-kernels/source-repo/sync"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
@@ -14166,7 +14180,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <h2>source-repo 源码参考</h2>
                   <p class="note">优先使用 release 二进制。只有 release 不存在、资产不可用、需要确认协议，或需要重写 adapter 时，才把定型仓库同步到 `source-repo/`。</p>
                 </div>
-                <button class="op" type="button" id="kernel-source-status">查看源码状态</button>
+                <div class="ops">
+                  <button class="op" type="button" id="kernel-source-status">查看源码状态</button>
+                  <button class="op" type="button" id="kernel-source-sync-needed-plan">source-repo 缺口计划</button>
+                  <button class="primary" type="button" id="kernel-source-sync-needed">同步需要源码参考</button>
+                </div>
               </div>
               <div class="kernel-rail">
                 <div>
@@ -14530,6 +14548,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const runtimePlan = hint.runtime_delivery_plan || {{}};
           const releaseProbe = hint.release_probe || {{}};
           const releaseChecksums = hint.release_checksums || {{}};
+          const sourceSync = hint.source_repo_sync || {{}};
           const runtimeContract = hint.runtime_contract || {{}};
           const productionReadiness = hint.production_readiness || {{}};
           const liveWorkspace = hint.live_workspace || {{}};
@@ -14564,6 +14583,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>上线清单</dt><dd>${{escapeHtml(goLive.status || '未读取')}}${{goLive.next_step?.label ? ' · 下一步：' + escapeHtml(goLive.next_step.label) : ''}}</dd>
               <dt>材料清单</dt><dd>${{escapeHtml(materials.status || '未读取')}}${{materials.next_step?.label ? ' · 下一步：' + escapeHtml(materials.next_step.label) : ''}}</dd>
               <dt>source-repo</dt><dd class="kernel-path-note">${{source.exists ? escapeHtml(source.path || '已同步') : escapeHtml(source.path || '未同步')}}</dd>
+              <dt>源码兜底</dt><dd>${{escapeHtml(sourceSync.status || '未计划')}}${{sourceSync.reason ? ' · ' + escapeHtml(sourceSync.reason) : ''}}</dd>
             </dl>
             ${{blockerHtml}}
           `;
@@ -14693,6 +14713,30 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (output) output.textContent = JSON.stringify(response, null, 2);
           renderKernelSummary(provider);
         }}
+        async function syncNeededKernelSourceRepos(dryRun = true) {{
+          const payload = {{
+            dry_run: Boolean(dryRun),
+            only_when_needed: true,
+            resolve_release: true,
+            force: false,
+            continue_on_error: true,
+            provider_ids: [],
+          }};
+          const response = await callAdmin('/v1/admin/proxy-kernels/source-repo/sync', 'POST', payload);
+          const rows = Array.isArray(response.data) ? response.data : [];
+          rows.forEach(item => {{
+            const provider = item.provider_id;
+            if (!provider) return;
+            proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+              source_repo: item.source_repo_after || item.source_repo_before || kernelHint(provider).source_repo || {{}},
+              source_repo_sync: item,
+            }});
+          }});
+          const output = document.getElementById('kernel-source-output') || result;
+          if (output) output.textContent = JSON.stringify(response, null, 2);
+          renderKernelSummary(selectedKernelProvider());
+          return response;
+        }}
         async function loadKernelRoutingPlan(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
           syncKernelSelects(provider);
@@ -14768,6 +14812,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }}
         function mergeKernelLiveWorkspace(payload) {{
           const rows = Array.isArray(payload?.data) ? payload.data : [];
+          const sourceRows = Array.isArray(payload?.source_repo_sync?.data) ? payload.source_repo_sync.data : [];
+          sourceRows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              source_repo: item.source_repo_after || item.source_repo_before || kernelHint(item.provider_id).source_repo || {{}},
+              source_repo_sync: item,
+            }});
+          }});
           rows.filter(item => item?.provider_id).forEach(item => {{
             const evidence = item.evidence || {{}};
             proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
@@ -14793,6 +14844,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             include_release_candidates: true,
             resolve_release_candidates: false,
             install_release_candidates: false,
+            sync_source_repos: true,
+            sync_source_repos_only_when_needed: true,
+            resolve_source_repo_release_state: true,
+            force_source_repo_sync: false,
             run_loopback_contract: false,
             continue_on_error: true,
           }});
@@ -15815,6 +15870,18 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-source-sync')?.addEventListener('click', async () => {{
           try {{ await syncKernelSourceRepo(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-sync-needed-plan')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await syncNeededKernelSourceRepos(true);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-sync-needed')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await syncNeededKernelSourceRepos(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('open-oauth-guide')?.addEventListener('click', () => {{
           document.getElementById('oauth-guide')?.classList.add('open');
@@ -19831,6 +19898,20 @@ def admin_proxy_kernels_install_release_candidates(
         raise HTTPException(status_code=400, detail={"error": str(exc), "hash_policy": "only checksum-resolved release candidates may be installed without a manually supplied SHA256"}) from exc
 
 
+@app.post("/v1/admin/proxy-kernels/source-repo/sync")
+def admin_proxy_kernels_source_repo_sync(
+    req: ProxyKernelBulkSourceRepoSyncRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_source_repo_sync_matrix(db, req)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "source_repo_policy": "only finalized kernel repositories may be cloned into source-repo, and release binaries remain preferred"}) from exc
+
+
 @app.post("/v1/admin/proxy-kernels/live-workspace")
 def admin_proxy_kernels_live_workspace(
     req: ProxyKernelLiveWorkspaceRequest,
@@ -22305,6 +22386,138 @@ def build_proxy_kernel_release_candidate_install_matrix(
     }
 
 
+def proxy_kernel_source_repo_sync_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "total": len(rows),
+        "planned": status_counts.get("planned", 0),
+        "synced": status_counts.get("synced", 0),
+        "skipped": status_counts.get("skipped", 0),
+        "failed": status_counts.get("failed", 0),
+        "needs_release_resolution": status_counts.get("needs_release_resolution", 0),
+        "source_repo_ready": sum(1 for row in rows if (row.get("source_repo_after") or row.get("source_repo_before") or {}).get("is_git_repo")),
+        "status_counts": status_counts,
+    }
+
+
+def build_proxy_kernel_source_repo_sync_matrix(
+    db: Session,
+    req: ProxyKernelBulkSourceRepoSyncRequest,
+) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, req.provider_ids)
+    rows: list[dict[str, Any]] = []
+    for provider_id in selected:
+        source_before = proxy_kernel_service.source_repo_status(provider_id)
+        release_state: dict[str, Any] = {}
+        should_sync = True
+        skip_reason = ""
+        try:
+            if req.only_when_needed:
+                if req.resolve_release:
+                    release_state = build_proxy_kernel_release_checksums(db, provider_id, dry_run=False)
+                    should_sync = bool(release_state.get("source_repo_fallback"))
+                    if not should_sync:
+                        next_step = release_state.get("next_step") if isinstance(release_state.get("next_step"), dict) else {}
+                        skip_reason = str(next_step.get("reason") or next_step.get("id") or "release path is still preferred")
+                else:
+                    should_sync = False
+                    skip_reason = "resolve_release=false; source-repo need was not evaluated."
+            if req.dry_run:
+                status = "planned" if should_sync else ("needs_release_resolution" if req.only_when_needed and not req.resolve_release else "skipped")
+                rows.append({
+                    "object": "media2api.proxy_kernel.source_repo_sync",
+                    "provider_id": provider_id,
+                    "dry_run": True,
+                    "status": status,
+                    "will_sync": bool(should_sync),
+                    "reason": "release has no installable asset; source-repo is the fallback." if should_sync else skip_reason,
+                    "source_repo_before": source_before,
+                    "source_repo_after": source_before,
+                    "release_state": {
+                        "status": release_state.get("status"),
+                        "next_step": release_state.get("next_step"),
+                        "source_repo_fallback": release_state.get("source_repo_fallback"),
+                        "preferred_asset_count": release_state.get("preferred_asset_count"),
+                        "install_ready_candidate_count": release_state.get("install_ready_candidate_count"),
+                    } if release_state else {},
+                })
+                continue
+            if not should_sync:
+                rows.append({
+                    "object": "media2api.proxy_kernel.source_repo_sync",
+                    "provider_id": provider_id,
+                    "dry_run": False,
+                    "status": "skipped",
+                    "will_sync": False,
+                    "reason": skip_reason,
+                    "source_repo_before": source_before,
+                    "source_repo_after": source_before,
+                    "release_state": {
+                        "status": release_state.get("status"),
+                        "next_step": release_state.get("next_step"),
+                        "source_repo_fallback": release_state.get("source_repo_fallback"),
+                        "preferred_asset_count": release_state.get("preferred_asset_count"),
+                        "install_ready_candidate_count": release_state.get("install_ready_candidate_count"),
+                    } if release_state else {},
+                })
+                continue
+            source_after = proxy_kernel_service.sync_source_repo(provider_id, ref=req.ref, force=req.force)
+            rows.append({
+                "object": "media2api.proxy_kernel.source_repo_sync",
+                "provider_id": provider_id,
+                "dry_run": False,
+                "status": "synced",
+                "will_sync": True,
+                "reason": "source-repo synced because release binary is missing or insufficient.",
+                "source_repo_before": source_before,
+                "source_repo_after": source_after,
+                "release_state": {
+                    "status": release_state.get("status"),
+                    "next_step": release_state.get("next_step"),
+                    "source_repo_fallback": release_state.get("source_repo_fallback"),
+                    "preferred_asset_count": release_state.get("preferred_asset_count"),
+                    "install_ready_candidate_count": release_state.get("install_ready_candidate_count"),
+                } if release_state else {},
+            })
+        except Exception as exc:
+            if not req.continue_on_error:
+                raise
+            rows.append({
+                "object": "media2api.proxy_kernel.source_repo_sync",
+                "provider_id": provider_id,
+                "dry_run": bool(req.dry_run),
+                "status": "failed",
+                "will_sync": bool(should_sync),
+                "error": exc.__class__.__name__,
+                "message": str(exc),
+                "source_repo_before": source_before,
+                "source_repo_after": source_before,
+                "release_state": release_state,
+            })
+    return {
+        "object": "media2api.proxy_kernel.source_repo_sync_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "dry_run": bool(req.dry_run),
+        "provider_ids": selected,
+        "summary": proxy_kernel_source_repo_sync_matrix_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": bool(req.dry_run),
+            "release_binary_first": True,
+            "only_when_needed": bool(req.only_when_needed),
+            "resolve_release": bool(req.resolve_release),
+            "allowlist_only": True,
+            "source_repo_root": str(settings.source_repo_dir),
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "purpose": "protocol inspection, local build input, or platform-native adapter rewrite when release binaries are missing or insufficient",
+        },
+    }
+
+
 def proxy_kernel_live_workspace_row(db: Session, provider_id: str) -> dict[str, Any]:
     delivery = build_proxy_kernel_runtime_delivery_plan(db, provider_id)
     readiness = build_proxy_kernel_production_readiness(db, provider_id)
@@ -22415,6 +22628,26 @@ def build_proxy_kernel_live_workspace(
         )
         release_candidate_matrix = build_proxy_kernel_release_candidate_install_matrix(db, candidate_req)
 
+    source_repo_sync: dict[str, Any] = {
+        "status": "skipped",
+        "dry_run": True,
+        "data": [],
+        "summary": {},
+    }
+    if req.sync_source_repos:
+        source_repo_sync = build_proxy_kernel_source_repo_sync_matrix(
+            db,
+            ProxyKernelBulkSourceRepoSyncRequest(
+                provider_ids=selected,
+                ref="",
+                force=bool(req.force_source_repo_sync),
+                dry_run=bool(req.dry_run),
+                only_when_needed=bool(req.sync_source_repos_only_when_needed),
+                resolve_release=bool(req.resolve_source_repo_release_state),
+                continue_on_error=bool(req.continue_on_error),
+            ),
+        )
+
     loopback_contract: dict[str, Any] = {"status": "skipped", "dry_run": bool(req.dry_run)}
     if req.run_loopback_contract:
         if req.dry_run:
@@ -22440,6 +22673,7 @@ def build_proxy_kernel_live_workspace(
         "summary": proxy_kernel_live_workspace_summary(rows),
         "routing": route_result,
         "release_candidates": release_candidate_matrix,
+        "source_repo_sync": source_repo_sync,
         "loopback_contract": loopback_contract,
         "data": rows,
         "next_actions": [

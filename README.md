@@ -180,6 +180,8 @@ inspection, bulk no-fake-account provider/model mapping application, material
 request checklists, runtime delivery plans, release probe matrices, release
 checksum candidate matrices, checksum-resolved release candidate installation,
 bulk release candidate install planning, hash-verified release archive extraction,
+bulk source-repo fallback planning/sync for repositories without installable
+release assets,
 live workspace dry-run preflight, self-recording runtime health checks,
 provider-level live acceptance dry-runs, operator handoff packages, safe
 operator handoff dry-run runners, loopback
