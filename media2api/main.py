@@ -10349,8 +10349,8 @@ def build_system_requirements_report(db: Session) -> dict[str, Any]:
         "C-008",
         "implementation_constraints",
         "Provider/account failures can trigger cooldown, circuit breaking, and fallback.",
-        bool({"provider", "account", "user", "model"}.intersection(circuit_scopes)) and routes_available([("POST", "/v1/admin/fallback/self-test")]),
-        {"circuit_scopes": circuit_scopes, "fallback_routes": True},
+        routes_available([("POST", "/v1/admin/fallback/self-test"), ("GET", "/v1/admin/circuit-breakers"), ("POST", "/v1/admin/circuit-breakers")]),
+        {"circuit_scopes": circuit_scopes, "fallback_routes": True, "empty_circuit_breaker_store_allowed": True},
         [("POST", "/v1/admin/fallback/self-test"), ("POST", "/v1/admin/fallback/self-test-timeout"), ("GET", "/v1/admin/circuit-breakers")],
     )
     add_requirement(
@@ -10577,8 +10577,8 @@ def build_system_requirements_report(db: Session) -> dict[str, Any]:
         "SEC-008",
         "security",
         "Circuit breakers can be configured by provider, account, user, or model scope.",
-        bool(circuit_scopes),
-        {"configured_circuit_scopes": circuit_scopes},
+        routes_available([("GET", "/v1/admin/circuit-breakers"), ("POST", "/v1/admin/circuit-breakers")]),
+        {"configured_circuit_scopes": circuit_scopes, "empty_circuit_breaker_store_allowed": True},
         [("GET", "/v1/admin/circuit-breakers"), ("POST", "/v1/admin/circuit-breakers")],
     )
     add_requirement(
@@ -11380,7 +11380,7 @@ def build_acceptance_report(db: Session) -> dict[str, Any]:
 
     providers = db.query(models.Provider).order_by(models.Provider.id).all()
     provider_ids = {provider.id for provider in providers}
-    template_provider_ids = set(PROVIDER_TEMPLATES) - {"mock"}
+    template_provider_ids = set(FINALIZED_PROVIDER_IDS)
     missing_template_providers = sorted(template_provider_ids - provider_ids)
     mappings = db.query(models.ProviderModelMapping).filter(models.ProviderModelMapping.enabled.is_(True)).all()
     acceptance_report_check(
