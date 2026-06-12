@@ -6618,6 +6618,357 @@ def disable_stability_acceptance_context(db: Session, ctx: AuthContext) -> None:
     db.commit()
 
 
+def record_stability_mock_fixture_original(fixture: dict[str, Any], key: str, item: Any, fields: list[str]) -> None:
+    if key in fixture["original"]:
+        return
+    fixture["original"][key] = {field: getattr(item, field) for field in fields}
+
+
+def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
+    fixture: dict[str, Any] = {
+        "ids": {
+            "provider_id": "mock",
+            "account_id": "acct_mock_default",
+            "model_id": "t2i-fast",
+            "mapping_id": "t2i-fast:mock:mock-image-fast",
+            "pricing_rule_id": "price_t2i_fast",
+            "alert_rule_id": "alert_account_cooldown",
+        },
+        "created": [],
+        "original": {},
+    }
+    operation = "text_to_image"
+    provider_model = "mock-image-fast"
+
+    provider = db.get(models.Provider, "mock")
+    if provider:
+        record_stability_mock_fixture_original(fixture, "provider:mock", provider, ["name", "adapter_type", "status", "base_config_json", "notes"])
+        provider.name = "Mock Provider"
+        provider.adapter_type = "mock"
+        provider.status = "active"
+        provider.base_config_json = dumps({})
+        provider.notes = "Local deterministic T2I provider enabled temporarily by the stability acceptance suite."
+    else:
+        provider = models.Provider(
+            id="mock",
+            name="Mock Provider",
+            adapter_type="mock",
+            status="active",
+            base_config_json=dumps({}),
+            notes="Local deterministic T2I provider enabled temporarily by the stability acceptance suite.",
+        )
+        db.add(provider)
+        fixture["created"].append("provider:mock")
+
+    model = db.get(models.LogicalModel, "t2i-fast")
+    if model:
+        record_stability_mock_fixture_original(
+            fixture,
+            "model:t2i-fast",
+            model,
+            ["display_name", "operations_json", "constraints_json", "default_params_json", "billing_class", "enabled"],
+        )
+        model.display_name = "T2I Fast"
+        model.operations_json = dumps([operation])
+        model.constraints_json = dumps({"max_prompt_length": 8000, "supports_asset_ids": True})
+        model.default_params_json = dumps({"quality": "standard"})
+        model.billing_class = "image_fast"
+        model.enabled = True
+    else:
+        model = models.LogicalModel(
+            id="t2i-fast",
+            display_name="T2I Fast",
+            operations_json=dumps([operation]),
+            constraints_json=dumps({"max_prompt_length": 8000, "supports_asset_ids": True}),
+            default_params_json=dumps({"quality": "standard"}),
+            billing_class="image_fast",
+            enabled=True,
+        )
+        db.add(model)
+        fixture["created"].append("model:t2i-fast")
+
+    db.flush()
+
+    mapping = db.get(models.ProviderModelMapping, "t2i-fast:mock:mock-image-fast")
+    if mapping:
+        record_stability_mock_fixture_original(
+            fixture,
+            "mapping:t2i-fast:mock:mock-image-fast",
+            mapping,
+            [
+                "logical_model",
+                "provider_id",
+                "provider_model",
+                "operations_json",
+                "priority",
+                "weight",
+                "cost_score",
+                "speed_score",
+                "quality_score",
+                "reliability_score",
+                "enabled",
+            ],
+        )
+        mapping.logical_model = "t2i-fast"
+        mapping.provider_id = "mock"
+        mapping.provider_model = provider_model
+        mapping.operations_json = dumps([operation])
+        mapping.priority = 1
+        mapping.weight = 1
+        mapping.cost_score = 0.9
+        mapping.speed_score = 0.95
+        mapping.quality_score = 0.5
+        mapping.reliability_score = 0.95
+        mapping.enabled = True
+    else:
+        mapping = models.ProviderModelMapping(
+            id="t2i-fast:mock:mock-image-fast",
+            logical_model="t2i-fast",
+            provider_id="mock",
+            provider_model=provider_model,
+            operations_json=dumps([operation]),
+            priority=1,
+            weight=1,
+            cost_score=0.9,
+            speed_score=0.95,
+            quality_score=0.5,
+            reliability_score=0.95,
+            enabled=True,
+        )
+        db.add(mapping)
+        fixture["created"].append("mapping:t2i-fast:mock:mock-image-fast")
+
+    account = db.get(models.AccountResource, "acct_mock_default")
+    if account:
+        record_stability_mock_fixture_original(
+            fixture,
+            "account:acct_mock_default",
+            account,
+            [
+                "provider_id",
+                "label",
+                "resource_type",
+                "credential_ref",
+                "resource_profile_json",
+                "supported_operations_json",
+                "supported_provider_models_json",
+                "quota_buckets_json",
+                "concurrency_limit",
+                "current_leases",
+                "health_score",
+                "failure_score",
+                "region",
+                "plan",
+                "status",
+                "last_error_code",
+                "last_error_message",
+                "last_failed_at",
+                "last_health_check_at",
+            ],
+        )
+        account.provider_id = "mock"
+        account.label = "Mock Default Account"
+        account.resource_type = "mock"
+        account.credential_ref = "public://mock/stability-acceptance-suite"
+        account.resource_profile_json = dumps({"scope": "stability_acceptance_suite"})
+        account.supported_operations_json = dumps([operation])
+        account.supported_provider_models_json = dumps([provider_model])
+        account.quota_buckets_json = dumps([{"type": "credits", "remaining_estimate": 999999, "confidence": 1.0}])
+        account.concurrency_limit = max(int(account.concurrency_limit or 0), 100)
+        account.health_score = 1.0
+        account.failure_score = 0.0
+        account.region = ""
+        account.plan = "mock"
+        account.status = "active"
+        account.last_error_code = ""
+        account.last_error_message = ""
+        account.last_failed_at = None
+        account.last_health_check_at = datetime.utcnow()
+    else:
+        account = models.AccountResource(
+            id="acct_mock_default",
+            provider_id="mock",
+            label="Mock Default Account",
+            resource_type="mock",
+            credential_ref="public://mock/stability-acceptance-suite",
+            resource_profile_json=dumps({"scope": "stability_acceptance_suite"}),
+            supported_operations_json=dumps([operation]),
+            supported_provider_models_json=dumps([provider_model]),
+            quota_buckets_json=dumps([{"type": "credits", "remaining_estimate": 999999, "confidence": 1.0}]),
+            concurrency_limit=100,
+            current_leases=0,
+            health_score=1.0,
+            failure_score=0.0,
+            region="",
+            plan="mock",
+            status="active",
+            last_health_check_at=datetime.utcnow(),
+        )
+        db.add(account)
+        fixture["created"].append("account:acct_mock_default")
+
+    pricing_rule = db.get(models.PricingRule, "price_t2i_fast")
+    if pricing_rule:
+        record_stability_mock_fixture_original(
+            fixture,
+            "pricing_rule:price_t2i_fast",
+            pricing_rule,
+            [
+                "name",
+                "logical_model",
+                "billing_class",
+                "operation",
+                "unit",
+                "base_amount",
+                "unit_amount",
+                "input_asset_amount",
+                "provider_cost_base",
+                "provider_cost_unit",
+                "provider_cost_input_asset",
+                "quality_multipliers_json",
+                "currency",
+                "enabled",
+            ],
+        )
+        pricing_rule.name = "T2I Fast default"
+        pricing_rule.logical_model = "t2i-fast"
+        pricing_rule.billing_class = "image_fast"
+        pricing_rule.operation = operation
+        pricing_rule.unit = "image"
+        pricing_rule.base_amount = 0
+        pricing_rule.unit_amount = 10
+        pricing_rule.input_asset_amount = 0
+        pricing_rule.provider_cost_base = 0
+        pricing_rule.provider_cost_unit = 2
+        pricing_rule.provider_cost_input_asset = 0
+        pricing_rule.quality_multipliers_json = dumps({"standard": 1, "high": 2, "pro": 2, "hd": 2})
+        pricing_rule.currency = "credits"
+        pricing_rule.enabled = True
+    else:
+        pricing_rule = models.PricingRule(
+            id="price_t2i_fast",
+            name="T2I Fast default",
+            logical_model="t2i-fast",
+            billing_class="image_fast",
+            operation=operation,
+            unit="image",
+            base_amount=0,
+            unit_amount=10,
+            input_asset_amount=0,
+            provider_cost_base=0,
+            provider_cost_unit=2,
+            provider_cost_input_asset=0,
+            quality_multipliers_json=dumps({"standard": 1, "high": 2, "pro": 2, "hd": 2}),
+            currency="credits",
+            enabled=True,
+        )
+        db.add(pricing_rule)
+        fixture["created"].append("pricing_rule:price_t2i_fast")
+
+    alert_rule = db.get(models.AlertRule, "alert_account_cooldown")
+    if alert_rule:
+        record_stability_mock_fixture_original(
+            fixture,
+            "alert_rule:alert_account_cooldown",
+            alert_rule,
+            ["name", "event_type", "severity", "condition_json", "enabled"],
+        )
+        alert_rule.name = "Account cooldown"
+        alert_rule.event_type = "account_status"
+        alert_rule.severity = "warning"
+        alert_rule.condition_json = dumps({"statuses": ["cooldown"]})
+        alert_rule.enabled = True
+    else:
+        alert_rule = models.AlertRule(
+            id="alert_account_cooldown",
+            name="Account cooldown",
+            event_type="account_status",
+            severity="warning",
+            condition_json=dumps({"statuses": ["cooldown"]}),
+            enabled=True,
+        )
+        db.add(alert_rule)
+        fixture["created"].append("alert_rule:alert_account_cooldown")
+
+    db.commit()
+    return fixture
+
+
+def restore_stability_mock_fixture(db: Session, fixture: dict[str, Any] | None, delete_created: bool, commit: bool = True) -> dict[str, Any]:
+    if not fixture:
+        return {"enabled": False, "deleted": {}, "restored": {}, "retained_disabled": {}}
+
+    created = set(fixture.get("created") or [])
+    original = fixture.get("original") if isinstance(fixture.get("original"), dict) else {}
+    cleanup = {
+        "enabled": True,
+        "delete_created": delete_created,
+        "deleted": {"mappings": 0, "pricing_rules": 0, "accounts": 0, "models": 0, "providers": 0, "alert_rules": 0},
+        "restored": {},
+        "retained_disabled": {},
+    }
+
+    def restore_object(key: str, model_type: Any, item_id: str) -> None:
+        values = original.get(key)
+        if not isinstance(values, dict):
+            return
+        item = db.get(model_type, item_id)
+        if not item:
+            return
+        for field, value in values.items():
+            setattr(item, field, value)
+        cleanup["restored"][key] = sorted(values.keys())
+
+    restore_object("provider:mock", models.Provider, "mock")
+    restore_object("model:t2i-fast", models.LogicalModel, "t2i-fast")
+    restore_object("mapping:t2i-fast:mock:mock-image-fast", models.ProviderModelMapping, "t2i-fast:mock:mock-image-fast")
+    restore_object("account:acct_mock_default", models.AccountResource, "acct_mock_default")
+    restore_object("pricing_rule:price_t2i_fast", models.PricingRule, "price_t2i_fast")
+    restore_object("alert_rule:alert_account_cooldown", models.AlertRule, "alert_account_cooldown")
+
+    if delete_created:
+        for key, model_type, item_id, counter in [
+            ("mapping:t2i-fast:mock:mock-image-fast", models.ProviderModelMapping, "t2i-fast:mock:mock-image-fast", "mappings"),
+            ("pricing_rule:price_t2i_fast", models.PricingRule, "price_t2i_fast", "pricing_rules"),
+            ("account:acct_mock_default", models.AccountResource, "acct_mock_default", "accounts"),
+            ("model:t2i-fast", models.LogicalModel, "t2i-fast", "models"),
+            ("provider:mock", models.Provider, "mock", "providers"),
+            ("alert_rule:alert_account_cooldown", models.AlertRule, "alert_account_cooldown", "alert_rules"),
+        ]:
+            if key not in created:
+                continue
+            item = db.get(model_type, item_id)
+            if not item:
+                continue
+            db.delete(item)
+            cleanup["deleted"][counter] += 1
+    else:
+        for key, model_type, item_id in [
+            ("mapping:t2i-fast:mock:mock-image-fast", models.ProviderModelMapping, "t2i-fast:mock:mock-image-fast"),
+            ("pricing_rule:price_t2i_fast", models.PricingRule, "price_t2i_fast"),
+            ("account:acct_mock_default", models.AccountResource, "acct_mock_default"),
+            ("model:t2i-fast", models.LogicalModel, "t2i-fast"),
+            ("provider:mock", models.Provider, "mock"),
+            ("alert_rule:alert_account_cooldown", models.AlertRule, "alert_account_cooldown"),
+        ]:
+            if key not in created:
+                continue
+            item = db.get(model_type, item_id)
+            if not item:
+                continue
+            if hasattr(item, "enabled"):
+                item.enabled = False
+            if hasattr(item, "status"):
+                item.status = "disabled"
+            if hasattr(item, "concurrency_limit"):
+                item.concurrency_limit = 0
+            cleanup["retained_disabled"][key] = True
+
+    if commit:
+        db.commit()
+    return cleanup
+
+
 def cleanup_stability_acceptance_artifacts(db: Session, started_at: datetime, results: dict[str, Any]) -> dict[str, Any]:
     job_ids: set[str] = set()
     account_ids: set[str] = set()
@@ -6731,10 +7082,12 @@ def cleanup_stability_acceptance_artifacts(db: Session, started_at: datetime, re
         deleted["policies"] += db.query(models.UserLimitPolicy).filter(models.UserLimitPolicy.user_id.in_(stability_user_ids)).delete(synchronize_session=False)
         deleted["alerts"] += db.query(models.AlertEvent).filter(models.AlertEvent.user_id.in_(stability_user_ids)).delete(synchronize_session=False)
         deleted["users"] += db.query(models.User).filter(models.User.id.in_(stability_user_ids)).delete(synchronize_session=False)
+    mock_fixture_cleanup = restore_stability_mock_fixture(db, results.get("mock_fixture"), delete_created=True, commit=False)
     db.commit()
     return {
         "enabled": True,
         "deleted": deleted,
+        "mock_fixture": mock_fixture_cleanup,
         "job_ids": sorted(job_ids)[:12],
         "job_count": len(job_ids),
         "stability_user_count": len(stability_user_ids),
@@ -6800,6 +7153,7 @@ def build_stability_acceptance_suite(db: Session, ctx: AuthContext, req: Stabili
     suite_ctx = create_stability_acceptance_context(db, iterations)
     results["suite_context"] = {"user_id": suite_ctx.user.id, "api_key_id": suite_ctx.api_key.id}
     try:
+        results["mock_fixture"] = ensure_stability_mock_fixture(db)
         results["mock_1000"] = run_mock_stability_self_test(db, MockStabilitySelfTestRequest(iterations=iterations, max_failures=req.max_failures))
         results["lease_expiry"] = run_lease_expiry_self_test(db, suite_ctx)
         results["fallback_timeout"] = run_fallback_timeout_self_test(db, suite_ctx)
@@ -6810,6 +7164,7 @@ def build_stability_acceptance_suite(db: Session, ctx: AuthContext, req: Stabili
             cleanup = cleanup_stability_acceptance_artifacts(db, started_at, results)
         else:
             disable_stability_acceptance_context(db, suite_ctx)
+            cleanup["mock_fixture"] = restore_stability_mock_fixture(db, results.get("mock_fixture"), delete_created=False)
     rows = build_stability_acceptance_rows(results, iterations)
     ok = all(bool(row.get("ok")) for row in rows.values())
     payload = {
