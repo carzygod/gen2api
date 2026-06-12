@@ -1576,6 +1576,8 @@ class ProxyKernelRuntimeService:
         total_bytes = 0
         with zipfile.ZipFile(archive_path) as archive:
             for info in archive.infolist():
+                if self.skip_archive_member(info.filename):
+                    continue
                 target = self.safe_extract_member_path(extract_dir, info.filename)
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
@@ -1600,6 +1602,8 @@ class ProxyKernelRuntimeService:
         total_bytes = 0
         with tarfile.open(archive_path, "r:*") as archive:
             for member in archive.getmembers():
+                if self.skip_archive_member(member.name):
+                    continue
                 target = self.safe_extract_member_path(extract_dir, member.name)
                 if member.issym() or member.islnk():
                     raise ValueError("ARCHIVE_LINK_MEMBER_FORBIDDEN")
@@ -1623,6 +1627,10 @@ class ProxyKernelRuntimeService:
                     pass
                 extracted.append(target)
         return extracted
+
+    def skip_archive_member(self, member_name: str) -> bool:
+        name = str(member_name or "").replace("\\", "/").strip()
+        return name in {"", ".", "./"}
 
     def safe_extract_member_path(self, extract_dir: Path, member_name: str) -> Path:
         name = str(member_name or "").replace("\\", "/").lstrip("/")

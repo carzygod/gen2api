@@ -462,6 +462,10 @@ def main() -> None:
         archive_path = extract_install_dir / "runner.tar.gz"
         runner_bytes = b"#!/bin/sh\necho media2api archive runner\n"
         with tarfile.open(archive_path, "w:gz") as archive:
+            root_dir = tarfile.TarInfo(".")
+            root_dir.type = tarfile.DIRTYPE
+            root_dir.mode = 0o755
+            archive.addfile(root_dir)
             info = tarfile.TarInfo("bin/runner")
             info.size = len(runner_bytes)
             info.mode = 0o755
