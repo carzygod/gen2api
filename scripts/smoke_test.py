@@ -163,10 +163,12 @@ def main() -> None:
         assert openai_web_kernel["selection_id"] == "OAI-WEB-01" and openai_web_kernel["spec"]["install_policy"]["hash_required"] is True, openai_web_kernel
         openai_go_live = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/go-live-checklist", headers=headers))
         assert openai_go_live["object"] == "media2api.proxy_kernel.go_live_checklist" and "apply_routing" in openai_go_live["commands"], openai_go_live
+        assert "live_acceptance" in openai_go_live["commands"], openai_go_live
         assert {"routing", "runtime", "account", "live_acceptance"}.issubset({step["id"] for step in openai_go_live["steps"]}), openai_go_live
         openai_materials = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/materials-request", headers=headers))
         assert openai_materials["object"] == "media2api.proxy_kernel.materials_request" and openai_materials["required_materials"], openai_materials
         assert {"account_materials", "runtime_materials", "routing_materials", "validation_materials", "message_to_user"}.issubset(set(openai_materials)), openai_materials
+        assert "live_acceptance" in openai_materials["commands"], openai_materials
         assert openai_materials["policy"]["official_sdk_api"] == "forbidden" and openai_materials["policy"]["read_only"] is True, openai_materials
         openai_runtime_delivery = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan", headers=headers))
         assert openai_runtime_delivery["object"] == "media2api.proxy_kernel.runtime_delivery_plan" and openai_runtime_delivery["provider_id"] == "openai_web_session", openai_runtime_delivery
@@ -187,7 +189,18 @@ def main() -> None:
         openai_production_readiness = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/production-readiness", headers=headers))
         assert openai_production_readiness["object"] == "media2api.proxy_kernel.production_readiness" and openai_production_readiness["provider_id"] == "openai_web_session", openai_production_readiness
         assert openai_production_readiness["policy"]["requires_real_acceptance_samples"] is True and openai_production_readiness["production_ready"] is False, openai_production_readiness
+        assert "live_acceptance" in openai_production_readiness["commands"], openai_production_readiness
         assert {"routing", "runtime_contract", "runtime", "account", "health", "live_acceptance"}.issubset({phase["id"] for phase in openai_production_readiness["phases"]}), openai_production_readiness
+        openai_live_acceptance_dry_run = assert_ok(
+            client.post(
+                "/v1/admin/proxy-kernels/openai_web_session/live-acceptance",
+                headers=headers,
+                json={"dry_run": True, "operations": ["text_to_image"], "run_samples": True, "max_samples": 1},
+            )
+        )
+        assert openai_live_acceptance_dry_run["object"] == "media2api.proxy_kernel.live_acceptance", openai_live_acceptance_dry_run
+        assert openai_live_acceptance_dry_run["dry_run"] is True and openai_live_acceptance_dry_run["operations"] == ["text_to_image"], openai_live_acceptance_dry_run
+        assert openai_live_acceptance_dry_run["policy"]["default_mode"] == "dry_run" and openai_live_acceptance_dry_run["runtime_health_check"]["status"] == "skipped_dry_run", openai_live_acceptance_dry_run
         source_repo = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/source-repo", headers=headers))
         assert source_repo["object"] == "media2api.proxy_kernel.source_repo" and source_repo["repo"] == "basketikun/chatgpt2api" and "source-repo" in source_repo["path"], source_repo
         extract_service = ProxyKernelRuntimeService(root=PROXY_KERNEL_DIR / "extract-smoke")
@@ -316,6 +329,10 @@ def main() -> None:
             assert kernel_health_control in admin_page.text, kernel_health_control
         for kernel_health_dom in ["kernel-runtime-health", "kernel-run-health", "kernel-fail-on-health", "/v1/admin/proxy-kernels/openai_web_session/runtime-health-check", "/runtime-health-check"]:
             assert kernel_health_dom in admin_page.text, kernel_health_dom
+        for kernel_live_acceptance_text in ["Dry run", "Live"]:
+            assert kernel_live_acceptance_text in admin_page.text, kernel_live_acceptance_text
+        for kernel_live_acceptance_dom in ["kernel-live-acceptance", "kernel-run-live-acceptance", "kernel-live-acceptance-mode", "kernel-live-acceptance-max-samples", "kernel-live-acceptance-operations", "/v1/admin/proxy-kernels/openai_web_session/live-acceptance", "/live-acceptance"]:
+            assert kernel_live_acceptance_dom in admin_page.text, kernel_live_acceptance_dom
         for banned_oauth_copy in ["如果该平台没有官方 API Key 或公开 OAuth", "通用第三方连接器", "无公开获取入口", "Google OAuth 2.0 Playground", "https://developers.google.com/oauthplayground/", "https://bailian.console.aliyun.com/", "https://platform.openai.com/api-keys", "OpenAI API Keys", "refresh_token"]:
             assert banned_oauth_copy not in admin_page.text, banned_oauth_copy
         assert "connector.example" not in admin_page.text

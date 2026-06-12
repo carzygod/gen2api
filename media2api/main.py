@@ -1263,6 +1263,23 @@ class ProxyKernelRuntimeHealthCheckRequest(BaseModel):
     fail_on_health_check: bool = False
 
 
+class ProxyKernelLiveAcceptanceRequest(BaseModel):
+    dry_run: bool = True
+    operations: list[str] = Field(default_factory=list)
+    run_runtime_health: bool = True
+    require_runtime_health: bool = True
+    sync_provider_base_url: bool = True
+    require_running_process: bool = False
+    run_health_check: bool = True
+    run_contract_tests: bool = True
+    contract_run_submit: bool = False
+    run_quota_sync: bool = True
+    run_samples: bool = True
+    max_samples: int = 1
+    max_accounts: int = 4
+    require_production_ready: bool = False
+
+
 class ProxyKernelRuntimeStopRequest(BaseModel):
     grace_seconds: float = 5
 
@@ -7354,6 +7371,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/live-acceptance"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
@@ -7610,6 +7628,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/live-acceptance"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
@@ -13403,6 +13422,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("应用 OpenAI Web 路由", "POST", "/v1/admin/proxy-kernels/openai_web_session/apply-routing"),
         ("OpenAI Web 进程", "GET", "/v1/admin/proxy-kernels/openai_web_session/process"),
         ("OpenAI Web Runtime 健康检查", "POST", "/v1/admin/proxy-kernels/openai_web_session/runtime-health-check"),
+        ("OpenAI Web 真实样本验收", "POST", "/v1/admin/proxy-kernels/openai_web_session/live-acceptance"),
         ("OpenAI Web 日志", "GET", "/v1/admin/proxy-kernels/openai_web_session/logs"),
         ("停止 OpenAI Web Runtime", "POST", "/v1/admin/proxy-kernels/openai_web_session/stop-runtime"),
         ("账号添加指南", "GET", "/v1/admin/account-guides"),
@@ -14021,6 +14041,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-production-readiness">生产就绪</button>
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
+                  <button class="op" type="button" id="kernel-live-acceptance">真实样本验收</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
                   <button class="op" type="button" id="kernel-materials">查看材料清单</button>
@@ -14075,6 +14096,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                     <div><label>备注</label><input id="kernel-notes" placeholder="OAI-WEB-01 verified release" /></div>
                     <div></div>
                     <button class="primary" type="button" id="kernel-start-runtime">启动 Runtime</button>
+                  </div>
+                  <div class="formline" style="margin-top:10px">
+                    <div><label>真实验收模式</label><select id="kernel-live-acceptance-mode"><option value="true">Dry run，不消耗额度</option><option value="false">Live，运行真实样本</option></select></div>
+                    <div><label>最大样本数</label><input id="kernel-live-acceptance-max-samples" value="1" /></div>
+                    <div><label>操作范围</label><input id="kernel-live-acceptance-operations" placeholder="留空=该内核声明的全部操作" /></div>
+                    <button class="primary" type="button" id="kernel-run-live-acceptance">运行真实验收</button>
                   </div>
                 </div>
                 <div class="kernel-summary" id="kernel-provider-summary">
@@ -14470,6 +14497,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const productionReadiness = hint.production_readiness || {{}};
           const liveWorkspace = hint.live_workspace || {{}};
           const runtimeHealth = hint.runtime_health_check || {{}};
+          const liveAcceptance = hint.live_acceptance || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14489,6 +14517,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
               <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
               <dt>Runtime 健康</dt><dd>${{runtimeHealth.health_check ? escapeHtml(runtimeHealth.health_check.status || (runtimeHealth.ok ? 'ok' : 'failed')) : '未检查'}}${{runtimeHealth.health_check?.message ? ' · ' + escapeHtml(runtimeHealth.health_check.message) : ''}}</dd>
+              <dt>真实验收</dt><dd>${{escapeHtml(liveAcceptance.status || '未运行')}}${{liveAcceptance.next_step?.label ? ' · 下一步：' + escapeHtml(liveAcceptance.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>交付计划</dt><dd>${{escapeHtml(runtimePlan.status || '未读取')}}${{runtimePlan.next_step?.label ? ' · 下一步：' + escapeHtml(runtimePlan.next_step.label) : ''}}</dd>
@@ -15036,6 +15065,35 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           renderKernelSummary(provider);
           return payload;
         }}
+        async function runKernelLiveAcceptance(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const operationsRaw = document.getElementById('kernel-live-acceptance-operations')?.value || '';
+          const operations = operationsRaw.split(',').map(item => item.trim()).filter(Boolean);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/live-acceptance', 'POST', {{
+            dry_run: document.getElementById('kernel-live-acceptance-mode')?.value !== 'false',
+            operations,
+            run_runtime_health: true,
+            require_runtime_health: true,
+            sync_provider_base_url: true,
+            require_running_process: false,
+            run_health_check: true,
+            run_contract_tests: true,
+            contract_run_submit: false,
+            run_quota_sync: true,
+            run_samples: true,
+            max_samples: Number(document.getElementById('kernel-live-acceptance-max-samples')?.value || 1),
+            max_accounts: 4,
+            require_production_ready: false,
+          }});
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            live_acceptance: payload,
+            production_readiness: payload.readiness_after || payload.readiness_before || kernelHint(provider).production_readiness || {{}},
+            runtime_health_check: payload.runtime_health_check || kernelHint(provider).runtime_health_check || {{}},
+          }});
+          renderKernelSummary(provider);
+          return payload;
+        }}
         async function loadKernelLogs() {{
           const provider = document.getElementById('kernel-log-provider')?.value || selectedKernelProvider();
           const stream = document.getElementById('kernel-log-stream')?.value || 'stderr';
@@ -15529,6 +15587,18 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-runtime-health')?.addEventListener('click', async () => {{
           try {{
             const payload = await checkKernelRuntimeHealth();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-live-acceptance')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await runKernelLiveAcceptance();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-run-live-acceptance')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await runKernelLiveAcceptance();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -20135,6 +20205,7 @@ def build_proxy_kernel_go_live_checklist(db: Session, provider_id: str) -> dict[
         "account_guide": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-guides/{provider_id}",
         "account_setup_workflow": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-setup-workflows/{provider_id}",
         "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': True, 'external_only': True, 'provider_ids': [provider_id], 'operations': template.operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
+        "live_acceptance": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{json.dumps({'dry_run': True, 'operations': template.operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
     }
     if sample_models.get("image_generation_model"):
         commands["sample_image_generation"] = f"curl -X POST -H \"Authorization: Bearer {user_key}\" -H \"Content-Type: application/json\" {base}/v1/images/generations -d '{json.dumps({'model': sample_models['image_generation_model'], 'prompt': 'one small product render on a dark desk', 'size': '1024x1024', 'wait': True}, ensure_ascii=False, separators=(',', ':'))}'"
@@ -20427,7 +20498,7 @@ def build_proxy_kernel_materials_request(db: Session, provider_id: str) -> dict[
         "account_setup_workflow": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-setup-workflows/{provider_id}",
         "account_onboarding": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-onboarding",
     }
-    for key in ["account_acceptance_suite", "sample_image_generation", "sample_video_generation"]:
+    for key in ["account_acceptance_suite", "live_acceptance", "sample_image_generation", "sample_video_generation"]:
         if key in (go_live.get("commands") or {}):
             commands[key] = go_live["commands"][key]
 
@@ -22208,6 +22279,7 @@ def build_proxy_kernel_production_readiness(db: Session, provider_id: str) -> di
             "health_check": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/providers/{provider_id}/health-check",
             "materials_request": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/materials-request",
             "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': False, 'external_only': True, 'provider_ids': [provider_id], 'operations': template.operations, 'run_samples': True, 'max_samples': max(1, min(len(template.operations), 3)), 'require_production_ready': False}, ensure_ascii=False, separators=(',', ':'))}'",
+            "live_acceptance": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{json.dumps({'dry_run': True, 'operations': template.operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
         },
         "policy": {
             "read_only": True,
@@ -22218,6 +22290,157 @@ def build_proxy_kernel_production_readiness(db: Session, provider_id: str) -> di
         },
     }
     return readiness
+
+
+def run_proxy_kernel_live_acceptance(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelLiveAcceptanceRequest,
+    ctx: AuthContext,
+) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise KeyError(provider_id)
+    proxy_kernel_service.require_spec(provider_id)
+    requested_operations = [str(item).strip() for item in req.operations if str(item).strip()]
+    operations = requested_operations or list(template.operations)
+    unsupported_operations = [operation for operation in operations if operation not in template.operations]
+    if unsupported_operations:
+        raise ValueError("OPERATION_NOT_DECLARED:" + ",".join(unsupported_operations))
+
+    max_samples = max(0, min(int(req.max_samples or 0), 6))
+    max_accounts = max(1, min(int(req.max_accounts or 1), 20))
+    readiness_before = build_proxy_kernel_production_readiness(db, provider_id)
+    runtime_health: dict[str, Any] | None = None
+    runtime_health_failed = False
+    runtime_health_error = ""
+
+    if req.run_runtime_health and req.dry_run:
+        runtime_health = {
+            "object": "media2api.proxy_kernel.runtime_health_check",
+            "provider_id": provider_id,
+            "ok": None,
+            "status": "skipped_dry_run",
+            "message": "Dry-run mode does not mutate provider health evidence.",
+        }
+    elif req.run_runtime_health:
+        try:
+            runtime_health = run_proxy_kernel_runtime_health_check(
+                db,
+                provider_id,
+                sync_provider_base_url_value=req.sync_provider_base_url,
+                require_running_process=req.require_running_process,
+                fail_on_health_check=False,
+            )
+            runtime_health_failed = not bool(runtime_health.get("ok"))
+        except (HTTPException, ValueError) as exc:
+            runtime_health_failed = True
+            runtime_health_error = str(getattr(exc, "detail", "") or exc)
+            runtime_health = {
+                "object": "media2api.proxy_kernel.runtime_health_check",
+                "provider_id": provider_id,
+                "ok": False,
+                "error": runtime_health_error,
+            }
+
+    runtime_blocked = bool(runtime_health_failed and req.require_runtime_health)
+    suite_request = AccountAcceptanceSuiteRequest(
+        dry_run=req.dry_run,
+        provider_ids=[provider_id],
+        active_only=True,
+        external_only=True,
+        operations=operations,
+        run_health_check=req.run_health_check,
+        run_contract_tests=req.run_contract_tests,
+        contract_run_submit=req.contract_run_submit,
+        run_quota_sync=req.run_quota_sync,
+        run_samples=req.run_samples,
+        max_samples=max_samples,
+        max_accounts=max_accounts,
+        require_production_ready=req.require_production_ready,
+    )
+    if runtime_blocked and not req.dry_run:
+        acceptance: dict[str, Any] = {
+            "object": "media2api.account_acceptance_suite",
+            "ok": False,
+            "status": "skipped_runtime_health_failed",
+            "action_items": [
+                {
+                    "check": "runtime_health",
+                    "detail": runtime_health,
+                }
+            ],
+        }
+    else:
+        acceptance = admin_account_acceptance_suite(suite_request, ctx, db)
+
+    readiness_after = build_proxy_kernel_production_readiness(db, provider_id)
+    if req.dry_run:
+        status = "ready_to_run" if readiness_before.get("ready_for_live_acceptance") else "materials_required"
+    elif runtime_blocked:
+        status = "blocked"
+    else:
+        status = "passed" if acceptance.get("ok") else "failed"
+
+    action_items: list[dict[str, Any]] = []
+    if not readiness_before.get("ready_for_live_acceptance"):
+        action_items.append({"check": "production_readiness", "detail": readiness_before.get("next_step")})
+    if runtime_blocked:
+        action_items.append({"check": "runtime_health", "detail": runtime_health})
+    action_items.extend(acceptance.get("action_items") or [])
+
+    if req.dry_run and readiness_before.get("ready_for_live_acceptance"):
+        next_step = {
+            "id": "switch_to_live",
+            "label": "切换 Live 运行 1 条真实样本",
+            "action": "将真实验收模式切换为 Live，保留 max_samples=1，再运行真实样本验收。",
+        }
+    elif action_items:
+        next_step = {
+            "id": str(action_items[0].get("check") or "action_required"),
+            "label": "处理验收阻塞项",
+            "action": "按 action_items 中的第一项补齐材料或修复 runtime。",
+            "detail": action_items[0].get("detail"),
+        }
+    else:
+        next_step = {
+            "id": "production_readiness",
+            "label": "刷新生产就绪",
+            "action": "查看 production-readiness，确认真实样本资产已入库。",
+        }
+
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    live_payload = suite_request.model_dump()
+    live_payload["dry_run"] = False
+    return {
+        "object": "media2api.proxy_kernel.live_acceptance",
+        "provider_id": provider_id,
+        "selection_id": proxy_kernel_service.kernel_summary(db, provider_id).get("selection_id"),
+        "status": status,
+        "ok": bool((not req.dry_run) and acceptance.get("ok") and not runtime_blocked),
+        "dry_run": req.dry_run,
+        "operations": operations,
+        "runtime_health_check": runtime_health,
+        "account_acceptance": acceptance,
+        "readiness_before": readiness_before,
+        "readiness_after": readiness_after,
+        "action_items": action_items,
+        "next_step": next_step,
+        "commands": {
+            "dry_run": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{json.dumps({**live_payload, 'dry_run': True}, ensure_ascii=False, separators=(',', ':'))}'",
+            "live": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{json.dumps(live_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "production_readiness": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/production-readiness",
+        },
+        "policy": {
+            "default_mode": "dry_run",
+            "live_mode_consumes_real_quota": True,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "no_fake_account_created": True,
+        },
+    }
 
 
 def proxy_kernel_production_readiness_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -22732,6 +22955,21 @@ def admin_proxy_kernel_runtime_health_check(
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "runtime health checks require a registered loopback runtime and provider health endpoint"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/live-acceptance")
+def admin_proxy_kernel_live_acceptance(
+    provider_id: str,
+    req: ProxyKernelLiveAcceptanceRequest = ProxyKernelLiveAcceptanceRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return run_proxy_kernel_live_acceptance(db, provider_id, req, ctx)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "acceptance_policy": "live acceptance only runs declared operations for finalized proxy kernels"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/stop-runtime")
