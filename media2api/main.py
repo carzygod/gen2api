@@ -1311,6 +1311,32 @@ class ProxyKernelActivationRunRequest(BaseModel):
     user_api_key: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProxyKernelAccountMaterialsRequest(BaseModel):
+    dry_run: bool = True
+    account_id: str | None = None
+    label: str | None = None
+    resource_type: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    provider_base_url: str | None = None
+    provider_config: dict[str, Any] = Field(default_factory=dict)
+    auth_method: str | None = None
+    credential_value: Any | None = None
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    credential_kind: str | None = None
+    supported_operations: list[str] = Field(default_factory=list)
+    supported_provider_models: list[str] = Field(default_factory=list)
+    quota_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    concurrency_limit: int | None = None
+    region: str | None = None
+    plan: str | None = None
+    status: str | None = None
+    upsert: bool | None = None
+    auto_create_mappings: bool | None = None
+    sync_capabilities: bool | None = None
+    run_health_check: bool | None = None
+
+
 class ProxyKernelRuntimeStopRequest(BaseModel):
     grace_seconds: float = 5
 
@@ -7433,6 +7459,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
     ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run"),
@@ -7702,6 +7730,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
                 ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run"),
@@ -14190,6 +14220,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
                   <button class="op" type="button" id="kernel-materials">查看材料清单</button>
+                  <button class="op" type="button" id="kernel-account-materials">账号材料预检</button>
                   <button class="op" type="button" id="kernel-handoff">查看交付包</button>
                   <button class="op" type="button" id="kernel-run-handoff">执行交付包 dry-run</button>
                 </div>
@@ -15408,6 +15439,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           mergeKernelMaterialsRequests(payload);
           return payload;
         }}
+        async function loadKernelAccountMaterials(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/account-materials');
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            account_materials_package: payload,
+            materials_request: Object.assign(kernelHint(provider).materials_request || {{}}, {{ account_materials: payload.account_materials || {{}} }}),
+          }});
+          renderKernelSummary(provider);
+          return payload;
+        }}
         async function loadAllKernelMaterialsRequests() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/materials-request');
           mergeKernelMaterialsRequests(payload);
@@ -16348,6 +16390,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-materials')?.addEventListener('click', async () => {{
           try {{ await loadKernelMaterialsRequest(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-account-materials')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelAccountMaterials();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-handoff')?.addEventListener('click', async () => {{
           try {{
@@ -20339,6 +20387,27 @@ def admin_proxy_kernels_materials_request(provider_ids: str = "", ctx: AuthConte
         raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/{provider_id}/account-materials")
+def admin_proxy_kernel_account_materials(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_account_materials(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/account-materials")
+def admin_proxy_kernel_account_materials_submit(
+    provider_id: str,
+    req: ProxyKernelAccountMaterialsRequest = ProxyKernelAccountMaterialsRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_account_materials(db, provider_id, req)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/operator-handoff")
 def admin_proxy_kernels_operator_handoff(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -21452,6 +21521,222 @@ def proxy_kernel_operator_account_payload_template(provider_id: str, template: A
         "status": "active",
         "sync_capabilities": False,
         "run_health_check": False,
+    }
+
+
+def proxy_kernel_account_material_value_template(account_materials: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for field in account_materials.get("required_fields") or []:
+        name = str(field.get("name") or "").strip()
+        if name:
+            fields[name] = f"<{name}>"
+    for group in account_materials.get("any_of_groups") or []:
+        group_name = str(group.get("group") or "one_of").strip()
+        options = [str(field.get("name") or "").strip() for field in group.get("fields") or [] if str(field.get("name") or "").strip()]
+        if options:
+            fields[f"choose_one_of_{group_name}"] = options
+            fields[options[0]] = f"<{options[0]}>"
+    return fields
+
+
+def proxy_kernel_redact_account_material_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = deepcopy(payload)
+    if credential_material_to_text(safe.get("credential_value")):
+        safe["credential_value"] = "[provided]"
+    if safe.get("credential_ref"):
+        safe["credential_ref"] = redact_credential_ref(str(safe.get("credential_ref") or ""))
+    if isinstance(safe.get("resource_profile"), dict):
+        safe["resource_profile"] = redact_resource_profile(safe["resource_profile"])
+    if isinstance(safe.get("provider_config"), dict):
+        safe["provider_config"] = redact_config(safe["provider_config"])
+    return safe
+
+
+def proxy_kernel_account_material_payload_from_request(
+    provider_id: str,
+    template: Any,
+    materials: dict[str, Any],
+    guide: dict[str, Any],
+    req: ProxyKernelAccountMaterialsRequest | None,
+) -> dict[str, Any]:
+    payload = proxy_kernel_operator_account_payload_template(provider_id, template, materials, guide)
+    payload["credential_value"] = ""
+    payload["credential_ref"] = ""
+    if not req:
+        return payload
+    simple_fields = [
+        "account_id",
+        "label",
+        "resource_type",
+        "provider_base_url",
+        "auth_method",
+        "credential_ref",
+        "credential_secret_id",
+        "credential_kind",
+        "concurrency_limit",
+        "region",
+        "plan",
+        "status",
+        "upsert",
+        "auto_create_mappings",
+        "sync_capabilities",
+        "run_health_check",
+    ]
+    for field in simple_fields:
+        value = getattr(req, field)
+        if value is not None and value != "":
+            payload[field] = value
+    if req.credential_value not in (None, ""):
+        payload["credential_value"] = req.credential_value
+    if req.resource_profile:
+        payload["resource_profile"] = {**(payload.get("resource_profile") or {}), **req.resource_profile}
+    if req.provider_config:
+        payload["provider_config"] = {**(payload.get("provider_config") or {}), **req.provider_config}
+    if req.supported_operations:
+        payload["supported_operations"] = req.supported_operations
+    if req.supported_provider_models:
+        payload["supported_provider_models"] = req.supported_provider_models
+    if req.quota_buckets:
+        payload["quota_buckets"] = req.quota_buckets
+    return payload
+
+
+def proxy_kernel_account_material_preflight(db: Session, provider_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        auth_method = validate_provider_auth_method(provider_id, str(payload.get("auth_method") or "agent_provider_credential"))
+        requested_credential_kind = str(payload.get("credential_kind") or credential_kind_for_auth_method(auth_method))
+        if auth_method == "cookie_secret":
+            requested_credential_kind = "cookie"
+        if auth_method == "agent_provider_credential":
+            requested_credential_kind = "agent_provider"
+        resource_type = validate_provider_resource_type(
+            provider_id,
+            infer_account_resource_type(provider_id, auth_method, payload.get("resource_type")),
+            auth_method=auth_method,
+            credential_kind=requested_credential_kind,
+        )
+        provider_config = dict(payload.get("provider_config") or {})
+        provider_base_url = validate_provider_base_url_input(provider_id, payload.get("provider_base_url"))
+        if provider_base_url:
+            provider_config["base_url"] = provider_base_url
+        if not provider_runtime_base_url_allowed(provider_id):
+            provider_config = strip_runtime_base_url_fields(provider_config)
+        resource_profile = dict(payload.get("resource_profile") or {})
+        validate_runtime_base_url_fields(provider_id, provider_config, field_name="provider_config")
+        validate_runtime_base_url_fields(provider_id, resource_profile, field_name="resource_profile")
+        validate_platform_provider_config_fields(provider_id, provider_config, field_name="provider_config")
+        validate_platform_resource_profile_fields(provider_id, resource_profile, field_name="resource_profile")
+        validate_required_platform_inputs(
+            provider_id,
+            auth_method=auth_method,
+            resource_type=resource_type,
+            provider_config=provider_config,
+            resource_profile=resource_profile,
+            credential_ref=payload.get("credential_ref"),
+            credential_value=payload.get("credential_value"),
+            credential_secret_id=payload.get("credential_secret_id"),
+            db=db,
+        )
+        if not payload.get("credential_ref") and not credential_material_to_text(payload.get("credential_value")) and not payload.get("credential_secret_id"):
+            raise HTTPException(status_code=400, detail={"error": "CREDENTIAL_VALUE_REQUIRED", "message": "Paste credential_value or submit a secret:// / agent:// credential_ref."})
+        if not payload.get("supported_operations") or not payload.get("supported_provider_models"):
+            raise HTTPException(status_code=400, detail={"error": "ACCOUNT_CAPABILITIES_REQUIRED"})
+        return {
+            "ok": True,
+            "status": "ready_to_import",
+            "auth_method": auth_method,
+            "resource_type": resource_type,
+            "missing_input_fields": [],
+            "message": "Account material passes provider-specific input validation.",
+        }
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+        return {
+            "ok": False,
+            "status": "needs_input",
+            "error": detail.get("error") or "ACCOUNT_MATERIAL_INVALID",
+            "missing_input_fields": detail.get("missing_input_fields") or [],
+            "detail": detail,
+            "message": detail.get("message") or "Account material is incomplete or does not match this provider.",
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "status": "needs_input",
+            "error": str(exc),
+            "missing_input_fields": [],
+            "detail": {"error": str(exc)},
+            "message": "Account material is incomplete or does not match this provider.",
+        }
+
+
+def build_proxy_kernel_account_materials(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelAccountMaterialsRequest | None = None,
+) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise KeyError(provider_id)
+    materials = build_proxy_kernel_materials_request(db, provider_id)
+    guide = connector_registry_service.provider_guide(db, provider_id)
+    payload = proxy_kernel_account_material_payload_from_request(provider_id, template, materials, guide, req)
+    account_materials = materials.get("account_materials") or {}
+    value_template = proxy_kernel_account_material_value_template(account_materials)
+    preflight = proxy_kernel_account_material_preflight(db, provider_id, payload)
+    applied: dict[str, Any] = {}
+    dry_run = True if req is None else bool(req.dry_run)
+    if req is not None and not dry_run and preflight.get("ok"):
+        account_req = AccountOnboardingRequest(**{**payload, "provider_id": provider_id})
+        applied = apply_account_onboarding(db, account_req)
+        preflight = {**preflight, "status": "imported", "message": "Account material was imported and stored as a managed credential reference."}
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    post_payload = {
+        "dry_run": True,
+        "credential_value": value_template or "<paste credential material>",
+        "resource_profile": payload.get("resource_profile") or {},
+        "auth_method": payload.get("auth_method"),
+        "resource_type": payload.get("resource_type"),
+    }
+    return {
+        "object": "media2api.proxy_kernel.account_materials",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": materials.get("selection_id"),
+        "dry_run": dry_run,
+        "status": preflight.get("status") or ("ready_to_import" if preflight.get("ok") else "needs_input"),
+        "ok": bool(preflight.get("ok")),
+        "preflight": preflight,
+        "applied": applied,
+        "account_materials": account_materials,
+        "payload_template": proxy_kernel_operator_account_payload_template(provider_id, template, materials, guide),
+        "payload_preview": proxy_kernel_redact_account_material_payload(payload),
+        "credential_value_json_template": value_template,
+        "credential_value_env_template": "\n".join(f"{key}=<{key}>" for key in value_template if not key.startswith("choose_one_of_")),
+        "required_fields": account_materials.get("required_fields") or [],
+        "any_of_groups": account_materials.get("any_of_groups") or [],
+        "guide": {
+            "title": guide.get("title"),
+            "resource_type": guide.get("resource_type"),
+            "accepted_resource_types": guide.get("accepted_resource_types") or [],
+            "recommended_auth_methods": guide.get("recommended_auth_methods") or [],
+            "user_actions": guide.get("user_actions") or [],
+            "opensource_basis": guide.get("opensource_basis") or [],
+        },
+        "commands": {
+            "inspect": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/account-materials",
+            "preflight": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/account-materials -d '{json.dumps(post_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "import": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/account-materials -d '{json.dumps({**post_payload, 'dry_run': False}, ensure_ascii=False, separators=(',', ':'))}'",
+            "activation_run": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/activation-run -d '{{\"dry_run\":true,\"steps\":[\"submit_account_material\"]}}'",
+        },
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "credential_value_echo": "redacted",
+            "dry_run_mutates_state": False,
+            "dry_run_default": True,
+            "real_import_requires_dry_run_false": True,
+        },
     }
 
 

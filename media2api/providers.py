@@ -79,6 +79,15 @@ MEDIA_ITEM_KEYS = {
 }
 
 
+def provider_http_trust_env(config: dict[str, Any]) -> bool:
+    value = config.get("trust_env", config.get("http_trust_env", False))
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class ProviderContext:
     provider_id: str
@@ -349,7 +358,7 @@ class PollinationsProvider:
         prompt = str(params.get("prompt") or "media generation").strip() or "media generation"
         timeout = float(config.get("timeout_seconds") or (300 if job.operation in {"text_to_video", "image_to_video"} else 120))
 
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=provider_http_trust_env(config)) as client:
             reference_urls = self._upload_references(db, client, base_url, headers, job, config)
             query = self._query_params(params, ctx.provider_model, job.operation, reference_urls, config)
             endpoint_kind = "video" if job.operation in {"text_to_video", "image_to_video", "video_extend"} else "image"
@@ -436,7 +445,7 @@ class PollinationsProvider:
             return {"status": "failed", "latency_ms": None, "message": "missing Pollinations credential", "detail": {"requires": "agent:// Agent Provider reference or secret:// Web Cookie/session credential"}}
         started = time.time()
         try:
-            response = httpx.get(f"{base_url}/v1/models", headers=headers, timeout=float(config.get("health_timeout_seconds") or 10))
+            response = httpx.get(f"{base_url}/v1/models", headers=headers, timeout=float(config.get("health_timeout_seconds") or 10), trust_env=provider_http_trust_env(config))
             latency_ms = int((time.time() - started) * 1000)
             if response.status_code >= 400:
                 return {"status": "failed", "latency_ms": latency_ms, "message": f"pollinations health status {response.status_code}", "detail": {"body": response.text[:500]}}
@@ -693,7 +702,7 @@ class ConnectorProvider:
         endpoint = self._endpoint(job.operation, config)
         timeout = float(config.get("timeout_seconds") or 120)
 
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=provider_http_trust_env(config)) as client:
             response = client.post(f"{base_url}{endpoint}", json=payload, headers=headers)
             if response.status_code >= 400:
                 raise RuntimeError(f"connector status {response.status_code}: {response.text[:500]}")
@@ -774,7 +783,7 @@ class ConnectorProvider:
         if isinstance(config.get("cancel_payload"), dict):
             payload.update(config["cancel_payload"])
         started = time.time()
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=provider_http_trust_env(config)) as client:
             if method == "DELETE":
                 response = client.delete(f"{base_url}{endpoint}", headers=headers)
             elif method == "GET":
@@ -815,7 +824,7 @@ class ConnectorProvider:
         headers = self._headers(db, config, account.credential_ref if account else None, provider_id=provider_id, account=account)
         started = time.time()
         try:
-            response = httpx.get(f"{base_url}{endpoint}", headers=headers, timeout=timeout)
+            response = httpx.get(f"{base_url}{endpoint}", headers=headers, timeout=timeout, trust_env=provider_http_trust_env(config))
             latency_ms = int((time.time() - started) * 1000)
             if response.status_code >= 400:
                 return {
@@ -856,7 +865,7 @@ class ConnectorProvider:
             "supported_provider_models": loads(ctx.account.supported_provider_models_json, []),
         }
         started = time.time()
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=provider_http_trust_env(config)) as client:
             if method == "POST":
                 response = client.post(f"{base_url}{endpoint}", headers=headers, json=payload)
             else:

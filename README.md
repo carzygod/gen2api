@@ -202,6 +202,9 @@ is marked ready to use.
 For a single provider, `POST /v1/admin/proxy-kernels/{provider_id}/activation-run`
 turns the same checklist into a dry-run-first activation session, then returns
 the refreshed production gap report and the next required material.
+`GET/POST /v1/admin/proxy-kernels/{provider_id}/account-materials` gives the
+operator an exact account-material template and dry-run validation before a
+real cookie/session/profile is imported.
 Runtime onboarding
 prefers fixed release binaries with explicit SHA256 verification. Full source
 repositories are synced into `source-repo/` only when release assets are

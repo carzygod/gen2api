@@ -347,7 +347,7 @@ class AssetService:
     def _download_remote_url(self, url: str) -> tuple[bytes, httpx.Headers]:
         current_url = self._validate_remote_url(url)
         redirects = 0
-        with httpx.Client(timeout=60, follow_redirects=False) as client:
+        with httpx.Client(timeout=60, follow_redirects=False, trust_env=False) as client:
             while True:
                 with client.stream("GET", current_url) as response:
                     if 300 <= response.status_code < 400:
