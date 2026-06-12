@@ -382,6 +382,26 @@ def main() -> None:
         assert any(section["id"] == "credential_value" and section["field_count"] >= 1 for section in openai_matrix["what_to_prepare"]), openai_matrix
         gemini_matrix = next(item for item in account_materials_matrix["data"] if item["provider_id"] == "gemini_cli_oauth")
         assert gemini_matrix["runtime_credential_sync"]["status"] != "unsupported" and gemini_matrix["credential_value_json_template"], gemini_matrix
+        account_connection_package = assert_ok(client.get("/v1/admin/proxy-kernels/account-connection-package?provider_ids=openai_web_session,gemini_cli_oauth", headers=headers))
+        assert account_connection_package["object"] == "media2api.proxy_kernel.account_connection_package", account_connection_package
+        assert account_connection_package["summary"]["total"] == 2 and account_connection_package["summary"]["needs_account_material"] == 2, account_connection_package
+        assert account_connection_package["policy"]["official_sdk_api"] == "forbidden" and account_connection_package["bulk_submission_json_template"]["dry_run"] is True, account_connection_package
+        placeholder_bulk = assert_ok(client.post("/v1/admin/proxy-kernels/account-materials-bulk", headers=headers, json=account_connection_package["bulk_submission_json_template"]))
+        assert placeholder_bulk["status"] == "needs_input" and placeholder_bulk["summary"]["processed"] == 2 and placeholder_bulk["summary"]["failed"] == 0, placeholder_bulk
+        ready_bulk = assert_ok(
+            client.post(
+                "/v1/admin/proxy-kernels/account-materials-bulk",
+                headers=headers,
+                json={
+                    "dry_run": True,
+                    "items": [
+                        {"provider_id": "openai_web_session", "credential_value": {"chatgpt_cookie_or_session": "fake-cookie-for-shape-check-only"}},
+                        {"provider_id": "gemini_cli_oauth", "credential_value": {"gemini_oauth_creds_file": {"token": {"refresh_token": "fake-refresh-token"}, "email": "smoke@example.com"}}},
+                    ],
+                },
+            )
+        )
+        assert ready_bulk["status"] == "ready_to_import" and ready_bulk["summary"]["ready"] == 2 and ready_bulk["summary"]["imported"] == 0, ready_bulk
         openai_account_materials = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/account-materials", headers=headers))
         assert openai_account_materials["object"] == "media2api.proxy_kernel.account_materials" and openai_account_materials["provider_id"] == "openai_web_session", openai_account_materials
         assert openai_account_materials["status"] == "needs_input" and openai_account_materials["credential_value_json_template"], openai_account_materials
@@ -802,7 +822,7 @@ def main() -> None:
             assert admin_dom in admin_page.text, admin_dom
         for runtime_acquisition_dom in ["kernel-runtime-acquisition-all", "kernel-runtime-acquisition", "loadKernelRuntimeAcquisitionPlan", "loadAllKernelRuntimeAcquisitionPlans", "runtime_acquisition_plan", "/v1/admin/proxy-kernels/runtime-acquisition-plan", "/runtime-acquisition-plan", "/v1/admin/proxy-kernels/openai_web_session/runtime-acquisition-plan"]:
             assert runtime_acquisition_dom in admin_page.text, runtime_acquisition_dom
-        for account_material_dom in ["kernel-account-materials", "kernel-account-materials-matrix", "kernel-account-material-panel", "kernel-account-credential", "kernel-account-resource-profile", "kernel-account-preflight", "kernel-account-import", "kernel-account-runtime-sync", "kernel-account-runtime-sync-status", "submitKernelAccountMaterials", "syncKernelRuntimeCredentials", "renderKernelAccountMaterialsPanel", "loadKernelAccountMaterials", "renderKernelAccountMaterialsMatrix", "loadKernelAccountMaterialsMatrix", "resource_profile_json_template", "fields_by_destination", "/account-materials", "/account-materials-matrix", "/runtime-credentials/sync"]:
+        for account_material_dom in ["kernel-account-materials", "kernel-account-materials-matrix", "kernel-account-connection-package", "kernel-account-material-panel", "kernel-account-credential", "kernel-account-resource-profile", "kernel-account-preflight", "kernel-account-import", "kernel-account-runtime-sync", "kernel-account-runtime-sync-status", "submitKernelAccountMaterials", "syncKernelRuntimeCredentials", "renderKernelAccountMaterialsPanel", "loadKernelAccountMaterials", "renderKernelAccountMaterialsMatrix", "loadKernelAccountMaterialsMatrix", "renderKernelAccountConnectionPackage", "loadKernelAccountConnectionPackage", "resource_profile_json_template", "fields_by_destination", "/account-materials", "/account-materials-matrix", "/account-connection-package", "/account-materials-bulk", "/runtime-credentials/sync"]:
             assert account_material_dom in admin_page.text, account_material_dom
         for activation_dom in ["kernel-activation-workflow-all", "kernel-activation-workflow", "kernel-production-activation-dashboard", "kernel-production-gap-report-all", "kernel-production-gap-report", "kernel-activation-run", "kernel-activation-overview", "kernel-activation-panel", "activation-stage-grid", "activation-provider-grid", "data-activation-action", "runActivationAction", "runKernelActivationRun", "syncProviderEntryFields", "inspect-provider", "apply-routing", "open-account", "open-runtime", "open-users", "renderActivationWorkflowPanel", "renderActivationWorkflowOverview", "renderProductionActivationDashboard", "loadProductionActivationDashboard", "renderProductionGapReportOverview", "/v1/admin/proxy-kernels/activation-workflow", "/activation-workflow", "/v1/admin/proxy-kernels/production-activation-dashboard", "/production-activation-dashboard", "/v1/admin/proxy-kernels/production-gap-report", "/production-gap-report", "/activation-run"]:
             assert activation_dom in admin_page.text, activation_dom

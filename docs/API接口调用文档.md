@@ -1246,6 +1246,45 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/account-materials-matrix?provid
 
 矩阵返回中的 `what_to_prepare` 会把字段分到 `credential_value`、`resource_profile`、`runtime_or_provider_base_url` 和 `other`。敏感 cookie/session/OAuth/profile/token 只放入 `credential_value`；Discord `guild_id/channel_id`、Gemini `project_id`、区域、套餐等非敏感路由资料放入 `resource_profile`。`policy.release_binary_first=true` 且 `policy.source_repo_only_when_needed=true` 表示运行时仍优先使用 release 二进制，只有 release 不可用、协议细节必须审计、需要本地构建或重写 adapter 时才同步 `source-repo/`。
 
+账号连接请求包把矩阵转成“发给账号持有人”的材料请求，并附带批量预检模板。推荐先只查看 OpenAI Web 与 Gemini CLI：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/account-connection-package?provider_ids=openai_web_session,gemini_cli_oauth" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+把响应中的 `bulk_submission_json_template.items[*].credential_value` 和 `resource_profile` 占位值替换为真实材料后，先批量 dry-run：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/account-materials-bulk" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dry_run": true,
+    "items": [
+      {
+        "provider_id": "openai_web_session",
+        "credential_value": {
+          "chatgpt_cookie_or_session": "<paste-real-chatgpt-web-session>"
+        }
+      },
+      {
+        "provider_id": "gemini_cli_oauth",
+        "credential_value": {
+          "gemini_oauth_creds_file": {
+            "token": {
+              "refresh_token": "<paste-real-refresh-token>"
+            },
+            "email": "<account-email>"
+          }
+        }
+      }
+    ]
+  }'
+```
+
+`account-materials-bulk` 默认不写库。只有 `summary.ready` 等于 `summary.total` 后，再把同一 payload 改成 `dry_run=false` 才会导入账号池；Gemini CLI OAuth 会继续走 runtime credential sync 预检/写入逻辑。
+
 账号材料预检用于把“我要粘什么”变成可校验的导入包。后台可在“反代内核 -> 启动执行器 -> 账号材料导入”卡片中直接读取模板、粘贴材料、预检和导入；API 也可以直接调用。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
 
 ```bash

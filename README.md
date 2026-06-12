@@ -242,6 +242,14 @@ belong in encrypted `credential_value`, which fields belong in non-secret
 `resource_profile`, and the next UI/API action. The endpoint is read-only: it
 does not call upstream providers, download release assets, clone source repos,
 or create fake accounts.
+`GET /v1/admin/proxy-kernels/account-connection-package` turns that matrix into
+a copyable request package for account owners. For example, calling it with
+`provider_ids=openai_web_session,gemini_cli_oauth` returns the exact OpenAI Web
+session and Gemini CLI OAuth materials to provide, plus a
+`bulk_submission_json_template`. `POST
+/v1/admin/proxy-kernels/account-materials-bulk` accepts that template after the
+operator replaces placeholders with real material; it defaults to dry-run and
+uses the same provider-specific validation as the single-provider import path.
 `GET/POST /v1/admin/proxy-kernels/{provider_id}/account-materials` gives the
 operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also
