@@ -7524,6 +7524,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
     ("POST", "/v1/admin/proxy-kernels/source-repo/sync"),
+    ("GET", "/v1/admin/proxy-kernels/source-runtime-plan"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan"),
@@ -7805,6 +7806,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
+                ("GET", "/v1/admin/proxy-kernels/source-runtime-plan"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup"),
@@ -13580,6 +13582,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
         ("全量 Runtime 获取决策", "GET", "/v1/admin/proxy-kernels/runtime-acquisition-plan"),
         ("全量安装 Hash 候选计划", "POST", "/v1/admin/proxy-kernels/install-release-candidates"),
+        ("全量源码运行计划", "GET", "/v1/admin/proxy-kernels/source-runtime-plan"),
         ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
         ("全量生产就绪矩阵", "GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
@@ -13668,6 +13671,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/release-checksum-matrix",
         "/v1/admin/proxy-kernels/runtime-acquisition-plan",
         "/v1/admin/proxy-kernels/install-release-candidates",
+        "/v1/admin/proxy-kernels/source-runtime-plan",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
@@ -13715,6 +13719,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/release-checksum-matrix",
         "/v1/admin/proxy-kernels/runtime-acquisition-plan",
         "/v1/admin/proxy-kernels/install-release-candidates",
+        "/v1/admin/proxy-kernels/source-runtime-plan",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
@@ -14575,6 +14580,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-source-status">查看源码状态</button>
                   <button class="op" type="button" id="kernel-source-sync-needed-plan">source-repo 缺口计划</button>
                   <button class="primary" type="button" id="kernel-source-sync-needed">同步需要源码参考</button>
+                  <button class="op" type="button" id="kernel-source-runtime-plan-all">全量源码运行计划</button>
                   <button class="op" type="button" id="kernel-source-runtime-plan">源码运行计划</button>
                   <button class="op" type="button" id="kernel-source-runtime-setup">源码准备 dry-run</button>
                   <button class="op" type="button" id="kernel-source-runtime-launcher">生成启动器 dry-run</button>
@@ -15652,6 +15658,23 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           renderKernelSourcePlanPanel(provider);
           return payload;
         }}
+        async function loadAllKernelSourceRuntimePlans() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/source-runtime-plan');
+          const rows = Array.isArray(payload.data) ? payload.data : [];
+          rows.forEach(item => {{
+            const provider = item.provider_id;
+            if (!provider) return;
+            proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+              source_runtime_plan: item,
+              source_repo: item.source_repo || kernelHint(provider).source_repo || {{}},
+            }});
+          }});
+          const output = document.getElementById('kernel-source-output') || result;
+          if (output) output.textContent = JSON.stringify(payload, null, 2);
+          renderKernelSourceRuntimeMatrixPanel(payload);
+          renderKernelSummary(selectedKernelProvider());
+          return payload;
+        }}
         async function prepareKernelSourceRuntimeSetup(dryRun = true) {{
           const provider = document.getElementById('kernel-source-provider')?.value || selectedKernelProvider();
           syncKernelSelects(provider);
@@ -16047,6 +16070,43 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }}
         function commandLineText(command) {{
           return Array.isArray(command) && command.length ? command.join(' ') : '等待平台识别';
+        }}
+        function renderKernelSourceRuntimeMatrixPanel(payload) {{
+          const panel = document.getElementById('kernel-source-plan-panel');
+          if (!panel || !payload) return;
+          const rows = Array.isArray(payload.data) ? payload.data : [];
+          const summary = payload.summary || {{}};
+          const tableRows = rows.map(row => {{
+            const candidate = row.candidate_summary || {{}};
+            const source = row.source_repo || {{}};
+            const next = row.next_action || {{}};
+            return `
+              <tr>
+                <td><code>${{escapeHtml(row.provider_id || '')}}</code></td>
+                <td>${{row.source_available ? '已同步' : '未同步'}}</td>
+                <td>${{escapeHtml((row.detected_project_types || []).join(', ') || '未识别')}}</td>
+                <td>${{Number(candidate.dependency_command_count || 0)}} / ${{Number(candidate.build_command_count || 0)}} / ${{Number(candidate.start_command_count || 0)}}</td>
+                <td>${{escapeHtml(next.label || row.status || '')}}</td>
+                <td><code>${{escapeHtml(source.path || '')}}</code></td>
+              </tr>
+            `;
+          }}).join('');
+          panel.innerHTML = `
+            <h3>全量源码运行计划</h3>
+            <p class="note">只读扫描已同步的 source-repo，不安装依赖、不启动进程、不执行第三方代码。用于判断每个定型内核下一步是同步源码、准备依赖、生成 hash 启动器，还是人工阅读源码。</p>
+            <div class="source-plan-grid">
+              <div class="source-plan-card"><b>源码已就绪</b><span>${{Number(summary.source_available || 0)}} / ${{Number(summary.total || 0)}}</span><code>source-repo only when needed</code></div>
+              <div class="source-plan-card"><b>可准备依赖</b><span>${{Number(summary.ready_for_setup || 0)}}</span><code>source-runtime-setup dry-run first</code></div>
+              <div class="source-plan-card"><b>可生成启动器</b><span>${{Number(summary.ready_for_launcher || 0)}}</span><code>source-runtime-launcher</code></div>
+              <div class="source-plan-card"><b>需人工阅读</b><span>${{Number(summary.needs_manual_review || 0)}}</span><code>README / adapter rewrite</code></div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Provider</th><th>源码</th><th>类型</th><th>依赖/构建/启动</th><th>下一步</th><th>路径</th></tr></thead>
+                <tbody>${{tableRows || '<tr><td colspan="6">暂无源码运行计划。</td></tr>'}}</tbody>
+              </table>
+            </div>
+          `;
         }}
         function renderKernelSourcePlanPanel(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
@@ -17492,6 +17552,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-source-sync-needed')?.addEventListener('click', async () => {{
           try {{
             const payload = await syncNeededKernelSourceRepos(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-runtime-plan-all')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelSourceRuntimePlans();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -21638,6 +21704,22 @@ def admin_proxy_kernels_source_repo_sync(
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc), "source_repo_policy": "only finalized kernel repositories may be cloned into source-repo, and release binaries remain preferred"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/source-runtime-plan")
+def admin_proxy_kernels_source_runtime_plan(
+    provider_ids: str = "",
+    base_url: str = "",
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_source_runtime_plan_matrix(db, selected, base_url=base_url)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "source_runtime_plan_policy": "only finalized kernel repositories may be inspected; source code is never executed by this read-only endpoint"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/live-workspace")
@@ -26633,6 +26715,127 @@ def build_proxy_kernel_source_repo_sync_matrix(
             "official_sdk_api": "forbidden",
             "third_party_public_service": "forbidden",
             "purpose": "protocol inspection, local build input, or platform-native adapter rewrite when release binaries are missing or insufficient",
+        },
+    }
+
+
+def proxy_kernel_source_runtime_next_action(plan: dict[str, Any]) -> dict[str, Any]:
+    provider_id = str(plan.get("provider_id") or "{provider_id}")
+    if not plan.get("source_available"):
+        return {
+            "id": "source_repo_sync",
+            "label": "同步 source-repo",
+            "reason": "源码参考仓库尚未同步，先同步后才能识别依赖、构建和启动候选。",
+            "primary_api": f"/v1/admin/proxy-kernels/{provider_id}/source-repo/sync",
+        }
+    setup_candidates = [
+        item
+        for item in [*(plan.get("dependency_commands") or []), *(plan.get("build_commands") or [])]
+        if isinstance(item, dict) and item.get("command") and not item.get("reference_only")
+    ]
+    if setup_candidates:
+        first = setup_candidates[0]
+        return {
+            "id": "source_runtime_setup",
+            "label": "准备源码依赖/构建",
+            "reason": "已识别依赖或构建命令。先 dry-run 核对命令，再决定是否实际执行。",
+            "primary_api": f"/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup",
+            "command_id": first.get("id") or "",
+            "command": first.get("command") or [],
+        }
+    preferred = plan.get("preferred_start_command") if isinstance(plan.get("preferred_start_command"), dict) else {}
+    if preferred.get("command"):
+        return {
+            "id": "source_runtime_launcher",
+            "label": "生成 source-runtime hash 启动器",
+            "reason": "已识别启动候选。生成受控 launcher 后仍通过 start-runtime 进入 loopback runtime。",
+            "primary_api": f"/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher",
+            "command_id": preferred.get("id") or "",
+            "command": preferred.get("command") or [],
+        }
+    return {
+        "id": "manual_source_review",
+        "label": "人工阅读源码说明",
+        "reason": "源码已同步，但未识别出可直接包装的依赖、构建或启动命令。需要阅读 README 或重写 adapter/launcher。",
+        "primary_api": f"/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan",
+    }
+
+
+def proxy_kernel_source_runtime_plan_status(plan: dict[str, Any]) -> str:
+    if not plan.get("source_available"):
+        return "needs_source_repo"
+    action_id = str((plan.get("next_action") or {}).get("id") or "")
+    if action_id == "source_runtime_setup":
+        return "ready_for_setup"
+    if action_id == "source_runtime_launcher":
+        return "ready_for_launcher"
+    return "needs_manual_review"
+
+
+def proxy_kernel_source_runtime_plan_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        for item in row.get("detected_project_types") or []:
+            key = str(item)
+            type_counts[key] = type_counts.get(key, 0) + 1
+    return {
+        "total": len(rows),
+        "source_available": sum(1 for row in rows if row.get("source_available")),
+        "needs_source_repo": status_counts.get("needs_source_repo", 0),
+        "ready_for_setup": status_counts.get("ready_for_setup", 0),
+        "ready_for_launcher": status_counts.get("ready_for_launcher", 0),
+        "needs_manual_review": status_counts.get("needs_manual_review", 0),
+        "with_start_candidates": sum(1 for row in rows if row.get("start_command_candidates")),
+        "with_dependency_commands": sum(1 for row in rows if row.get("dependency_commands")),
+        "with_build_commands": sum(1 for row in rows if row.get("build_commands")),
+        "detected_project_type_counts": type_counts,
+        "status_counts": status_counts,
+    }
+
+
+def build_proxy_kernel_source_runtime_plan_matrix(
+    db: Session,
+    provider_ids: list[str] | None = None,
+    *,
+    base_url: str = "",
+) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows: list[dict[str, Any]] = []
+    for provider_id in selected:
+        plan = proxy_kernel_service.source_runtime_plan(provider_id, base_url=base_url)
+        next_action = proxy_kernel_source_runtime_next_action(plan)
+        row = {
+            **plan,
+            "status": "",
+            "next_action": next_action,
+            "candidate_summary": {
+                "dependency_command_count": len(plan.get("dependency_commands") or []),
+                "build_command_count": len(plan.get("build_commands") or []),
+                "start_command_count": len(plan.get("start_command_candidates") or []),
+                "preferred_start_command_id": (plan.get("preferred_start_command") or {}).get("id") if isinstance(plan.get("preferred_start_command"), dict) else "",
+                "launcher_template_ready": bool((plan.get("launcher_payload_template") or {}).get("command")),
+            },
+        }
+        row["status"] = proxy_kernel_source_runtime_plan_status(row)
+        rows.append(row)
+    return {
+        "object": "media2api.proxy_kernel.source_runtime_plan_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "base_url": (base_url or "").strip(),
+        "summary": proxy_kernel_source_runtime_plan_matrix_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "executes_source_code": False,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "shell": "forbidden",
+            "managed_runtime_listener": "loopback_only",
         },
     }
 

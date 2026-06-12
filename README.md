@@ -250,9 +250,12 @@ an adapter rewrite needs reference code. Synced source repositories can be
 inspected for Node/Go/Python/Docker runtime commands, then wrapped in a
 SHA256-recorded launcher artifact under the persistent
 `MEDIA2API_PROXY_KERNEL_DIR` runtime directory; the launcher still runs through
-the same loopback-only `start-runtime` gate. Source dependency/build setup is
-also exposed as a planned command runner and only executes commands discovered
-by `source-runtime-plan` with `shell=false`. Operator handoff packages include
+the same loopback-only `start-runtime` gate. A bulk source-runtime-plan matrix
+summarizes synced repositories, detected project types, setup commands, start
+candidates, and next actions without executing third-party code. Source
+dependency/build setup is also exposed as a planned command runner and only
+executes commands discovered by `source-runtime-plan` with `shell=false`.
+Operator handoff packages include
 the same source setup and launcher payloads, so release and source fallback
 paths can be advanced through one dry-run-first workflow.
 After a release asset is installed and SHA256-verified, operators should run
