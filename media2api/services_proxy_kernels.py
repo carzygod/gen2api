@@ -1023,6 +1023,160 @@ class ProxyKernelRuntimeService:
             })
         return written
 
+    def runtime_account_auth_dir(self, provider_id: str) -> dict[str, Any]:
+        self.require_spec(provider_id)
+        if provider_id != "gemini_cli_oauth":
+            return {
+                "supported": False,
+                "status": "unsupported",
+                "message": "This provider does not expose a managed auth-dir credential sync contract yet.",
+            }
+        provider_root = (self.root / provider_id).resolve()
+        process = self.process_status(provider_id)
+        candidates: list[tuple[str, Path]] = []
+        for item in process.get("config_files") or []:
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            path = Path(str(item["path"])).expanduser().resolve()
+            if not self.path_within(path, provider_root) or not path.exists():
+                continue
+            auth_dir = self.auth_dir_from_config_file(path, Path(str(process.get("cwd") or path.parent)))
+            if auth_dir:
+                candidates.append((f"config:{path}", auth_dir))
+        cwd_text = str(process.get("cwd") or "").strip()
+        if cwd_text:
+            cwd = Path(cwd_text).expanduser().resolve()
+            if self.path_within(cwd, provider_root):
+                candidates.append(("process_cwd_default", cwd / "auth"))
+        candidates.append(("provider_root_default", provider_root / "auth"))
+
+        for source, path in candidates:
+            resolved = path.expanduser().resolve()
+            if self.path_within(resolved, provider_root):
+                return {
+                    "supported": True,
+                    "status": "ready",
+                    "auth_dir": str(resolved),
+                    "source": source,
+                    "provider_root": str(provider_root),
+                    "process_running": bool(process.get("running")),
+                }
+        return {
+            "supported": True,
+            "status": "not_configured",
+            "auth_dir": "",
+            "provider_root": str(provider_root),
+            "process_running": bool(process.get("running")),
+            "message": "No provider-local auth-dir could be resolved from the managed runtime state.",
+        }
+
+    def auth_dir_from_config_file(self, path: Path, workdir: Path) -> Path | None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        for line in text.splitlines():
+            match = re.match(r"^\s*auth-dir\s*:\s*(.+?)\s*(?:#.*)?$", line)
+            if not match:
+                continue
+            value = match.group(1).strip().strip('"').strip("'")
+            if not value:
+                return None
+            auth_dir = Path(value).expanduser()
+            if not auth_dir.is_absolute():
+                auth_dir = workdir / auth_dir
+            return auth_dir.resolve()
+        return None
+
+    def write_runtime_account_auth_json(
+        self,
+        provider_id: str,
+        *,
+        account_id: str,
+        file_name: str,
+        payload: dict[str, Any],
+        dry_run: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        auth_dir_info = self.runtime_account_auth_dir(provider_id)
+        if not auth_dir_info.get("supported"):
+            return {
+                "object": "media2api.proxy_kernel.runtime_credential_sync",
+                "provider_id": provider_id,
+                "account_id": account_id,
+                "dry_run": dry_run,
+                "status": auth_dir_info.get("status") or "unsupported",
+                "ok": False,
+                "auth_dir": auth_dir_info,
+            }
+        auth_dir_text = str(auth_dir_info.get("auth_dir") or "")
+        if not auth_dir_text:
+            return {
+                "object": "media2api.proxy_kernel.runtime_credential_sync",
+                "provider_id": provider_id,
+                "account_id": account_id,
+                "dry_run": dry_run,
+                "status": "auth_dir_not_configured",
+                "ok": False,
+                "auth_dir": auth_dir_info,
+            }
+
+        safe_name = self.safe_filename(file_name or f"{account_id}.json")
+        if not safe_name.lower().endswith(".json"):
+            safe_name += ".json"
+        auth_dir = Path(auth_dir_text).expanduser().resolve()
+        provider_root = (self.root / provider_id).resolve()
+        target = (auth_dir / safe_name).resolve()
+        if not self.path_within(auth_dir, provider_root) or not self.path_within(target, auth_dir):
+            raise ValueError("RUNTIME_AUTH_FILE_OUTSIDE_PROVIDER_DIR")
+        content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        if len(content.encode("utf-8")) > 256 * 1024:
+            raise ValueError("RUNTIME_AUTH_FILE_TOO_LARGE")
+        result = {
+            "object": "media2api.proxy_kernel.runtime_credential_sync",
+            "provider_id": provider_id,
+            "account_id": account_id,
+            "dry_run": dry_run,
+            "status": "planned" if dry_run else "synced",
+            "ok": True,
+            "auth_dir": auth_dir_info,
+            "file": {
+                "path": str(target),
+                "name": safe_name,
+                "size_bytes": len(content.encode("utf-8")),
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            },
+            "metadata": metadata or {},
+            "policy": {
+                "listener": "loopback_only",
+                "official_sdk_api": "forbidden",
+                "credential_echo": "redacted",
+            },
+        }
+        if dry_run:
+            return result
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+        state = self.load_state()
+        entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        synced = entry.setdefault("runtime_account_materials", {})
+        synced[account_id] = {
+            "path": str(target),
+            "sha256": self.file_sha256(target),
+            "size_bytes": target.stat().st_size,
+            "metadata": metadata or {},
+            "synced_at": self.utcnow(),
+        }
+        self.save_state(state)
+        result["file"]["sha256"] = synced[account_id]["sha256"]
+        result["file"]["size_bytes"] = synced[account_id]["size_bytes"]
+        result["state"] = synced[account_id]
+        return result
+
     def command_references_path(self, command: list[str], path: Path) -> bool:
         target = path.resolve()
         for item in command:

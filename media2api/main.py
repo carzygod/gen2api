@@ -1358,6 +1358,15 @@ class ProxyKernelAccountMaterialsRequest(BaseModel):
     run_health_check: bool | None = None
 
 
+class ProxyKernelRuntimeCredentialSyncRequest(BaseModel):
+    dry_run: bool = True
+    account_id: str | None = None
+    credential_value: Any | None = None
+    credential_ref: str | None = None
+    credential_secret_id: str | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProxyKernelRuntimeStopRequest(BaseModel):
     grace_seconds: float = 5
 
@@ -7488,6 +7497,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync"),
     ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run"),
@@ -7767,6 +7777,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync"),
                 ("GET", "/v1/admin/proxy-kernels/operator-handoff"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run"),
@@ -14478,10 +14489,15 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                     <div class="account-material-actions">
                       <button class="op" type="button" id="kernel-account-preflight">预检材料</button>
                       <button class="primary" type="button" id="kernel-account-import">导入账号池</button>
+                      <button class="op" type="button" id="kernel-account-runtime-sync">同步 Runtime 凭据</button>
                     </div>
                     <div class="account-material-status warn" id="kernel-account-material-status">
                       <b>等待账号材料</b>
                       选择 provider 后点击“账号材料预检”，系统会显示该平台具体要粘贴的字段。
+                    </div>
+                    <div class="account-material-status warn" id="kernel-account-runtime-sync-status">
+                      <b>Runtime 凭据同步</b>
+                      导入 Gemini CLI OAuth 等本地执行器材料后，会写入受控 runtime 的 auth-dir。
                     </div>
                     <details class="account-material-template">
                       <summary>字段模板和获取说明</summary>
@@ -16086,6 +16102,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const provider = providerId || selectedKernelProvider();
           const badge = document.getElementById('kernel-account-material-badge');
           const statusBox = document.getElementById('kernel-account-material-status');
+          const runtimeSyncBox = document.getElementById('kernel-account-runtime-sync-status');
           const templateBox = document.getElementById('kernel-account-material-template');
           const credential = document.getElementById('kernel-account-credential');
           const operations = document.getElementById('kernel-account-operations');
@@ -16130,6 +16147,19 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               ${{missingHtml}}
             `;
           }}
+          if (runtimeSyncBox) {{
+            const sync = payload.runtime_credential_sync || {{}};
+            const syncFile = sync.file || {{}};
+            const syncAuthDir = sync.auth_dir || {{}};
+            runtimeSyncBox.className = 'account-material-status ' + (sync.ok ? 'ok' : 'warn');
+            runtimeSyncBox.innerHTML = `
+              <b>Runtime 凭据同步：${{escapeHtml(sync.status || '等待材料')}}</b>
+              <div>${{escapeHtml(sync.message || (sync.ok ? '账号材料可写入本地执行器 auth-dir。' : '仅支持需要本地 auth-dir 的执行器材料同步。'))}}</div>
+              ${{syncFile.path ? `<code>${{escapeHtml(syncFile.path)}}</code>` : ''}}
+              ${{syncFile.sha256 ? `<code>sha256:${{escapeHtml(syncFile.sha256)}}</code>` : ''}}
+              ${{syncAuthDir.auth_dir ? `<small>auth-dir: ${{escapeHtml(syncAuthDir.auth_dir)}}</small>` : ''}}
+            `;
+          }}
           if (templateBox) {{
             templateBox.textContent = prettyJson({{
               credential_value_json_template: template,
@@ -16137,6 +16167,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               required_fields: payload.required_fields || [],
               any_of_groups: payload.any_of_groups || [],
               guide: payload.guide || {{}},
+              runtime_credential_sync: payload.runtime_credential_sync || {{}},
             }}, '尚未读取模板。');
           }}
         }}
@@ -16200,6 +16231,29 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           renderKernelSummary(provider);
           renderKernelAccountMaterialsPanel(provider, payload);
           if (!dryRun && payload.ok) await loadKernelActivationWorkflow(provider);
+          return payload;
+        }}
+        async function syncKernelRuntimeCredentials(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          if (!kernelHint(provider).account_materials_package) await loadKernelAccountMaterials(provider);
+          const body = buildKernelAccountMaterialsBody(provider, false);
+          const syncBody = {{
+            dry_run: false,
+            account_id: body.account_id || null,
+            credential_ref: body.credential_ref || null,
+            credential_value: body.credential_value || '',
+            credential_secret_id: body.credential_secret_id || null,
+            resource_profile: body.resource_profile || {{}},
+          }};
+          Object.keys(syncBody).forEach(key => {{
+            if (syncBody[key] === null || syncBody[key] === '') delete syncBody[key];
+          }});
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-credentials/sync', 'POST', syncBody);
+          const current = kernelHint(provider).account_materials_package || {{}};
+          current.runtime_credential_sync = payload;
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{ account_materials_package: current }});
+          renderKernelAccountMaterialsPanel(provider, current);
           return payload;
         }}
         async function loadAllKernelMaterialsRequests() {{
@@ -17343,6 +17397,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-account-import')?.addEventListener('click', async () => {{
           try {{
             const payload = await submitKernelAccountMaterials(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-account-runtime-sync')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await syncKernelRuntimeCredentials();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -21363,6 +21423,22 @@ def admin_proxy_kernel_account_materials_submit(
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
 
+@app.post("/v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync")
+def admin_proxy_kernel_runtime_credentials_sync(
+    provider_id: str,
+    req: ProxyKernelRuntimeCredentialSyncRequest = ProxyKernelRuntimeCredentialSyncRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        proxy_kernel_service.require_spec(provider_id)
+        return build_proxy_kernel_runtime_credential_sync(db, provider_id, req)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_credential_policy": "runtime auth files must stay under the provider proxy-kernel directory"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/operator-handoff")
 def admin_proxy_kernels_operator_handoff(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -22607,6 +22683,250 @@ def credential_material_contains_template_placeholder(value: Any) -> bool:
     return False
 
 
+GEMINI_CLI_OAUTH_CLIENT_ID_ENV = "MEDIA2API_GEMINI_CLI_OAUTH_CLIENT_ID"
+GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV = "MEDIA2API_GEMINI_CLI_OAUTH_CLIENT_SECRET"
+GEMINI_CLI_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
+GEMINI_CLI_TOKEN_KEYS = {
+    "access_token",
+    "refresh_token",
+    "token_type",
+    "expiry",
+    "expiry_date",
+    "expires_at",
+    "scope",
+    "scopes",
+    "token_uri",
+    "client_id",
+    "client_secret",
+    "universe_domain",
+}
+
+
+def parse_json_object_material(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return deepcopy(value)
+    text = credential_material_to_text(value)
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def decode_base64_json_object(value: Any) -> dict[str, Any]:
+    text = credential_material_to_text(value)
+    if not text:
+        return {}
+    if "," in text and text.lower().startswith("data:"):
+        text = text.split(",", 1)[1]
+    padding = "=" * ((4 - len(text) % 4) % 4)
+    try:
+        raw = base64.b64decode((text + padding).encode("utf-8"), validate=False)
+    except Exception:
+        return {}
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def gemini_cli_oauth_candidate_from_material(value: Any) -> tuple[dict[str, Any], str]:
+    root = parse_json_object_material(value)
+    if not root:
+        return {}, ""
+    for key in ["gemini_oauth_creds_base64", "oauth_creds_base64", "credentials_base64"]:
+        if profile_value_present(root.get(key)):
+            return decode_base64_json_object(root.get(key)), key
+    for key in ["gemini_oauth_creds_file", "gemini_oauth_credentials", "oauth_creds", "credentials", "credential"]:
+        if not profile_value_present(root.get(key)):
+            continue
+        child = root.get(key)
+        if isinstance(child, dict):
+            return deepcopy(child), key
+        parsed = parse_json_object_material(child)
+        if parsed:
+            return parsed, key
+        return {}, key
+    if root.get("token") or any(profile_value_present(root.get(key)) for key in GEMINI_CLI_TOKEN_KEYS):
+        return root, "credential_value"
+    return {}, ""
+
+
+def normalize_gemini_cli_oauth_auth_json(
+    credential_value: Any,
+    *,
+    account_id: str,
+    label: str,
+    resource_profile: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    candidate, source_field = gemini_cli_oauth_candidate_from_material(credential_value)
+    if not candidate:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "GEMINI_CLI_OAUTH_JSON_REQUIRED",
+                "message": "Submit gemini_oauth_creds_file as JSON content/object or gemini_oauth_creds_base64 as base64-encoded JSON.",
+            },
+        )
+
+    resource_profile = resource_profile or {}
+    token = candidate.get("token")
+    if isinstance(token, str):
+        token = parse_json_object_material(token)
+    if not isinstance(token, dict):
+        token = {key: candidate.get(key) for key in GEMINI_CLI_TOKEN_KEYS if profile_value_present(candidate.get(key))}
+    token = {str(key): value for key, value in dict(token or {}).items() if profile_value_present(value)}
+    if not token or not any(token.get(key) for key in ("refresh_token", "access_token")):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "GEMINI_CLI_OAUTH_TOKEN_REQUIRED",
+                "message": "Gemini CLI OAuth material must include token.refresh_token or token.access_token.",
+            },
+        )
+
+    token.setdefault("token_uri", "https://oauth2.googleapis.com/token")
+    env_client_id = os.environ.get(GEMINI_CLI_OAUTH_CLIENT_ID_ENV, "").strip()
+    env_client_secret = os.environ.get(GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV, "").strip()
+    if env_client_id:
+        token.setdefault("client_id", env_client_id)
+    if env_client_secret:
+        token.setdefault("client_secret", env_client_secret)
+    token.setdefault("scopes", GEMINI_CLI_OAUTH_SCOPES)
+    token.setdefault("universe_domain", "googleapis.com")
+
+    clean: dict[str, Any] = {
+        key: value
+        for key, value in candidate.items()
+        if key not in GEMINI_CLI_TOKEN_KEYS and key not in {"token", "gemini_oauth_creds_file", "gemini_oauth_creds_base64"}
+    }
+    clean["type"] = "gemini"
+    clean["token"] = token
+    email = (
+        str(candidate.get("email") or resource_profile.get("email") or resource_profile.get("account_email") or "").strip()
+        or str(label or account_id).strip()
+    )
+    project_id = str(
+        candidate.get("project_id")
+        or candidate.get("gemini_project_id")
+        or resource_profile.get("project_id")
+        or resource_profile.get("gemini_project_id")
+        or ""
+    ).strip()
+    if email:
+        clean["email"] = email
+    if project_id:
+        clean["project_id"] = project_id
+    clean["auto"] = bool(clean.get("auto", not bool(project_id)))
+    clean["checked"] = bool(clean.get("checked", False))
+    metadata = {
+        "source_field": source_field,
+        "email_present": bool(email),
+        "project_id_present": bool(project_id),
+        "token_fields": sorted(token.keys()),
+    }
+    return clean, metadata
+
+
+def runtime_account_auth_file_name(provider_id: str, account_id: str, auth_payload: dict[str, Any]) -> str:
+    if provider_id == "gemini_cli_oauth":
+        email = str(auth_payload.get("email") or account_id).strip()
+        project_id = str(auth_payload.get("project_id") or "auto").strip()
+        return f"gemini-{email}-{project_id}.json"
+    return f"{provider_id}-{account_id}.json"
+
+
+def build_proxy_kernel_runtime_credential_sync(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelRuntimeCredentialSyncRequest,
+) -> dict[str, Any]:
+    account: models.AccountResource | None = None
+    if req.account_id:
+        account = db.get(models.AccountResource, req.account_id)
+        if not account or account.provider_id != provider_id:
+            if credential_material_to_text(req.credential_value) or (req.credential_ref or "").strip() or req.credential_secret_id:
+                account = None
+            else:
+                return {
+                    "object": "media2api.proxy_kernel.runtime_credential_sync",
+                    "provider_id": provider_id,
+                    "account_id": req.account_id,
+                    "dry_run": req.dry_run,
+                    "status": "needs_credential_material",
+                    "ok": False,
+                    "message": "Account is not imported yet; submit credential_value or import account materials first.",
+                }
+
+    credential_ref = (req.credential_ref or "").strip()
+    if not credential_ref and req.credential_secret_id:
+        credential_ref = f"secret://{req.credential_secret_id}"
+    if not credential_ref and account:
+        credential_ref = account.credential_ref
+
+    credential_value = req.credential_value if req.credential_value not in (None, "") else ""
+    if not credential_material_to_text(credential_value) and credential_ref:
+        if credential_ref.startswith("secret://"):
+            credential_value = credential_secret_ref_value_for_validation(db, credential_ref)
+        else:
+            return {
+                "object": "media2api.proxy_kernel.runtime_credential_sync",
+                "provider_id": provider_id,
+                "account_id": account.id if account else (req.account_id or ""),
+                "dry_run": req.dry_run,
+                "status": "reference_only",
+                "ok": False,
+                "credential_ref": redact_credential_ref(credential_ref),
+                "message": "Runtime credential sync requires decryptable local secret:// material; external agent:// references remain platform-side references.",
+            }
+    if not credential_material_to_text(credential_value):
+        return {
+            "object": "media2api.proxy_kernel.runtime_credential_sync",
+            "provider_id": provider_id,
+            "account_id": account.id if account else (req.account_id or ""),
+            "dry_run": req.dry_run,
+            "status": "needs_credential_material",
+            "ok": False,
+            "message": "Provide credential_value, credential_secret_id, credential_ref, or account_id with a secret:// credential.",
+        }
+
+    account_id = account.id if account else (req.account_id or f"acct_{provider_id}_runtime")
+    label = account.label if account else account_id
+    resource_profile = req.resource_profile or (loads(account.resource_profile_json, {}) if account else {})
+    if provider_id == "gemini_cli_oauth":
+        auth_payload, metadata = normalize_gemini_cli_oauth_auth_json(
+            credential_value,
+            account_id=account_id,
+            label=label,
+            resource_profile=resource_profile,
+        )
+    else:
+        return {
+            "object": "media2api.proxy_kernel.runtime_credential_sync",
+            "provider_id": provider_id,
+            "account_id": account_id,
+            "dry_run": req.dry_run,
+            "status": "unsupported",
+            "ok": False,
+            "message": "Runtime credential file sync is currently implemented for gemini_cli_oauth.",
+        }
+    return proxy_kernel_service.write_runtime_account_auth_json(
+        provider_id,
+        account_id=account_id,
+        file_name=runtime_account_auth_file_name(provider_id, account_id, auth_payload),
+        payload=auth_payload,
+        dry_run=req.dry_run,
+        metadata=metadata,
+    )
+
+
 def proxy_kernel_account_material_payload_from_request(
     provider_id: str,
     template: Any,
@@ -22703,6 +23023,13 @@ def proxy_kernel_account_material_preflight(db: Session, provider_id: str, paylo
                     "missing_input_fields": [{"name": "credential_value", "label": "Real cookie/session/profile material"}],
                 },
             )
+        if provider_id == "gemini_cli_oauth" and credential_material_to_text(payload.get("credential_value")):
+            normalize_gemini_cli_oauth_auth_json(
+                payload.get("credential_value"),
+                account_id=str(payload.get("account_id") or "acct_gemini_cli_oauth_01"),
+                label=str(payload.get("label") or "Gemini CLI OAuth account"),
+                resource_profile=payload.get("resource_profile") or {},
+            )
         if not payload.get("supported_operations") or not payload.get("supported_provider_models"):
             raise HTTPException(status_code=400, detail={"error": "ACCOUNT_CAPABILITIES_REQUIRED"})
         return {
@@ -22749,10 +23076,53 @@ def build_proxy_kernel_account_materials(
     value_template = proxy_kernel_account_material_value_template(account_materials)
     preflight = proxy_kernel_account_material_preflight(db, provider_id, payload)
     applied: dict[str, Any] = {}
+    runtime_credential_sync = build_proxy_kernel_runtime_credential_sync(
+        db,
+        provider_id,
+        ProxyKernelRuntimeCredentialSyncRequest(
+            dry_run=True,
+            account_id=payload.get("account_id"),
+            credential_value=payload.get("credential_value"),
+            credential_ref=payload.get("credential_ref"),
+            credential_secret_id=payload.get("credential_secret_id"),
+            resource_profile=payload.get("resource_profile") or {},
+        ),
+    ) if provider_id == "gemini_cli_oauth" else {"status": "unsupported", "ok": False}
     dry_run = True if req is None else bool(req.dry_run)
     if req is not None and not dry_run and preflight.get("ok"):
         account_req = AccountOnboardingRequest(**{**payload, "provider_id": provider_id})
         applied = apply_account_onboarding(db, account_req)
+        try:
+            runtime_credential_sync = build_proxy_kernel_runtime_credential_sync(
+                db,
+                provider_id,
+                ProxyKernelRuntimeCredentialSyncRequest(
+                    dry_run=False,
+                    account_id=((applied.get("account") or {}).get("id") if isinstance(applied.get("account"), dict) else None) or payload.get("account_id"),
+                    credential_value=payload.get("credential_value"),
+                    credential_ref=payload.get("credential_ref"),
+                    credential_secret_id=payload.get("credential_secret_id"),
+                    resource_profile=payload.get("resource_profile") or {},
+                ),
+            )
+        except HTTPException as exc:
+            runtime_credential_sync = {
+                "object": "media2api.proxy_kernel.runtime_credential_sync",
+                "provider_id": provider_id,
+                "dry_run": False,
+                "status": "failed",
+                "ok": False,
+                "detail": exc.detail,
+            }
+        except ValueError as exc:
+            runtime_credential_sync = {
+                "object": "media2api.proxy_kernel.runtime_credential_sync",
+                "provider_id": provider_id,
+                "dry_run": False,
+                "status": "failed",
+                "ok": False,
+                "error": str(exc),
+            }
         preflight = {**preflight, "status": "imported", "message": "Account material was imported and stored as a managed credential reference."}
     base = settings.public_base_url
     admin_key = "$MEDIA2API_API_KEY"
@@ -22773,6 +23143,7 @@ def build_proxy_kernel_account_materials(
         "ok": bool(preflight.get("ok")),
         "preflight": preflight,
         "applied": applied,
+        "runtime_credential_sync": runtime_credential_sync,
         "account_materials": account_materials,
         "payload_template": proxy_kernel_operator_account_payload_template(provider_id, template, materials, guide),
         "payload_preview": proxy_kernel_redact_account_material_payload(payload),
@@ -22792,6 +23163,7 @@ def build_proxy_kernel_account_materials(
             "inspect": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/account-materials",
             "preflight": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/account-materials -d '{json.dumps(post_payload, ensure_ascii=False, separators=(',', ':'))}'",
             "import": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/account-materials -d '{json.dumps({**post_payload, 'dry_run': False}, ensure_ascii=False, separators=(',', ':'))}'",
+            "sync_runtime_credentials": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync -d '{{\"dry_run\":true,\"account_id\":\"{payload.get('account_id') or 'acct_' + provider_id + '_01'}\"}}'",
             "activation_run": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/activation-run -d '{{\"dry_run\":true,\"steps\":[\"submit_account_material\"]}}'",
         },
         "policy": {

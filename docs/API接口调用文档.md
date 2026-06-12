@@ -1245,8 +1245,41 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/acco
 - `credential_value_env_template`: 等价的 `.env` 风格模板。
 - `preflight`: 是否已经满足该 provider 的开源项目输入要求。
 - `payload_preview`: 脱敏导入 payload，用于确认字段位置。
+- `runtime_credential_sync`: 需要本地凭据文件的 runtime 同步结果；例如 GEM-CLI-02 会把 Gemini CLI OAuth 材料规范化为 CLIProxyAPI 可读取的 `auth-dir/*.json`。
 
 如果直接提交模板里的 `<...>` 占位值，预检会返回 `CREDENTIAL_PLACEHOLDER_VALUE`；必须替换为真实 cookie/session/profile 后才能进入导入步骤。
+
+对于 `gemini_cli_oauth`，账号导入同时负责把 OAuth 材料写入受控 runtime 的 `auth-dir`。平台支持直接 JSON、JSON 字符串或 base64 JSON；响应只返回目标路径、大小和 SHA256，不回显 token 明文。OAuth 文件中如已包含 `client_id` / `client_secret` 会原样保留；如凭据文件缺少这些字段，可通过 `MEDIA2API_GEMINI_CLI_OAUTH_CLIENT_ID` 和 `MEDIA2API_GEMINI_CLI_OAUTH_CLIENT_SECRET` 环境变量补齐：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/gemini_cli_oauth/account-materials" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dry_run": true,
+    "credential_value": {
+      "gemini_oauth_creds_file": {
+        "access_token": "<access-token-if-present>",
+        "refresh_token": "<refresh-token>",
+        "client_id": "<oauth-client-id-if-not-in-token>",
+        "client_secret": "<oauth-client-secret-if-not-in-token>",
+        "email": "<google-account-email>",
+        "project_id": "<google-cloud-project-id>"
+      }
+    }
+  }'
+```
+
+确认 `preflight.ok=true` 且 `runtime_credential_sync.status=planned` 后，把 `dry_run` 改为 `false` 导入账号池并写入本地 auth 文件。若 runtime 重启、配置迁移或需要重新落盘，可单独重放同步步骤：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/gemini_cli_oauth/runtime-credentials/sync" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true, "account_id": "<existing-account-id>"}'
+```
+
+该接口只处理平台已允许的本地受控凭据文件，不会使用官方 SDK/API，也不会把凭据传到公网第三方服务。`credential_ref` 为 `agent://...` 的外部托管材料会保持引用状态，不会被平台写入文件；要由人工或外部代理完成落盘。
 
 查看操作者交付包，直接拿到账号导入、release 安装、runtime 启动、dry-run/live 验收的可复制模板。该接口只读，不会调用上游：
 
@@ -1570,7 +1603,7 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/connector-registry/refresh" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/activation-workflow`、`/v1/admin/proxy-kernels/production-gap-report`、`/v1/admin/proxy-kernels/go-live-package`、`/v1/admin/proxy-kernels/downstream-call-package`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/source-repo/sync`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/account-materials`、`/v1/admin/proxy-kernels/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/activation-workflow`、`/v1/admin/proxy-kernels/{provider_id}/production-gap-report`、`/v1/admin/proxy-kernels/{provider_id}/go-live-package`、`/v1/admin/proxy-kernels/{provider_id}/downstream-call-package`、`/v1/admin/proxy-kernels/{provider_id}/activation-run`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/activation-workflow`、`/v1/admin/proxy-kernels/production-gap-report`、`/v1/admin/proxy-kernels/go-live-package`、`/v1/admin/proxy-kernels/downstream-call-package`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/source-repo/sync`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/account-materials`、`/v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync`、`/v1/admin/proxy-kernels/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/activation-workflow`、`/v1/admin/proxy-kernels/{provider_id}/production-gap-report`、`/v1/admin/proxy-kernels/{provider_id}/go-live-package`、`/v1/admin/proxy-kernels/{provider_id}/downstream-call-package`、`/v1/admin/proxy-kernels/{provider_id}/activation-run`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Proxy Kernel Runtime Preflight | `/v1/admin/proxy-kernels/{provider_id}/runtime-preflight` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |

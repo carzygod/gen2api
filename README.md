@@ -228,6 +228,13 @@ operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also
 renders that package as a form, rejects unchanged `<...>` placeholders, and lets
 the operator preflight before importing the account pool entry.
+For managed runtimes that need local credential files, the import response also
+contains `runtime_credential_sync`. `POST
+/v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync` can replay that
+step later, for example after restarting GEM-CLI-02. Gemini CLI OAuth material
+is normalized into CLIProxyAPI-compatible `auth-dir/*.json` files under
+`MEDIA2API_PROXY_KERNEL_DIR`; the platform records the path, size, and SHA256
+but never echoes the token body.
 Runtime onboarding
 prefers fixed release binaries with explicit SHA256 verification. Full source
 repositories are synced into `source-repo/` only when release assets are

@@ -589,6 +589,79 @@ def main() -> None:
         finally:
             runtime_stop = assert_ok(client.post("/v1/admin/proxy-kernels/openai_web_session/stop-runtime", headers=headers, json={"grace_seconds": 1}))
             assert runtime_stop["process"]["running"] is False, runtime_stop
+        gemini_runtime_dir = settings.proxy_kernel_dir / "gemini_cli_oauth" / "smoke"
+        gemini_runtime_dir.mkdir(parents=True, exist_ok=True)
+        gemini_runtime_script = gemini_runtime_dir / "sleep_runtime.py"
+        gemini_runtime_script.write_text("import time\nprint('gemini runtime smoke ready', flush=True)\ntime.sleep(60)\n", encoding="utf-8")
+        gemini_runtime_config = gemini_runtime_dir / "config.yaml"
+        gemini_auth_dir = gemini_runtime_dir / "auth"
+        gemini_runtime_sha256 = hashlib.sha256(gemini_runtime_script.read_bytes()).hexdigest()
+        try:
+            gemini_runtime_start = assert_ok(
+                client.post(
+                    "/v1/admin/proxy-kernels/gemini_cli_oauth/start-runtime",
+                    headers=headers,
+                    json={
+                        "command": [sys.executable, str(gemini_runtime_script)],
+                        "base_url": "http://127.0.0.1:19083",
+                        "artifact_path": str(gemini_runtime_script),
+                        "expected_sha256": gemini_runtime_sha256,
+                        "config_files": [{"path": str(gemini_runtime_config), "content": f'auth-dir: "{gemini_auth_dir.as_posix()}"\n'}],
+                        "version": "smoke",
+                        "notes": "gemini runtime credential sync smoke",
+                        "replace_existing": True,
+                        "update_provider_base_url": False,
+                    },
+                )
+            )
+            assert gemini_runtime_start["process"]["running"] is True, gemini_runtime_start
+            gemini_credential_value = {
+                "gemini_oauth_creds_file": {
+                    "access_token": "fake-access-token",
+                    "refresh_token": "fake-refresh-token",
+                    "client_id": "smoke-oauth-client",
+                    "client_secret": "smoke-oauth-secret",
+                    "email": "smoke@example.com",
+                    "project_id": "smoke-project",
+                }
+            }
+            gemini_account = assert_ok(
+                client.post(
+                    "/v1/admin/proxy-kernels/gemini_cli_oauth/account-materials",
+                    headers=headers,
+                    json={
+                        "dry_run": False,
+                        "account_id": "acct_gemini_runtime_sync_smoke",
+                        "label": "Gemini Runtime Sync Smoke",
+                        "credential_value": gemini_credential_value,
+                        "supported_operations": ["text_to_image", "text_to_video"],
+                        "supported_provider_models": ["nano-banana-pro", "veo-3.1"],
+                        "concurrency_limit": 1,
+                        "upsert": True,
+                        "auto_create_mappings": True,
+                        "sync_capabilities": False,
+                        "run_health_check": False,
+                    },
+                )
+            )
+            runtime_sync = gemini_account["runtime_credential_sync"]
+            assert runtime_sync["ok"] is True and runtime_sync["status"] == "synced", runtime_sync
+            auth_file = Path(runtime_sync["file"]["path"])
+            assert auth_file.exists() and auth_file.parent == gemini_auth_dir, runtime_sync
+            auth_json = json.loads(auth_file.read_text(encoding="utf-8"))
+            assert auth_json["type"] == "gemini" and auth_json["email"] == "smoke@example.com" and auth_json["project_id"] == "smoke-project", auth_json
+            assert auth_json["token"]["refresh_token"] == "fake-refresh-token" and auth_json["token"]["client_id"], auth_json
+            manual_sync = assert_ok(
+                client.post(
+                    "/v1/admin/proxy-kernels/gemini_cli_oauth/runtime-credentials/sync",
+                    headers=headers,
+                    json={"dry_run": True, "account_id": "acct_gemini_runtime_sync_smoke"},
+                )
+            )
+            assert manual_sync["ok"] is True and manual_sync["status"] == "planned" and manual_sync["file"]["name"].endswith(".json"), manual_sync
+        finally:
+            gemini_runtime_stop = assert_ok(client.post("/v1/admin/proxy-kernels/gemini_cli_oauth/stop-runtime", headers=headers, json={"grace_seconds": 1}))
+            assert gemini_runtime_stop["process"]["running"] is False, gemini_runtime_stop
         dashboard = assert_ok(client.get("/v1/admin/dashboard", headers=headers))
         assert dashboard["object"] == "admin.dashboard" and "success_rate" in dashboard["jobs"] and "usage_today" in dashboard["billing"], dashboard
         assert "worker_concurrency" in dashboard["runtime"] and "active_leases" in dashboard["accounts"], dashboard
@@ -608,7 +681,7 @@ def main() -> None:
             assert admin_dom in admin_page.text, admin_dom
         for runtime_acquisition_dom in ["kernel-runtime-acquisition-all", "kernel-runtime-acquisition", "loadKernelRuntimeAcquisitionPlan", "loadAllKernelRuntimeAcquisitionPlans", "runtime_acquisition_plan", "/v1/admin/proxy-kernels/runtime-acquisition-plan", "/runtime-acquisition-plan", "/v1/admin/proxy-kernels/openai_web_session/runtime-acquisition-plan"]:
             assert runtime_acquisition_dom in admin_page.text, runtime_acquisition_dom
-        for account_material_dom in ["kernel-account-materials", "kernel-account-material-panel", "kernel-account-preflight", "kernel-account-import", "submitKernelAccountMaterials", "renderKernelAccountMaterialsPanel", "loadKernelAccountMaterials", "/account-materials"]:
+        for account_material_dom in ["kernel-account-materials", "kernel-account-material-panel", "kernel-account-preflight", "kernel-account-import", "kernel-account-runtime-sync", "kernel-account-runtime-sync-status", "submitKernelAccountMaterials", "syncKernelRuntimeCredentials", "renderKernelAccountMaterialsPanel", "loadKernelAccountMaterials", "/account-materials", "/runtime-credentials/sync"]:
             assert account_material_dom in admin_page.text, account_material_dom
         for activation_dom in ["kernel-activation-workflow-all", "kernel-activation-workflow", "kernel-production-gap-report-all", "kernel-production-gap-report", "kernel-activation-run", "kernel-activation-overview", "kernel-activation-panel", "activation-stage-grid", "activation-provider-grid", "data-activation-action", "runActivationAction", "runKernelActivationRun", "syncProviderEntryFields", "inspect-provider", "apply-routing", "open-account", "open-runtime", "open-users", "renderActivationWorkflowPanel", "renderActivationWorkflowOverview", "renderProductionGapReportOverview", "/v1/admin/proxy-kernels/activation-workflow", "/activation-workflow", "/v1/admin/proxy-kernels/production-gap-report", "/production-gap-report", "/activation-run"]:
             assert activation_dom in admin_page.text, activation_dom
