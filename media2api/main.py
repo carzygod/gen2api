@@ -7277,6 +7277,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels"),
     ("GET", "/v1/admin/proxy-kernels/routing-plan"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
+    ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -7515,6 +7517,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels"),
                 ("GET", "/v1/admin/proxy-kernels/routing-plan"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
+                ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -13292,6 +13296,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("反代内核清单", "GET", "/v1/admin/proxy-kernels"),
         ("全量路由计划", "GET", "/v1/admin/proxy-kernels/routing-plan"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
+        ("全量上线清单", "GET", "/v1/admin/proxy-kernels/go-live-checklist"),
+        ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
@@ -13352,6 +13358,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/apply-routing",
+        "/v1/admin/proxy-kernels/go-live-checklist",
+        "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13381,6 +13389,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/apply-routing",
+        "/v1/admin/proxy-kernels/go-live-checklist",
+        "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
@@ -13847,6 +13857,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:360px">
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
+                  <button class="op" type="button" id="kernel-go-live-all">查看全部上线清单</button>
                   <button class="op" type="button" data-jump-tab="oauth">去导入账号</button>
                 </div>
               </div>
@@ -13868,6 +13879,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
+                  <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
                 </div>
               </div>
               <div class="kernel-rail">
@@ -14300,6 +14312,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const installed = hint.installed || {{}};
           const source = hint.source_repo || {{}};
           const routing = hint.routing_plan || {{}};
+          const goLive = hint.go_live || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14316,6 +14329,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>路由映射</dt><dd>${{escapeHtml(String(routing.enabled_mapping_count ?? 0))}} / ${{escapeHtml(String(routing.template_mapping_count ?? '-'))}}${{routing.route_config_ready ? ' · 已准备' : ''}}</dd>
+              <dt>上线清单</dt><dd>${{escapeHtml(goLive.status || '未读取')}}${{goLive.next_step?.label ? ' · 下一步：' + escapeHtml(goLive.next_step.label) : ''}}</dd>
               <dt>source-repo</dt><dd class="kernel-path-note">${{source.exists ? escapeHtml(source.path || '已同步') : escapeHtml(source.path || '未同步')}}</dd>
             </dl>
             ${{blockerHtml}}
@@ -14474,6 +14488,29 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           mergeKernelRoutingPlans(payload);
           await refreshKernel(selectedKernelProvider());
           result.textContent = JSON.stringify(payload, null, 2);
+          return payload;
+        }}
+        function mergeKernelGoLiveChecklists(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              go_live: item,
+              routing_plan: item.routing || kernelHint(item.provider_id).routing_plan || {{}},
+              blockers: item.routing?.blockers || kernelHint(item.provider_id).blockers || [],
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelGoLiveChecklist(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/go-live-checklist');
+          mergeKernelGoLiveChecklists(payload);
+          return payload;
+        }}
+        async function loadAllKernelGoLiveChecklists() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/go-live-checklist');
+          mergeKernelGoLiveChecklists(payload);
           return payload;
         }}
         async function probeKernelRelease(providerId = null) {{
@@ -15009,11 +15046,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-apply-routing-all')?.addEventListener('click', async () => {{
           try {{ await applyAllKernelRouting(); }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-go-live-all')?.addEventListener('click', async () => {{
+          try {{ await loadAllKernelGoLiveChecklists(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-routing-plan')?.addEventListener('click', async () => {{
           try {{ await loadKernelRoutingPlan(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-apply-routing')?.addEventListener('click', async () => {{
           try {{ await applyKernelRouting(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-go-live')?.addEventListener('click', async () => {{
+          try {{ await loadKernelGoLiveChecklist(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-load-process')?.addEventListener('click', async () => {{
           const provider = selectedKernelProvider();
@@ -18941,6 +18984,25 @@ def admin_proxy_kernels_apply_routing(
         raise HTTPException(status_code=400, detail={"error": str(exc), "routing_policy": "only finalized proxy kernel provider ids may be prepared and routing status must be active or disabled"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/go-live-checklist")
+def admin_proxy_kernels_go_live_checklist(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_go_live_checklists(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "checklist_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/go-live-checklist")
+def admin_proxy_kernel_go_live_checklist(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_go_live_checklist(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}")
 def admin_proxy_kernel(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -19238,6 +19300,183 @@ def apply_proxy_kernel_bulk_routing(
             "mappings": mapping_summary,
         },
         "no_fake_account_created": True,
+    }
+
+
+def proxy_kernel_checklist_step(step_id: str, label: str, ok: bool, *, action: str, detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "id": step_id,
+        "label": label,
+        "status": "done" if ok else "action_required",
+        "ok": ok,
+        "action": action,
+        "detail": detail or {},
+    }
+
+
+def proxy_kernel_sample_models(plan: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    mappings = plan.get("template_mappings") or []
+    for operation, key in [
+        ("text_to_image", "image_generation_model"),
+        ("image_edit", "image_edit_model"),
+        ("text_to_video", "video_generation_model"),
+        ("image_to_video", "image_to_video_model"),
+    ]:
+        for mapping in mappings:
+            if operation in (mapping.get("operations") or []) and mapping.get("logical_model"):
+                result[key] = str(mapping["logical_model"])
+                break
+    return result
+
+
+def build_proxy_kernel_go_live_checklist(db: Session, provider_id: str) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise KeyError(provider_id)
+    summary = proxy_kernel_service.kernel_summary(db, provider_id)
+    routing = proxy_kernel_routing_plan(db, provider_id)
+    workflow = build_account_setup_workflow(db, provider_id, AccountSetupWorkflowRunRequest(include_preflight=False))
+    guide = connector_registry_service.provider_guide(db, provider_id)
+    input_requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", [])
+    sample_models = proxy_kernel_sample_models(routing)
+    runtime_ok = bool(summary.get("runtime_registered") and summary.get("runtime_loopback_only"))
+    route_ok = bool(routing.get("route_config_ready"))
+    account_ok = bool(routing.get("active_account_count", 0) > 0)
+    release_ok = bool((summary.get("installed") and summary.get("installed_verified")) or summary.get("runtime_registered"))
+    ready_for_acceptance = route_ok and runtime_ok and account_ok
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    user_key = "$MEDIA2API_USER_API_KEY"
+    commands = {
+        "routing_plan": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/routing-plan",
+        "apply_routing": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/apply-routing -d '{{\"status\":\"active\",\"enable_mappings\":true,\"priority_offset\":0,\"update_provider_base_url\":true}}'",
+        "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
+        "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64位十六进制sha256\"}}'",
+        "register_runtime": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/register-runtime -d '{{\"base_url\":\"http://127.0.0.1:19081\",\"version\":\"vX.Y.Z\",\"sha256\":\"64位十六进制sha256\"}}'",
+        "account_guide": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-guides/{provider_id}",
+        "account_setup_workflow": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-setup-workflows/{provider_id}",
+        "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': True, 'external_only': True, 'provider_ids': [provider_id], 'operations': template.operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
+    }
+    if sample_models.get("image_generation_model"):
+        commands["sample_image_generation"] = f"curl -X POST -H \"Authorization: Bearer {user_key}\" -H \"Content-Type: application/json\" {base}/v1/images/generations -d '{json.dumps({'model': sample_models['image_generation_model'], 'prompt': 'one small product render on a dark desk', 'size': '1024x1024', 'wait': True}, ensure_ascii=False, separators=(',', ':'))}'"
+    if sample_models.get("video_generation_model"):
+        commands["sample_video_generation"] = f"curl -X POST -H \"Authorization: Bearer {user_key}\" -H \"Content-Type: application/json\" {base}/v1/videos/generations -d '{json.dumps({'model': sample_models['video_generation_model'], 'prompt': 'a short cinematic product turntable', 'duration': 3, 'wait': True}, ensure_ascii=False, separators=(',', ':'))}'"
+    steps = [
+        proxy_kernel_checklist_step(
+            "routing",
+            "Provider 与模型路由",
+            route_ok,
+            action="点击“补齐路由映射”或调用 apply-routing。",
+            detail={
+                "enabled_mapping_count": routing.get("enabled_mapping_count", 0),
+                "template_mapping_count": routing.get("template_mapping_count", 0),
+                "blockers": [item for item in routing.get("blockers", []) if item.get("code") in {"PROVIDER_NOT_INITIALIZED", "PROVIDER_DISABLED", "NO_ENABLED_MAPPINGS", "TEMPLATE_MAPPINGS_INCOMPLETE"}],
+            },
+        ),
+        proxy_kernel_checklist_step(
+            "runtime",
+            "Loopback 执行器",
+            runtime_ok,
+            action="安装已校验 release 资产并启动/登记 127.0.0.1 runtime。",
+            detail={
+                "runtime_registered": summary.get("runtime_registered", False),
+                "runtime_base_url": summary.get("runtime_base_url", ""),
+                "runtime_loopback_only": summary.get("runtime_loopback_only", False),
+                "process": summary.get("process", {}),
+            },
+        ),
+        proxy_kernel_checklist_step(
+            "release_asset",
+            "Release 资产与 SHA256",
+            release_ok,
+            action="优先安装 release 二进制并提供 expected_sha256；源码只进 source-repo 参考。",
+            detail={
+                "installed": summary.get("installed", {}),
+                "installed_verified": summary.get("installed_verified", False),
+                "source_policy": (summary.get("spec") or {}).get("install_policy", {}),
+            },
+        ),
+        proxy_kernel_checklist_step(
+            "account",
+            "真实授权账号",
+            account_ok,
+            action="到“授权资源”按字段指南导入真实 Web Cookie/session 或 Agent Provider profile。",
+            detail={
+                "account_count": routing.get("account_count", 0),
+                "active_account_count": routing.get("active_account_count", 0),
+                "resource_type": guide.get("resource_type"),
+                "auth_methods": guide.get("auth_methods", []),
+                "input_requirements": input_requirements,
+            },
+        ),
+        proxy_kernel_checklist_step(
+            "live_acceptance",
+            "真实样本验收",
+            ready_for_acceptance,
+            action="账号、runtime 和路由都就绪后，先用 dry_run 再运行 1 条真实样本验收。",
+            detail={
+                "ready_for_acceptance": ready_for_acceptance,
+                "sample_models": sample_models,
+                "operations": template.operations,
+            },
+        ),
+    ]
+    next_step = next((step for step in steps if not step["ok"]), None)
+    return {
+        "object": "media2api.proxy_kernel.go_live_checklist",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": summary.get("selection_id"),
+        "status": "ready_for_live_acceptance" if ready_for_acceptance else "action_required",
+        "usable": bool(summary.get("usable")),
+        "ready_for_live_acceptance": ready_for_acceptance,
+        "production_ready": False,
+        "next_step": next_step or {"id": "live_acceptance", "label": "真实样本验收", "action": "运行账号验收并确认真实图片/视频资产入库。"},
+        "steps": steps,
+        "kernel": summary,
+        "routing": routing,
+        "account_workflow": {
+            "status": workflow.get("status"),
+            "summary": workflow.get("summary"),
+            "next_action": workflow.get("next_action"),
+            "commands": workflow.get("commands"),
+        },
+        "guide": {
+            "resource_type": guide.get("resource_type"),
+            "auth_methods": guide.get("auth_methods", []),
+            "credential_ref_example": guide.get("credential_ref_example"),
+            "input_requirements": input_requirements,
+        },
+        "commands": commands,
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "no_fake_account_created": True,
+        },
+    }
+
+
+def proxy_kernel_go_live_checklist_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "total": len(rows),
+        "ready_for_live_acceptance": sum(1 for row in rows if row.get("ready_for_live_acceptance")),
+        "needs_routing": sum(1 for row in rows if any(step["id"] == "routing" and not step["ok"] for step in row.get("steps", []))),
+        "needs_runtime": sum(1 for row in rows if any(step["id"] == "runtime" and not step["ok"] for step in row.get("steps", []))),
+        "needs_account": sum(1 for row in rows if any(step["id"] == "account" and not step["ok"] for step in row.get("steps", []))),
+        "needs_acceptance": sum(1 for row in rows if any(step["id"] == "live_acceptance" and not step["ok"] for step in row.get("steps", []))),
+    }
+
+
+def build_proxy_kernel_go_live_checklists(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_go_live_checklist(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.go_live_checklist.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": proxy_kernel_go_live_checklist_summary(rows),
+        "data": rows,
     }
 
 
