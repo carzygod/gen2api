@@ -6624,6 +6624,13 @@ def record_stability_mock_fixture_original(fixture: dict[str, Any], key: str, it
     fixture["original"][key] = {field: getattr(item, field) for field in fields}
 
 
+def mark_stability_mock_fixture_created(fixture: dict[str, Any], key: str, adopted: bool = False) -> None:
+    if key not in fixture["created"]:
+        fixture["created"].append(key)
+    if adopted and key not in fixture["adopted"]:
+        fixture["adopted"].append(key)
+
+
 def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
     fixture: dict[str, Any] = {
         "ids": {
@@ -6635,14 +6642,23 @@ def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
             "alert_rule_id": "alert_account_cooldown",
         },
         "created": [],
+        "adopted": [],
         "original": {},
     }
     operation = "text_to_image"
     provider_model = "mock-image-fast"
 
     provider = db.get(models.Provider, "mock")
+    suite_owned_provider = bool(
+        provider
+        and provider.adapter_type == "mock"
+        and provider.notes == "Local deterministic T2I provider enabled temporarily by the stability acceptance suite."
+    )
     if provider:
-        record_stability_mock_fixture_original(fixture, "provider:mock", provider, ["name", "adapter_type", "status", "base_config_json", "notes"])
+        if suite_owned_provider:
+            mark_stability_mock_fixture_created(fixture, "provider:mock", adopted=True)
+        else:
+            record_stability_mock_fixture_original(fixture, "provider:mock", provider, ["name", "adapter_type", "status", "base_config_json", "notes"])
         provider.name = "Mock Provider"
         provider.adapter_type = "mock"
         provider.status = "active"
@@ -6658,7 +6674,7 @@ def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
             notes="Local deterministic T2I provider enabled temporarily by the stability acceptance suite.",
         )
         db.add(provider)
-        fixture["created"].append("provider:mock")
+        mark_stability_mock_fixture_created(fixture, "provider:mock")
 
     model = db.get(models.LogicalModel, "t2i-fast")
     if model:
@@ -6685,30 +6701,34 @@ def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
             enabled=True,
         )
         db.add(model)
-        fixture["created"].append("model:t2i-fast")
+        mark_stability_mock_fixture_created(fixture, "model:t2i-fast")
 
     db.flush()
 
     mapping = db.get(models.ProviderModelMapping, "t2i-fast:mock:mock-image-fast")
+    suite_owned_mapping = bool(suite_owned_provider and mapping and mapping.provider_id == "mock" and mapping.provider_model == provider_model)
     if mapping:
-        record_stability_mock_fixture_original(
-            fixture,
-            "mapping:t2i-fast:mock:mock-image-fast",
-            mapping,
-            [
-                "logical_model",
-                "provider_id",
-                "provider_model",
-                "operations_json",
-                "priority",
-                "weight",
-                "cost_score",
-                "speed_score",
-                "quality_score",
-                "reliability_score",
-                "enabled",
-            ],
-        )
+        if suite_owned_mapping:
+            mark_stability_mock_fixture_created(fixture, "mapping:t2i-fast:mock:mock-image-fast", adopted=True)
+        else:
+            record_stability_mock_fixture_original(
+                fixture,
+                "mapping:t2i-fast:mock:mock-image-fast",
+                mapping,
+                [
+                    "logical_model",
+                    "provider_id",
+                    "provider_model",
+                    "operations_json",
+                    "priority",
+                    "weight",
+                    "cost_score",
+                    "speed_score",
+                    "quality_score",
+                    "reliability_score",
+                    "enabled",
+                ],
+            )
         mapping.logical_model = "t2i-fast"
         mapping.provider_id = "mock"
         mapping.provider_model = provider_model
@@ -6736,36 +6756,47 @@ def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
             enabled=True,
         )
         db.add(mapping)
-        fixture["created"].append("mapping:t2i-fast:mock:mock-image-fast")
+        mark_stability_mock_fixture_created(fixture, "mapping:t2i-fast:mock:mock-image-fast")
 
     account = db.get(models.AccountResource, "acct_mock_default")
-    if account:
-        record_stability_mock_fixture_original(
-            fixture,
-            "account:acct_mock_default",
-            account,
-            [
-                "provider_id",
-                "label",
-                "resource_type",
-                "credential_ref",
-                "resource_profile_json",
-                "supported_operations_json",
-                "supported_provider_models_json",
-                "quota_buckets_json",
-                "concurrency_limit",
-                "current_leases",
-                "health_score",
-                "failure_score",
-                "region",
-                "plan",
-                "status",
-                "last_error_code",
-                "last_error_message",
-                "last_failed_at",
-                "last_health_check_at",
-            ],
+    account_profile = loads(account.resource_profile_json, {}) if account else {}
+    suite_owned_account = bool(
+        account
+        and (
+            account.credential_ref == "public://mock/stability-acceptance-suite"
+            or account_profile.get("scope") == "stability_acceptance_suite"
         )
+    )
+    if account:
+        if suite_owned_account:
+            mark_stability_mock_fixture_created(fixture, "account:acct_mock_default", adopted=True)
+        else:
+            record_stability_mock_fixture_original(
+                fixture,
+                "account:acct_mock_default",
+                account,
+                [
+                    "provider_id",
+                    "label",
+                    "resource_type",
+                    "credential_ref",
+                    "resource_profile_json",
+                    "supported_operations_json",
+                    "supported_provider_models_json",
+                    "quota_buckets_json",
+                    "concurrency_limit",
+                    "current_leases",
+                    "health_score",
+                    "failure_score",
+                    "region",
+                    "plan",
+                    "status",
+                    "last_error_code",
+                    "last_error_message",
+                    "last_failed_at",
+                    "last_health_check_at",
+                ],
+            )
         account.provider_id = "mock"
         account.label = "Mock Default Account"
         account.resource_type = "mock"
@@ -6805,7 +6836,7 @@ def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
             last_health_check_at=datetime.utcnow(),
         )
         db.add(account)
-        fixture["created"].append("account:acct_mock_default")
+        mark_stability_mock_fixture_created(fixture, "account:acct_mock_default")
 
     pricing_rule = db.get(models.PricingRule, "price_t2i_fast")
     if pricing_rule:
@@ -6863,7 +6894,7 @@ def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
             enabled=True,
         )
         db.add(pricing_rule)
-        fixture["created"].append("pricing_rule:price_t2i_fast")
+        mark_stability_mock_fixture_created(fixture, "pricing_rule:price_t2i_fast")
 
     alert_rule = db.get(models.AlertRule, "alert_account_cooldown")
     if alert_rule:
@@ -6888,7 +6919,7 @@ def ensure_stability_mock_fixture(db: Session) -> dict[str, Any]:
             enabled=True,
         )
         db.add(alert_rule)
-        fixture["created"].append("alert_rule:alert_account_cooldown")
+        mark_stability_mock_fixture_created(fixture, "alert_rule:alert_account_cooldown")
 
     db.commit()
     return fixture
@@ -6993,6 +7024,45 @@ def cleanup_stability_acceptance_artifacts(db: Session, started_at: datetime, re
         )
 
     stability_acceptance_cleanup_ids_from_payload(results, job_ids, account_ids, asset_ids, model_ids, provider_ids)
+    account_ids.update(
+        account_id
+        for account_id, in db.query(models.AccountResource.id)
+        .filter(or_(models.AccountResource.id.like("acct_selftest_%"), models.AccountResource.id.like("acct_stability_%")))
+        .all()
+    )
+    model_ids.update(
+        model_id
+        for model_id, in db.query(models.LogicalModel.id)
+        .filter(models.LogicalModel.id.like("selftest-%"))
+        .all()
+    )
+    provider_ids.update(
+        provider_id
+        for provider_id, in db.query(models.Provider.id)
+        .filter(models.Provider.id.like("selftest_temp_url_%"))
+        .all()
+    )
+    if account_ids:
+        job_ids.update(
+            job_id
+            for job_id, in db.query(models.MediaJob.id)
+            .filter(models.MediaJob.account_id.in_(account_ids))
+            .all()
+        )
+    if model_ids:
+        job_ids.update(
+            job_id
+            for job_id, in db.query(models.MediaJob.id)
+            .filter(models.MediaJob.logical_model.in_(model_ids))
+            .all()
+        )
+    if provider_ids:
+        job_ids.update(
+            job_id
+            for job_id, in db.query(models.MediaJob.id)
+            .filter(models.MediaJob.provider_id.in_(provider_ids))
+            .all()
+        )
     job_ids.update(
         job_id
         for job_id, in db.query(models.MediaJob.id)
