@@ -177,7 +177,7 @@ The admin API exposes the runtime lifecycle through
 `/v1/admin/proxy-kernels`: release probing, SHA256-verified installation,
 loopback runtime registration, controlled subprocess start/stop, routing-plan
 inspection, bulk no-fake-account provider/model mapping application, material
-request checklists, go-live checklists, process status, and stdout/stderr log inspection. The `/admin` dashboard has a
+request checklists, loopback contract self-tests, go-live checklists, process status, and stdout/stderr log inspection. The `/admin` dashboard has a
 dedicated "反代内核" workspace for the same workflow, so operators do not need
 to hand-write JSON for routine runtime start/stop checks. When release
 binaries are not enough, the same workspace can sync allowlisted selected

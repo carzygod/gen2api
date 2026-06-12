@@ -41,7 +41,7 @@ from .services_oauth_sessions import ConnectorOAuthSessionService
 from .services_proxy_kernels import ProxyKernelRuntimeService
 from .services_secrets import SecretService, serialize_secret
 from .services_webhooks import WebhookService
-from .providers import ASSET_PAYLOAD_FIELDS, CONNECTOR_REFERENCE_PREFIXES, DEFAULT_OUTPUT_PATHS, DEFAULT_STATUS_PATHS, DEFAULT_TASK_ID_PATHS, ProviderContext, connector_reference_only, get_provider
+from .providers import ASSET_PAYLOAD_FIELDS, CONNECTOR_REFERENCE_PREFIXES, DEFAULT_OUTPUT_PATHS, DEFAULT_STATUS_PATHS, DEFAULT_TASK_ID_PATHS, TINY_MP4_BASE64, ProviderContext, connector_reference_only, get_provider
 from .provider_templates import FINALIZED_PROVIDER_IDS, PROVIDER_TEMPLATES, template_as_dict
 from .utils import DomainError, dumps, is_sensitive_key, loads, new_id
 
@@ -1234,6 +1234,12 @@ class ProxyKernelRuntimeStartRequest(BaseModel):
 
 class ProxyKernelRuntimeStopRequest(BaseModel):
     grace_seconds: float = 5
+
+
+class ProxyKernelLoopbackContractTestRequest(BaseModel):
+    operations: list[str] = Field(default_factory=lambda: ["text_to_image", "image_edit", "text_to_video"])
+    include_video: bool = True
+    include_image_edit: bool = True
 
 
 class ProxyKernelSourceRepoSyncRequest(BaseModel):
@@ -7281,6 +7287,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
+    ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -7523,6 +7530,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
+                ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -13304,6 +13312,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
         ("全量材料清单", "GET", "/v1/admin/proxy-kernels/materials-request"),
         ("OpenAI Web 材料清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/materials-request"),
+        ("Loopback 合同自检", "POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
@@ -13368,6 +13377,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
         "/v1/admin/proxy-kernels/materials-request",
         "/v1/admin/proxy-kernels/openai_web_session/materials-request",
+        "/v1/admin/proxy-kernels/loopback-contract-test",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13401,6 +13411,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
         "/v1/admin/proxy-kernels/materials-request",
         "/v1/admin/proxy-kernels/openai_web_session/materials-request",
+        "/v1/admin/proxy-kernels/loopback-contract-test",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
@@ -13869,6 +13880,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
                   <button class="op" type="button" id="kernel-go-live-all">查看全部上线清单</button>
                   <button class="op" type="button" id="kernel-materials-all">查看全部材料清单</button>
+                  <button class="op" type="button" id="kernel-loopback-contract">Loopback 合同自检</button>
                   <button class="op" type="button" data-jump-tab="oauth">去导入账号</button>
                 </div>
               </div>
@@ -14552,6 +14564,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           mergeKernelMaterialsRequests(payload);
           return payload;
         }}
+        async function runKernelLoopbackContractTest() {{
+          return await callAdmin('/v1/admin/proxy-kernels/loopback-contract-test', 'POST', {{
+            operations: ['text_to_image', 'image_edit', 'text_to_video'],
+            include_video: true,
+            include_image_edit: true,
+          }});
+        }}
         async function probeKernelRelease(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
           const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/release-probe', 'POST', {{}});
@@ -15090,6 +15109,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-materials-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelMaterialsRequests(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-loopback-contract')?.addEventListener('click', async () => {{
+          try {{ await runKernelLoopbackContractTest(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-routing-plan')?.addEventListener('click', async () => {{
           try {{ await loadKernelRoutingPlan(); }} catch (error) {{ result.textContent = String(error); }}
@@ -19051,6 +19073,15 @@ def admin_proxy_kernels_materials_request(provider_ids: str = "", ctx: AuthConte
         raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.post("/v1/admin/proxy-kernels/loopback-contract-test")
+def admin_proxy_kernels_loopback_contract_test(
+    req: ProxyKernelLoopbackContractTestRequest,
+    ctx: AuthContext = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return run_proxy_kernel_loopback_contract_test(db, ctx, req)
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}/go-live-checklist")
 def admin_proxy_kernel_go_live_checklist(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -19418,6 +19449,7 @@ def build_proxy_kernel_go_live_checklist(db: Session, provider_id: str) -> dict[
         "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
         "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64位十六进制sha256\"}}'",
         "register_runtime": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/register-runtime -d '{{\"base_url\":\"http://127.0.0.1:19081\",\"version\":\"vX.Y.Z\",\"sha256\":\"64位十六进制sha256\"}}'",
+        "loopback_contract_test": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/loopback-contract-test -d '{{\"operations\":[\"text_to_image\",\"image_edit\",\"text_to_video\"]}}'",
         "account_guide": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-guides/{provider_id}",
         "account_setup_workflow": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-setup-workflows/{provider_id}",
         "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': True, 'external_only': True, 'provider_ids': [provider_id], 'operations': template.operations, 'run_samples': True, 'max_samples': 1}, ensure_ascii=False, separators=(',', ':'))}'",
@@ -19708,6 +19740,7 @@ def build_proxy_kernel_materials_request(db: Session, provider_id: str) -> dict[
         "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
         "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64-hex-sha256\"}}'",
         "register_runtime": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/register-runtime -d '{{\"base_url\":\"http://127.0.0.1:19081\",\"version\":\"vX.Y.Z\",\"sha256\":\"64-hex-sha256\"}}'",
+        "loopback_contract_test": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/loopback-contract-test -d '{{\"operations\":[\"text_to_image\",\"image_edit\",\"text_to_video\"]}}'",
         "account_guide": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-guides/{provider_id}",
         "account_setup_workflow": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-setup-workflows/{provider_id}",
         "account_onboarding": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-onboarding",
@@ -19825,6 +19858,349 @@ def build_proxy_kernel_materials_requests(db: Session, provider_ids: list[str] |
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "summary": proxy_kernel_materials_request_summary(rows),
         "data": rows,
+    }
+
+
+def run_proxy_kernel_loopback_contract_test(db: Session, ctx: AuthContext, req: ProxyKernelLoopbackContractTestRequest) -> dict[str, Any]:
+    allowed_operations = ["text_to_image", "image_edit", "text_to_video"]
+    requested = [item for item in req.operations if item in allowed_operations]
+    if req.include_image_edit and "image_edit" not in requested:
+        requested.append("image_edit")
+    if req.include_video and "text_to_video" not in requested:
+        requested.append("text_to_video")
+    if not requested:
+        requested = ["text_to_image"]
+
+    class LoopbackContractHandler(BaseHTTPRequestHandler):
+        server_version = "media2api-loopback-contract/1.0"
+
+        def _json(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_GET(self) -> None:
+            if self.path == "/health":
+                self.server.request_log.append({"method": "GET", "path": self.path})  # type: ignore[attr-defined]
+                self._json(200, {"status": "ok", "object": "media2api.proxy_kernel.loopback_contract.runner"})
+                return
+            self._json(404, {"error": "NOT_FOUND"})
+
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or "0"))
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                payload = {}
+            self.server.request_log.append(  # type: ignore[attr-defined]
+                {
+                    "method": "POST",
+                    "path": self.path,
+                    "model": payload.get("model"),
+                    "operation": payload.get("operation"),
+                    "account_id": (payload.get("account") or {}).get("id") if isinstance(payload.get("account"), dict) else "",
+                    "credential_reference_only": (payload.get("account") or {}).get("credential_reference_only") if isinstance(payload.get("account"), dict) else None,
+                    "asset_count": len(payload.get("assets") or []) if isinstance(payload.get("assets"), list) else int(bool(payload.get("assets"))),
+                }
+            )
+            if self.path in {"/v1/images/generations", "/v1/images/edits"}:
+                self._json(
+                    200,
+                    {
+                        "id": f"contract_image_{int(time.time() * 1000)}",
+                        "status": "completed",
+                        "data": [{"b64_json": EXTERNAL_ACCEPTANCE_REFERENCE_PNG_B64, "mime_type": "image/png"}],
+                    },
+                )
+                return
+            if self.path == "/v1/videos/generations":
+                self._json(
+                    200,
+                    {
+                        "id": f"contract_video_{int(time.time() * 1000)}",
+                        "status": "completed",
+                        "data": [{"video_base64": TINY_MP4_BASE64, "mime_type": "video/mp4"}],
+                    },
+                )
+                return
+            self._json(404, {"error": "NOT_FOUND"})
+
+    suffix = str(int(time.time() * 1000))
+    provider_id = f"pk_contract_{suffix}"
+    account_id = f"acct_pk_contract_{suffix}"
+    image_model_id = f"pk-contract-image-{suffix}"
+    video_model_id = f"pk-contract-video-{suffix}"
+    image_provider_model = "loopback-contract-image"
+    video_provider_model = "loopback-contract-video"
+    image_mapping_id = f"{image_model_id}:{provider_id}:{image_provider_model}"
+    video_mapping_id = f"{video_model_id}:{provider_id}:{video_provider_model}"
+    image_pricing_id = f"price_{image_model_id}"
+    edit_pricing_id = f"price_{image_model_id}_edit"
+    video_pricing_id = f"price_{video_model_id}"
+    job_results: list[dict[str, Any]] = []
+    created_asset_ids: list[str] = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LoopbackContractHandler)
+    server.request_log = []  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    base_url = f"http://127.0.0.1:{port}"
+    ok = False
+    error_payload: dict[str, Any] | None = None
+    health_result: dict[str, Any] = {"status": "not_run"}
+    try:
+        db.add(
+            models.Provider(
+                id=provider_id,
+                name="Proxy Kernel Loopback Contract Self Test",
+                adapter_type="http_adapter",
+                status="active",
+                base_config_json=dumps(
+                    {
+                        "base_url": base_url,
+                        "health_endpoint": "/health",
+                        "timeout_seconds": 20,
+                        "poll_timeout_seconds": 30,
+                        "endpoints": {
+                            "text_to_image": "/v1/images/generations",
+                            "image_edit": "/v1/images/edits",
+                            "image_to_image": "/v1/images/edits",
+                            "text_to_video": "/v1/videos/generations",
+                        },
+                    }
+                ),
+                notes="Temporary loopback contract self-test provider. Disabled after the run.",
+            )
+        )
+        db.add(
+            models.LogicalModel(
+                id=image_model_id,
+                display_name="Proxy Kernel Contract Image",
+                operations_json=dumps(["text_to_image", "image_edit"]),
+                constraints_json=dumps({}),
+                default_params_json=dumps({"quality": "standard", "n": 1}),
+                billing_class="proxy_kernel_contract_image",
+                enabled=True,
+            )
+        )
+        db.add(
+            models.LogicalModel(
+                id=video_model_id,
+                display_name="Proxy Kernel Contract Video",
+                operations_json=dumps(["text_to_video"]),
+                constraints_json=dumps({}),
+                default_params_json=dumps({"duration": 1, "quality": "standard"}),
+                billing_class="proxy_kernel_contract_video",
+                enabled=True,
+            )
+        )
+        db.add(
+            models.AccountResource(
+                id=account_id,
+                provider_id=provider_id,
+                label="Proxy Kernel Loopback Contract Account",
+                resource_type="agent_provider",
+                credential_ref=f"connector://self-test/{provider_id}/{account_id}",
+                resource_profile_json=dumps({"resource_type": "agent_provider", "contract": "loopback"}),
+                supported_operations_json=dumps(["text_to_image", "image_edit", "text_to_video"]),
+                supported_provider_models_json=dumps([image_provider_model, video_provider_model]),
+                quota_buckets_json=dumps([{"type": "tasks", "remaining_estimate": 10, "confidence": 1.0, "source": "self_test"}]),
+                concurrency_limit=1,
+                current_leases=0,
+                region="loopback",
+                plan="self_test",
+                status="active",
+            )
+        )
+        for pricing_id, logical_model, operation, billing_class, unit in [
+            (image_pricing_id, image_model_id, "text_to_image", "proxy_kernel_contract_image", "image"),
+            (edit_pricing_id, image_model_id, "image_edit", "proxy_kernel_contract_image", "image"),
+            (video_pricing_id, video_model_id, "text_to_video", "proxy_kernel_contract_video", "second"),
+        ]:
+            db.add(
+                models.PricingRule(
+                    id=pricing_id,
+                    name=f"Proxy Kernel Contract {operation}",
+                    logical_model=logical_model,
+                    billing_class=billing_class,
+                    operation=operation,
+                    unit=unit,
+                    base_amount=0,
+                    unit_amount=1,
+                    input_asset_amount=0,
+                    provider_cost_base=0,
+                    provider_cost_unit=0,
+                    provider_cost_input_asset=0,
+                    quality_multipliers_json=dumps({"standard": 1}),
+                    currency="credits",
+                    enabled=True,
+                )
+            )
+        db.add(
+            models.ProviderModelMapping(
+                id=image_mapping_id,
+                logical_model=image_model_id,
+                provider_id=provider_id,
+                provider_model=image_provider_model,
+                operations_json=dumps(["text_to_image", "image_edit"]),
+                priority=0,
+                weight=1,
+                cost_score=0.8,
+                speed_score=0.8,
+                quality_score=0.5,
+                reliability_score=0.8,
+                enabled=True,
+            )
+        )
+        db.add(
+            models.ProviderModelMapping(
+                id=video_mapping_id,
+                logical_model=video_model_id,
+                provider_id=provider_id,
+                provider_model=video_provider_model,
+                operations_json=dumps(["text_to_video"]),
+                priority=0,
+                weight=1,
+                cost_score=0.8,
+                speed_score=0.8,
+                quality_score=0.5,
+                reliability_score=0.8,
+                enabled=True,
+            )
+        )
+        db.commit()
+
+        health_result = get_provider(provider_id).health_check(db, provider_id)
+        if health_result.get("status") != "ok":
+            raise RuntimeError(f"loopback health failed: {health_result}")
+
+        if "image_edit" in requested:
+            input_asset = asset_service.create_from_base64(
+                db,
+                ctx.user.id,
+                EXTERNAL_ACCEPTANCE_REFERENCE_PNG_B64,
+                f"proxy-kernel-contract-{suffix}.png",
+                "image",
+                "input",
+                "image/png",
+                source="self_test",
+                provider_meta={"self_test": "proxy_kernel_loopback_contract"},
+            )
+            created_asset_ids.append(input_asset.id)
+            db.commit()
+
+        for operation in requested:
+            logical_model = video_model_id if operation == "text_to_video" else image_model_id
+            params: dict[str, Any] = {
+                "prompt": f"proxy kernel loopback contract {operation}",
+                "quality": "standard",
+                "providers": [provider_id],
+                "provider_preference": [provider_id],
+                "_sync_process_lock": True,
+            }
+            input_asset_ids: list[str] = []
+            if operation == "text_to_video":
+                params["duration"] = 1
+            elif operation == "image_edit":
+                params["image"] = created_asset_ids[0]
+                input_asset_ids = [created_asset_ids[0]]
+            else:
+                params["n"] = 1
+            job = runtime.create_job(db, ctx.user.id, ctx.api_key.id, operation, logical_model, params, input_asset_ids=input_asset_ids, enqueue=False)
+            job = runtime.process_job(db, job.id)
+            output_assets = [db.get(models.MediaAsset, asset_id) for asset_id in loads(job.output_asset_ids_json, [])]
+            created_asset_ids.extend([asset.id for asset in output_assets if asset])
+            job_results.append(
+                {
+                    "operation": operation,
+                    "ok": job.status == "completed" and bool(output_assets),
+                    "job": serialize_job(db, job),
+                    "outputs": [
+                        {
+                            "asset_id": asset.id,
+                            "kind": asset.kind,
+                            "mime_type": asset.mime_type,
+                            "size_bytes": asset.size_bytes,
+                        }
+                        for asset in output_assets
+                        if asset
+                    ],
+                }
+            )
+
+        expected_paths = {
+            "text_to_image": "/v1/images/generations",
+            "image_edit": "/v1/images/edits",
+            "text_to_video": "/v1/videos/generations",
+        }
+        seen_paths = {item.get("path") for item in getattr(server, "request_log", [])}
+        ok = all(item.get("ok") for item in job_results) and all(expected_paths[operation] in seen_paths for operation in requested)
+    except Exception as exc:
+        db.rollback()
+        error_payload = {"type": type(exc).__name__, "message": str(exc)}
+    finally:
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+            thread.join(timeout=2)
+        try:
+            provider = db.get(models.Provider, provider_id)
+            if provider:
+                provider.status = "disabled"
+                provider.notes = (provider.notes or "") + " Disabled after loopback contract self-test."
+            account = db.get(models.AccountResource, account_id)
+            if account:
+                account.status = "disabled"
+                account.concurrency_limit = 0
+            for mapping_id in [image_mapping_id, video_mapping_id]:
+                mapping = db.get(models.ProviderModelMapping, mapping_id)
+                if mapping:
+                    mapping.enabled = False
+            for pricing_id in [image_pricing_id, edit_pricing_id, video_pricing_id]:
+                pricing = db.get(models.PricingRule, pricing_id)
+                if pricing:
+                    pricing.enabled = False
+            for model_id in [image_model_id, video_model_id]:
+                logical = db.get(models.LogicalModel, model_id)
+                if logical:
+                    logical.enabled = False
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    return {
+        "object": "media2api.proxy_kernel.loopback_contract_test",
+        "ok": ok,
+        "status": "passed" if ok else "failed",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "loopback_base_url": base_url,
+        "operations": requested,
+        "health": health_result,
+        "jobs": job_results,
+        "runner_requests": getattr(server, "request_log", []),
+        "temporary_records": {
+            "provider_id": provider_id,
+            "account_id": account_id,
+            "logical_models": [image_model_id, video_model_id],
+            "mappings": [image_mapping_id, video_mapping_id],
+            "pricing_rules": [image_pricing_id, edit_pricing_id, video_pricing_id],
+            "disabled_after_run": True,
+        },
+        "error": error_payload,
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "listener": "loopback_only",
+            "upstream_calls": False,
+            "purpose": "verify platform-to-loopback reverse-proxy contract before live provider acceptance",
+        },
     }
 
 
