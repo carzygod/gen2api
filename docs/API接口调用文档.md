@@ -925,6 +925,22 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels" \
   -H "Authorization: Bearer $MEDIA2API_API_KEY"
 ```
 
+从零环境可先查看全部定型 provider 的路由缺口：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/routing-plan" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+批量补齐全部定型 provider 的平台侧路由。该接口不会创建账号或假凭据：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/apply-routing" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"provider_ids":[],"status":"active","enable_mappings":true,"priority_offset":0,"update_provider_base_url":true}'
+```
+
 探测某个定型仓库是否有 GitHub release：
 
 ```bash
@@ -1086,7 +1102,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |

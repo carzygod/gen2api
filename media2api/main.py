@@ -1248,6 +1248,10 @@ class ProxyKernelRoutingApplyRequest(BaseModel):
     update_provider_base_url: bool = True
 
 
+class ProxyKernelBulkRoutingApplyRequest(ProxyKernelRoutingApplyRequest):
+    provider_ids: list[str] = Field(default_factory=list)
+
+
 class TemplateInstallRequest(BaseModel):
     base_url: str | None = None
     credential_ref: str = "agent://providers/template/acct_01"
@@ -7271,6 +7275,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/connector-registry/{project_id}/blueprint"),
     ("POST", "/v1/admin/connector-registry/{project_id}/blueprint/apply"),
     ("GET", "/v1/admin/proxy-kernels"),
+    ("GET", "/v1/admin/proxy-kernels/routing-plan"),
+    ("POST", "/v1/admin/proxy-kernels/apply-routing"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -7507,6 +7513,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
             "Track finalized reverse-proxy kernels, release binaries, hash verification, loopback runtime registration, and direct-use blockers.",
             [
                 ("GET", "/v1/admin/proxy-kernels"),
+                ("GET", "/v1/admin/proxy-kernels/routing-plan"),
+                ("POST", "/v1/admin/proxy-kernels/apply-routing"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -13282,6 +13290,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("开源连接器清单", "GET", "/v1/admin/connector-registry"),
         ("刷新开源连接器清单", "POST", "/v1/admin/connector-registry/refresh"),
         ("反代内核清单", "GET", "/v1/admin/proxy-kernels"),
+        ("全量路由计划", "GET", "/v1/admin/proxy-kernels/routing-plan"),
+        ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
@@ -13340,6 +13350,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/connector-registry",
         "/v1/admin/connector-registry/refresh",
         "/v1/admin/proxy-kernels",
+        "/v1/admin/proxy-kernels/routing-plan",
+        "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13367,6 +13379,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/account-guides/qwen_ai_web_session",
         "/v1/admin/account-guides/qianwen_web_session",
         "/v1/admin/proxy-kernels",
+        "/v1/admin/proxy-kernels/routing-plan",
+        "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
@@ -13830,7 +13844,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <h2>反代内核运行时</h2>
                   <p class="note">这里管理的是“执行上游调用的内核”：release 资产、hash、loopback runtime、进程和日志。账号材料仍在“授权资源/账号池”里导入，两者不要混在一起。</p>
                 </div>
-                <button class="primary" type="button" data-jump-tab="oauth">去导入账号</button>
+                <div class="ops" style="min-width:360px">
+                  <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
+                  <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
+                  <button class="op" type="button" data-jump-tab="oauth">去导入账号</button>
+                </div>
               </div>
               <div class="status-strip">
                 <div><span class="eyebrow">定型内核</span><b>{admin_escape(proxy_kernel_summary.get("total", 0))}</b></div>
@@ -14428,6 +14446,36 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           await refreshKernel(provider);
           return payload;
         }}
+        function mergeKernelRoutingPlans(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          const plans = rows.map(item => item?.routing_plan || item).filter(item => item?.provider_id);
+          plans.forEach(plan => {{
+            proxyKernelHints[plan.provider_id] = Object.assign(kernelHint(plan.provider_id), {{
+              routing_plan: plan,
+              blockers: plan.blockers || kernelHint(plan.provider_id).blockers || [],
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadAllKernelRoutingPlan() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/routing-plan');
+          mergeKernelRoutingPlans(payload);
+          return payload;
+        }}
+        async function applyAllKernelRouting() {{
+          const body = {{
+            provider_ids: [],
+            status: document.getElementById('kernel-routing-status')?.value || 'active',
+            enable_mappings: document.getElementById('kernel-routing-enable')?.value !== 'false',
+            priority_offset: Number(document.getElementById('kernel-routing-priority-offset')?.value || 0),
+            update_provider_base_url: document.getElementById('kernel-update-provider')?.value !== 'false',
+          }};
+          const payload = await callAdmin('/v1/admin/proxy-kernels/apply-routing', 'POST', body);
+          mergeKernelRoutingPlans(payload);
+          await refreshKernel(selectedKernelProvider());
+          result.textContent = JSON.stringify(payload, null, 2);
+          return payload;
+        }}
         async function probeKernelRelease(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
           const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/release-probe', 'POST', {{}});
@@ -14954,6 +15002,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-install-release')?.addEventListener('click', async () => {{
           try {{ await installKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-routing-plan-all')?.addEventListener('click', async () => {{
+          try {{ await loadAllKernelRoutingPlan(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-apply-routing-all')?.addEventListener('click', async () => {{
+          try {{ await applyAllKernelRouting(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-routing-plan')?.addEventListener('click', async () => {{
           try {{ await loadKernelRoutingPlan(); }} catch (error) {{ result.textContent = String(error); }}
@@ -18855,6 +18909,38 @@ def admin_proxy_kernels(ctx: AuthContext = Depends(require_auth), db: Session = 
     return proxy_kernel_service.list_kernels(db)
 
 
+@app.get("/v1/admin/proxy-kernels/routing-plan")
+def admin_proxy_kernels_routing_plan(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return proxy_kernel_bulk_routing_plan(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "routing_policy": "only finalized proxy kernel provider ids may be prepared"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/apply-routing")
+def admin_proxy_kernels_apply_routing(
+    req: ProxyKernelBulkRoutingApplyRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return apply_proxy_kernel_bulk_routing(
+            db,
+            req.provider_ids,
+            status=req.status,
+            enable_mappings=req.enable_mappings,
+            priority_offset=req.priority_offset,
+            update_provider_base_url=req.update_provider_base_url,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "routing_policy": "only finalized proxy kernel provider ids may be prepared and routing status must be active or disabled"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}")
 def admin_proxy_kernel(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -19068,6 +19154,89 @@ def apply_proxy_kernel_routing(
             "summary": {"created": len(created), "updated": len(updated), "skipped": len(skipped)},
         },
         "routing_plan": proxy_kernel_routing_plan(db, provider_id),
+        "no_fake_account_created": True,
+    }
+
+
+def proxy_kernel_routing_provider_ids(db: Session, provider_ids: list[str] | None = None) -> list[str]:
+    requested = [provider_id.strip() for provider_id in (provider_ids or []) if provider_id and provider_id.strip()]
+    if not requested:
+        requested = [item["provider_id"] for item in proxy_kernel_service.list_kernels(db).get("data", [])]
+    selected: list[str] = []
+    for provider_id in requested:
+        if provider_id in selected:
+            continue
+        if provider_id not in PROVIDER_TEMPLATES:
+            raise ValueError(f"PROVIDER_TEMPLATE_NOT_FOUND:{provider_id}")
+        proxy_kernel_service.require_spec(provider_id)
+        selected.append(provider_id)
+    return selected
+
+
+def summarize_proxy_kernel_routing_plans(plans: list[dict[str, Any]]) -> dict[str, Any]:
+    blocker_counts: dict[str, int] = {}
+    for plan in plans:
+        for blocker in plan.get("blockers", []):
+            code = str(blocker.get("code") or "UNKNOWN")
+            blocker_counts[code] = blocker_counts.get(code, 0) + 1
+    return {
+        "total": len(plans),
+        "provider_initialized": sum(1 for plan in plans if plan.get("provider_initialized")),
+        "route_config_ready": sum(1 for plan in plans if plan.get("route_config_ready")),
+        "production_ready": sum(1 for plan in plans if plan.get("production_ready")),
+        "needs_account": sum(1 for plan in plans if any(blocker.get("code") == "NO_ACTIVE_ACCOUNT" for blocker in plan.get("blockers", []))),
+        "needs_runtime": sum(1 for plan in plans if any(blocker.get("code") == "NO_LOOPBACK_RUNTIME" for blocker in plan.get("blockers", []))),
+        "needs_mapping": sum(1 for plan in plans if any(blocker.get("code") in {"NO_ENABLED_MAPPINGS", "TEMPLATE_MAPPINGS_INCOMPLETE"} for blocker in plan.get("blockers", []))),
+        "blocker_counts": blocker_counts,
+    }
+
+
+def proxy_kernel_bulk_routing_plan(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    plans = [proxy_kernel_routing_plan(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.routing_plan.list",
+        "data": plans,
+        "summary": summarize_proxy_kernel_routing_plans(plans),
+        "no_fake_account_created": True,
+    }
+
+
+def apply_proxy_kernel_bulk_routing(
+    db: Session,
+    provider_ids: list[str] | None = None,
+    *,
+    status: str = "active",
+    enable_mappings: bool = True,
+    priority_offset: int = 0,
+    update_provider_base_url: bool = True,
+) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    results = [
+        apply_proxy_kernel_routing(
+            db,
+            provider_id,
+            status=status,
+            enable_mappings=enable_mappings,
+            priority_offset=priority_offset,
+            update_provider_base_url=update_provider_base_url,
+        )
+        for provider_id in selected
+    ]
+    plans = [result["routing_plan"] for result in results]
+    mapping_summary = {
+        "created": sum(result["mappings"]["summary"]["created"] for result in results),
+        "updated": sum(result["mappings"]["summary"]["updated"] for result in results),
+        "skipped": sum(result["mappings"]["summary"]["skipped"] for result in results),
+    }
+    return {
+        "object": "media2api.proxy_kernel.routing_apply.list",
+        "data": results,
+        "summary": {
+            **summarize_proxy_kernel_routing_plans(plans),
+            "created_providers": sum(1 for result in results if result.get("created_provider")),
+            "mappings": mapping_summary,
+        },
         "no_fake_account_created": True,
     }
 
