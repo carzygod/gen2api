@@ -658,6 +658,7 @@ class ProxyKernelRuntimeService:
         expected_sha256: str = "",
         cwd: str = "",
         env: dict[str, str] | None = None,
+        config_files: list[dict[str, Any]] | None = None,
         version: str = "",
         notes: str = "",
         replace_existing: bool = False,
@@ -676,6 +677,7 @@ class ProxyKernelRuntimeService:
 
         artifact = self.resolve_start_artifact(provider_id, artifact_path, expected_sha256, command)
         workdir = self.resolve_cwd(provider_id, cwd, artifact)
+        written_config_files = self.write_runtime_config_files(provider_id, workdir, config_files)
         log_dir = self.root / provider_id / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -722,6 +724,7 @@ class ProxyKernelRuntimeService:
             "stdout_log": str(stdout_path),
             "stderr_log": str(stderr_path),
             "env_keys": sorted((env or {}).keys()),
+            "config_files": written_config_files,
             "started_at": self.utcnow(),
             "running": running,
         }
@@ -977,6 +980,48 @@ class ProxyKernelRuntimeService:
         if not path.exists() or not path.is_dir():
             raise ValueError("CWD_NOT_FOUND")
         return path
+
+    def write_runtime_config_files(
+        self,
+        provider_id: str,
+        workdir: Path,
+        config_files: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not config_files:
+            return []
+        if len(config_files) > 4:
+            raise ValueError("RUNTIME_CONFIG_FILE_LIMIT_EXCEEDED")
+        provider_root = (self.root / provider_id).resolve()
+        written: list[dict[str, Any]] = []
+        for item in config_files:
+            if not isinstance(item, dict):
+                raise ValueError("RUNTIME_CONFIG_FILE_INVALID")
+            path_text = str(item.get("path") or "").strip()
+            content = item.get("content")
+            if not path_text:
+                raise ValueError("RUNTIME_CONFIG_PATH_REQUIRED")
+            if not isinstance(content, str):
+                raise ValueError("RUNTIME_CONFIG_CONTENT_REQUIRED")
+            if len(content.encode("utf-8")) > 128 * 1024:
+                raise ValueError("RUNTIME_CONFIG_TOO_LARGE")
+            target = Path(path_text).expanduser()
+            if not target.is_absolute():
+                target = workdir / target
+            target = target.resolve()
+            if not self.path_within(target, provider_root):
+                raise ValueError("RUNTIME_CONFIG_OUTSIDE_PROVIDER_DIR")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            try:
+                target.chmod(0o600)
+            except OSError:
+                pass
+            written.append({
+                "path": str(target),
+                "sha256": self.file_sha256(target),
+                "size_bytes": target.stat().st_size,
+            })
+        return written
 
     def command_references_path(self, command: list[str], path: Path) -> bool:
         target = path.resolve()

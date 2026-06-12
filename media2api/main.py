@@ -1250,6 +1250,7 @@ class ProxyKernelRuntimeStartRequest(BaseModel):
     expected_sha256: str = ""
     cwd: str = ""
     env: dict[str, str] = Field(default_factory=dict)
+    config_files: list[dict[str, Any]] = Field(default_factory=list)
     version: str = ""
     notes: str = ""
     replace_existing: bool = False
@@ -16534,6 +16535,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }}
         async function startKernelRuntime() {{
           const provider = selectedKernelProvider();
+          const template = kernelHint(provider).runtime_delivery_plan?.runtime?.start_payload_template || {{}};
           const body = {{
             command: kernelCommandParts(),
             base_url: document.getElementById('kernel-base-url')?.value.trim() || '',
@@ -16542,6 +16544,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             version: document.getElementById('kernel-version')?.value.trim() || '',
             notes: document.getElementById('kernel-notes')?.value.trim() || '',
             env: kernelEnv(),
+            config_files: Array.isArray(template.config_files) ? template.config_files : [],
             replace_existing: document.getElementById('kernel-replace-existing')?.value === 'true',
             update_provider_base_url: document.getElementById('kernel-update-provider')?.value !== 'false',
             run_health_check: document.getElementById('kernel-run-health')?.value !== 'false',
@@ -21761,6 +21764,8 @@ def sync_proxy_kernel_provider_base_url(db: Session, provider_id: str, base_url:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
     config = provider_runtime_config(provider_id, loads(provider.base_config_json, {}))
     config["base_url"] = validate_provider_base_url_input(provider_id, base_url)
+    if provider_id == "gemini_cli_oauth" and str(config.get("health_endpoint") or "/health") == "/health":
+        config["health_endpoint"] = "/v1/models"
     provider.base_config_json = dumps(config)
     db.commit()
     return provider
@@ -24408,6 +24413,7 @@ def proxy_kernel_runtime_start_templates(
             "label": "Executable with HOST/PORT environment",
             "command": [artifact_path],
             "env": env,
+            "config_files": [],
             "confidence": "low",
             "operator_note": "Use when the selected runtime reads HOST/PORT from environment or its own config file.",
         },
@@ -24416,6 +24422,7 @@ def proxy_kernel_runtime_start_templates(
             "label": "Executable with --host/--port flags",
             "command": [artifact_path, "--host", host, "--port", port],
             "env": {"NO_COLOR": "1"},
+            "config_files": [],
             "confidence": "low",
             "operator_note": "Use only after the runtime help output confirms --host and --port are supported.",
         },
@@ -24424,18 +24431,43 @@ def proxy_kernel_runtime_start_templates(
             "label": "Executable with --port flag",
             "command": [artifact_path, "--port", port],
             "env": {"HOST": host, "BASE_URL": base_url},
+            "config_files": [],
             "confidence": "low",
             "operator_note": "Use only after the runtime help output confirms --port is supported.",
         },
     ]
     if provider_id == "gemini_cli_oauth":
+        config_path = str(Path(artifact_path).with_name("config.yaml")) if artifact_path and not artifact_path.startswith("<") else "<runtime-config-path>"
+        auth_dir = str((settings.proxy_kernel_dir / provider_id / "auth").expanduser().resolve())
+        try:
+            port_value = int(port)
+        except ValueError:
+            port_value = 19083
+        config_content = "\n".join([
+            f"host: {json.dumps(host)}",
+            f"port: {port_value}",
+            "tls:",
+            "  enable: false",
+            "remote-management:",
+            "  allow-remote: false",
+            "  secret-key: \"\"",
+            "  disable-control-panel: true",
+            f"auth-dir: {json.dumps(auth_dir)}",
+            "api-keys: []",
+            "debug: false",
+            "logging-to-file: false",
+            "usage-statistics-enabled: false",
+            "enable-gemini-cli-endpoint: false",
+            "",
+        ])
         candidates.insert(0, {
-            "id": "cliproxyapi_standalone",
+            "id": "cliproxyapi_config_standalone",
             "label": "CLIProxyAPI embedded standalone server",
-            "command": [artifact_path, "-standalone"],
+            "command": [artifact_path, "-config", config_path, "-standalone"],
             "env": env,
-            "confidence": "medium",
-            "operator_note": "CLIProxyAPI help exposes -standalone. Confirm the configured listener port matches base_url before health acceptance.",
+            "config_files": [{"path": config_path, "content": config_content}],
+            "confidence": "high",
+            "operator_note": "CLIProxyAPI requires config.yaml. The platform writes a loopback-only config before starting the process.",
         })
     recommended = candidates[0] if candidates else {"id": "env_only", "command": [artifact_path], "env": env}
     payload = {
@@ -24445,6 +24477,7 @@ def proxy_kernel_runtime_start_templates(
         "expected_sha256": expected_sha,
         "cwd": "",
         "env": recommended.get("env") or {},
+        "config_files": recommended.get("config_files") or [],
         "version": version,
         "notes": notes,
         "replace_existing": True,
@@ -27241,6 +27274,7 @@ def admin_proxy_kernel_start_runtime(
             expected_sha256=req.expected_sha256,
             cwd=req.cwd,
             env=req.env,
+            config_files=req.config_files,
             version=req.version,
             notes=req.notes,
             replace_existing=req.replace_existing,

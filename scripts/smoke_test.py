@@ -339,6 +339,10 @@ def main() -> None:
         assert "runtime_health_check" in openai_runtime_delivery["commands"], openai_runtime_delivery
         assert "runtime_preflight" in openai_runtime_delivery["commands"], openai_runtime_delivery
         assert openai_runtime_delivery["policy"]["preferred_runtime_source"] == "release_binary" and openai_runtime_delivery["policy"]["read_only"] is True, openai_runtime_delivery
+        gemini_runtime_delivery = assert_ok(client.get("/v1/admin/proxy-kernels/gemini_cli_oauth/runtime-delivery-plan", headers=headers))
+        assert gemini_runtime_delivery["runtime"]["start_template_id"] == "cliproxyapi_config_standalone", gemini_runtime_delivery
+        assert gemini_runtime_delivery["runtime"]["start_payload_template"]["config_files"], gemini_runtime_delivery
+        assert "-config" in gemini_runtime_delivery["runtime"]["start_payload_template"]["command"], gemini_runtime_delivery
         openai_activation = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/activation-workflow", headers=headers))
         assert openai_activation["object"] == "media2api.proxy_kernel.activation_workflow" and openai_activation["provider_id"] == "openai_web_session", openai_activation
         assert {"route", "account", "runtime", "health", "live_acceptance", "user_api_key"}.issubset({stage["id"] for stage in openai_activation["stages"]}), openai_activation
@@ -553,6 +557,7 @@ def main() -> None:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         runtime_script = runtime_dir / "sleep_runtime.py"
         runtime_script.write_text("import time\nprint('media2api smoke runtime ready', flush=True)\ntime.sleep(60)\n", encoding="utf-8")
+        runtime_config = runtime_dir / "runtime-config.txt"
         runtime_sha256 = hashlib.sha256(runtime_script.read_bytes()).hexdigest()
         try:
             runtime_start = assert_ok(
@@ -564,6 +569,7 @@ def main() -> None:
                         "base_url": "http://127.0.0.1:19081",
                         "artifact_path": str(runtime_script),
                         "expected_sha256": runtime_sha256,
+                        "config_files": [{"path": str(runtime_config), "content": "smoke-runtime-config=true\n"}],
                         "version": "smoke",
                         "notes": "smoke controlled runtime",
                         "replace_existing": True,
@@ -574,6 +580,8 @@ def main() -> None:
                 )
             )
             assert runtime_start["process"]["running"] is True and runtime_start["runtime"]["sha256"] == runtime_sha256, runtime_start
+            assert runtime_config.exists() and runtime_config.read_text(encoding="utf-8") == "smoke-runtime-config=true\n", runtime_start
+            assert runtime_start["process"]["config_files"][0]["path"] == str(runtime_config), runtime_start
             runtime_process = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/process", headers=headers))
             assert runtime_process["process"]["running"] is True, runtime_process
             runtime_logs = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/logs?stream=stdout", headers=headers))

@@ -1367,7 +1367,7 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/runt
 
 `ok=true` 只代表该可执行文件能在当前服务器上启动并打印帮助。若响应中 `status=failed`，且 `failure_patterns` 出现 `glibc_`、`exec format error`、`permission denied` 等内容，应更换 release 资产，或进入 `source-repo/` 做本地构建、协议参考或 adapter 重写。
 
-预检通过后再使用 `start-runtime`。`command` 必须是参数数组，`artifact_path` 必须位于 `MEDIA2API_PROXY_KERNEL_DIR` 下，并且必须出现在 `command` 中。`runtime-delivery-plan` 会返回 `runtime.start_command_candidates` 和 `runtime.start_payload_template`，但不同开源仓库 CLI 参数不统一，操作者必须根据预检输出或项目文档确认最终命令：
+预检通过后再使用 `start-runtime`。`command` 必须是参数数组，`artifact_path` 必须位于 `MEDIA2API_PROXY_KERNEL_DIR` 下，并且必须出现在 `command` 中。`runtime-delivery-plan` 会返回 `runtime.start_command_candidates` 和 `runtime.start_payload_template`。如果目标二进制需要本地配置文件，例如 CLIProxyAPI 的 `config.yaml`，模板会在 `config_files` 中给出受控写入内容；平台只允许把这些文件写到该 provider 的 runtime 目录下：
 
 ```bash
 curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/start-runtime" \
@@ -1384,12 +1384,20 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/star
     "base_url": "http://127.0.0.1:19081",
     "artifact_path": "/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/example-linux-amd64",
     "expected_sha256": "64位十六进制sha256",
+    "config_files": [
+      {
+        "path": "/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/config.yaml",
+        "content": "host: \"127.0.0.1\"\nport: 19081\n"
+      }
+    ],
     "version": "vX.Y.Z",
     "replace_existing": true,
     "run_health_check": true,
     "fail_on_health_check": false
   }'
 ```
+
+`config_files` 是可选字段，最多 4 个文件，每个文件最大 128 KiB。所有路径都会被限制在 `MEDIA2API_PROXY_KERNEL_DIR/<provider_id>/` 之内，并以 `0600` 权限写入。`gemini_cli_oauth` 的 `GEM-CLI-02` 模板会自动生成 loopback-only CLIProxyAPI 配置，并使用 `/v1/models` 做健康检查。
 
 查看和停止平台受控的执行器：
 

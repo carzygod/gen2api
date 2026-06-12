@@ -248,6 +248,11 @@ After a release asset is installed and SHA256-verified, operators should run
 wrong architecture, missing dynamic libraries, or permission problems. If it
 fails, runtime acquisition moves to the `source-repo/` build/reference fallback
 instead of presenting the release as start-ready.
+Some binaries also need a local config file before they can stay running. The
+`start-runtime` payload supports `config_files`, written only under that
+provider's `MEDIA2API_PROXY_KERNEL_DIR` subtree before launch. GEM-CLI-02 uses
+this to generate CLIProxyAPI's loopback-only `config.yaml` and health-checks it
+through `/v1/models`.
 
 In the proxy-kernel dashboard, "可直接用" is intentionally strict: route
 mappings, a loopback runtime, real account material, runtime health, and live

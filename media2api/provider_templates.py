@@ -133,7 +133,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         models=["nano-banana", "nano-banana-pro", "veo-3.1", "imagen-4"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
         default_config={
-            "health_endpoint": "/health",
+            "health_endpoint": "/v1/models",
             "poll_timeout_seconds": 900,
             "endpoints": {
                 OPS["t2i"]: "/v1/images/generations",
