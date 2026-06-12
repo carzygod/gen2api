@@ -6972,6 +6972,7 @@ def restore_stability_mock_fixture(db: Session, fixture: dict[str, Any] | None, 
             if not item:
                 continue
             db.delete(item)
+            db.flush()
             cleanup["deleted"][counter] += 1
     else:
         for key, model_type, item_id in [
