@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 import os
 import shutil
+import tarfile
 import time
 import sys
 import threading
@@ -38,6 +39,7 @@ from media2api.config import settings
 from media2api.database import SessionLocal
 from media2api.main import app
 from media2api.services_core import AccountScheduler, ModelRouter
+from media2api.services_proxy_kernels import ProxyKernelRuntimeService
 from media2api.utils import dumps
 headers = {"Authorization": "Bearer dev-admin-key"}
 
@@ -186,6 +188,31 @@ def main() -> None:
         assert {"routing", "runtime_contract", "runtime", "account", "health", "live_acceptance"}.issubset({phase["id"] for phase in openai_production_readiness["phases"]}), openai_production_readiness
         source_repo = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/source-repo", headers=headers))
         assert source_repo["object"] == "media2api.proxy_kernel.source_repo" and source_repo["repo"] == "basketikun/chatgpt2api" and "source-repo" in source_repo["path"], source_repo
+        extract_service = ProxyKernelRuntimeService(root=PROXY_KERNEL_DIR / "extract-smoke")
+        extract_install_dir = extract_service.root / "openai_web_session" / "archive-smoke"
+        extract_install_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = extract_install_dir / "runner.tar.gz"
+        runner_bytes = b"#!/bin/sh\necho media2api archive runner\n"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            info = tarfile.TarInfo("bin/runner")
+            info.size = len(runner_bytes)
+            info.mode = 0o755
+            archive.addfile(info, BytesIO(runner_bytes))
+        extraction = extract_service.extract_release_asset("openai_web_session", archive_path, extract_install_dir)
+        assert extraction["archive_extracted"] is True and extraction["archive_kind"] == "tar", extraction
+        assert extraction["executable_candidates"] and extraction["executable_candidates"][0]["relative_path"] == "bin/runner", extraction
+        assert extraction["executable_candidates"][0]["sha256"] == hashlib.sha256(runner_bytes).hexdigest(), extraction
+        unsafe_archive_path = extract_install_dir / "unsafe.tar.gz"
+        with tarfile.open(unsafe_archive_path, "w:gz") as archive:
+            info = tarfile.TarInfo("../escape")
+            info.size = len(runner_bytes)
+            info.mode = 0o755
+            archive.addfile(info, BytesIO(runner_bytes))
+        try:
+            extract_service.extract_release_asset("openai_web_session", unsafe_archive_path, extract_install_dir)
+            raise AssertionError("unsafe archive member was not rejected")
+        except ValueError as exc:
+            assert "ARCHIVE_MEMBER_OUTSIDE_EXTRACT_DIR" in str(exc), exc
         routing_plan = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/routing-plan", headers=headers))
         assert routing_plan["object"] == "media2api.proxy_kernel.routing_plan" and routing_plan["template_mapping_count"] >= 1, routing_plan
         routing_apply = assert_ok(

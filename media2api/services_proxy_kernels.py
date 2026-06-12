@@ -8,12 +8,15 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
+import tarfile
 import time
 from typing import Any
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
+import zipfile
 
 from sqlalchemy.orm import Session
 
@@ -382,7 +385,8 @@ class ProxyKernelRuntimeService:
         if target.exists() and not force:
             current_sha = self.file_sha256(target)
             if current_sha == expected:
-                return self.record_install(provider_id, release, asset, target, expected, current_sha, reused=True)
+                extraction = self.extract_release_asset(provider_id, target, install_dir)
+                return self.record_install(provider_id, release, asset, target, expected, current_sha, reused=True, extraction=extraction)
             raise ValueError("TARGET_EXISTS_WITH_DIFFERENT_HASH")
         request = urllib.request.Request(asset["browser_download_url"], headers=self.github_headers())
         with urllib.request.urlopen(request, timeout=120) as response:
@@ -391,7 +395,8 @@ class ProxyKernelRuntimeService:
         if actual != expected:
             target.unlink(missing_ok=True)
             raise ValueError("SHA256_MISMATCH")
-        return self.record_install(provider_id, release, asset, target, expected, actual, reused=False)
+        extraction = self.extract_release_asset(provider_id, target, install_dir)
+        return self.record_install(provider_id, release, asset, target, expected, actual, reused=False, extraction=extraction)
 
     def register_runtime(
         self,
@@ -776,6 +781,167 @@ class ProxyKernelRuntimeService:
 
         return normalize(actual) == normalize(expected)
 
+    def release_archive_kind(self, path: Path) -> str:
+        lower = path.name.lower()
+        if lower.endswith((".tar.gz", ".tgz", ".tar", ".tar.xz", ".txz", ".tar.bz2", ".tbz2")):
+            return "tar"
+        if lower.endswith(".zip"):
+            return "zip"
+        return ""
+
+    def extract_release_asset(self, provider_id: str, archive_path: Path, install_dir: Path) -> dict[str, Any]:
+        kind = self.release_archive_kind(archive_path)
+        if not kind:
+            return {
+                "archive_extracted": False,
+                "archive_kind": "",
+                "extracted_dir": "",
+                "extracted_file_count": 0,
+                "executable_candidates": self.executable_candidate_payloads([archive_path], archive_path.parent, provider_id),
+            }
+        digest = self.file_sha256(archive_path)[:12]
+        extract_dir = install_dir / f"{self.safe_filename(archive_path.name)}.extracted-{digest}"
+        root = self.root.resolve()
+        resolved_extract_dir = extract_dir.resolve()
+        if not self.path_within(resolved_extract_dir, root):
+            raise ValueError("EXTRACT_DIR_OUTSIDE_PROXY_KERNEL_DIR")
+        max_files = 2000
+        max_bytes = 512 * 1024 * 1024
+        extracted_files: list[Path] = []
+        if resolved_extract_dir.exists():
+            extracted_files = [item for item in resolved_extract_dir.rglob("*") if item.is_file()]
+        else:
+            resolved_extract_dir.mkdir(parents=True, exist_ok=True)
+            if kind == "zip":
+                extracted_files = self.extract_zip_release(archive_path, resolved_extract_dir, max_files=max_files, max_bytes=max_bytes)
+            else:
+                extracted_files = self.extract_tar_release(archive_path, resolved_extract_dir, max_files=max_files, max_bytes=max_bytes)
+        candidates = self.executable_candidate_payloads(extracted_files, resolved_extract_dir, provider_id)
+        return {
+            "archive_extracted": True,
+            "archive_kind": kind,
+            "extracted_dir": str(resolved_extract_dir),
+            "extracted_file_count": len(extracted_files),
+            "extracted_files_sample": [
+                str(path.relative_to(resolved_extract_dir)).replace("\\", "/")
+                for path in extracted_files[:50]
+                if self.path_within(path.resolve(), resolved_extract_dir)
+            ],
+            "executable_candidates": candidates,
+            "limits": {"max_files": max_files, "max_bytes": max_bytes},
+        }
+
+    def extract_zip_release(self, archive_path: Path, extract_dir: Path, *, max_files: int, max_bytes: int) -> list[Path]:
+        extracted: list[Path] = []
+        total_bytes = 0
+        with zipfile.ZipFile(archive_path) as archive:
+            for info in archive.infolist():
+                target = self.safe_extract_member_path(extract_dir, info.filename)
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                total_bytes += int(info.file_size or 0)
+                if len(extracted) >= max_files or total_bytes > max_bytes:
+                    raise ValueError("ARCHIVE_EXTRACTION_LIMIT_EXCEEDED")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info, "r") as source, target.open("wb") as output:
+                    self.copy_limited(source, output, max_bytes=max_bytes)
+                mode = (info.external_attr >> 16) & 0o777
+                if mode:
+                    try:
+                        target.chmod(mode)
+                    except OSError:
+                        pass
+                extracted.append(target)
+        return extracted
+
+    def extract_tar_release(self, archive_path: Path, extract_dir: Path, *, max_files: int, max_bytes: int) -> list[Path]:
+        extracted: list[Path] = []
+        total_bytes = 0
+        with tarfile.open(archive_path, "r:*") as archive:
+            for member in archive.getmembers():
+                target = self.safe_extract_member_path(extract_dir, member.name)
+                if member.issym() or member.islnk():
+                    raise ValueError("ARCHIVE_LINK_MEMBER_FORBIDDEN")
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    continue
+                total_bytes += int(member.size or 0)
+                if len(extracted) >= max_files or total_bytes > max_bytes:
+                    raise ValueError("ARCHIVE_EXTRACTION_LIMIT_EXCEEDED")
+                source = archive.extractfile(member)
+                if source is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("wb") as output:
+                    self.copy_limited(source, output, max_bytes=max_bytes)
+                try:
+                    target.chmod(member.mode & 0o777)
+                except OSError:
+                    pass
+                extracted.append(target)
+        return extracted
+
+    def safe_extract_member_path(self, extract_dir: Path, member_name: str) -> Path:
+        name = str(member_name or "").replace("\\", "/").lstrip("/")
+        if not name or name in {".", ".."} or "\x00" in name:
+            raise ValueError("INVALID_ARCHIVE_MEMBER")
+        target = (extract_dir / name).resolve()
+        if not self.path_within(target, extract_dir.resolve()):
+            raise ValueError("ARCHIVE_MEMBER_OUTSIDE_EXTRACT_DIR")
+        return target
+
+    def copy_limited(self, source: Any, output: Any, *, max_bytes: int) -> None:
+        written = 0
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            written += len(chunk)
+            if written > max_bytes:
+                raise ValueError("ARCHIVE_MEMBER_TOO_LARGE")
+            output.write(chunk)
+
+    def executable_candidate_payloads(self, files: list[Path], root: Path, provider_id: str = "") -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for path in files:
+            if not path.exists() or not path.is_file():
+                continue
+            lower = path.name.lower()
+            if any(token in lower for token in ("sha256", "checksum", "license", "readme", "notice", "changelog")):
+                continue
+            if lower.endswith((".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".html", ".css")):
+                continue
+            try:
+                mode = path.stat().st_mode
+                size = path.stat().st_size
+            except OSError:
+                continue
+            executable_bit = bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+            executable_ext = lower.endswith((".exe", ".bin", ".sh", ".cmd", ".bat"))
+            extensionless = "." not in path.name
+            if not (executable_bit or executable_ext or extensionless):
+                continue
+            relative = str(path.relative_to(root)).replace("\\", "/") if self.path_within(path.resolve(), root.resolve()) else path.name
+            score = 0
+            if executable_bit:
+                score += 5
+            if executable_ext:
+                score += 3
+            if extensionless:
+                score += 2
+            if any(token in lower for token in ("server", "proxy", "api", "runner", "main", provider_id.replace("_", "-"), provider_id.replace("_", ""))):
+                score += 2
+            candidates.append({
+                "path": str(path.resolve()),
+                "relative_path": relative,
+                "size_bytes": size,
+                "sha256": self.file_sha256(path),
+                "mode": oct(mode & 0o777),
+                "candidate_score": score,
+            })
+        candidates.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
+        return candidates[:20]
+
     def record_install(
         self,
         provider_id: str,
@@ -785,7 +951,9 @@ class ProxyKernelRuntimeService:
         expected_sha256: str,
         actual_sha256: str,
         reused: bool,
+        extraction: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        extraction = extraction or {}
         state = self.load_state()
         entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
         entry["install"] = {
@@ -800,6 +968,11 @@ class ProxyKernelRuntimeService:
             "size_bytes": target.stat().st_size if target.exists() else None,
             "installed_at": self.utcnow(),
             "reused_existing_file": reused,
+            "archive_extracted": bool(extraction.get("archive_extracted")),
+            "extracted_dir": extraction.get("extracted_dir") or "",
+            "extracted_file_count": int(extraction.get("extracted_file_count") or 0),
+            "executable_candidates": extraction.get("executable_candidates") or [],
+            "extraction": extraction,
         }
         self.save_state(state)
         return {"object": "media2api.proxy_kernel.install", "provider_id": provider_id, "install": entry["install"]}

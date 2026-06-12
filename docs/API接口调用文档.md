@@ -1050,6 +1050,12 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/inst
   -d '{"dry_run":false,"resolve_release":true,"allow_non_preferred":false,"force":false}'
 ```
 
+真实安装返回的 `install` 会包含：
+
+- `archive_extracted`: 是否已在 hash 校验后安全解包 release 压缩包。
+- `executable_candidates`: 解包后识别出的可执行候选，每个候选带 `path`、`relative_path`、`sha256`、`mode` 和 `candidate_score`。
+- `extracted_dir`: 解包目录，始终位于 `MEDIA2API_PROXY_KERNEL_DIR` 下。
+
 批量生成 checksum-resolved 候选安装计划。该调用默认 dry-run；设置 `resolve_release=true` 会读取 checksum 并生成安装计划，但仍不会下载二进制：
 
 ```bash

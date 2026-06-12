@@ -14489,8 +14489,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const base = document.getElementById('kernel-base-url');
           const checksumCandidates = Array.isArray(releaseChecksums.resolved_sha256_candidates) ? releaseChecksums.resolved_sha256_candidates : [];
           const preferredChecksum = checksumCandidates.find(item => item.preferred) || checksumCandidates[0] || {{}};
-          if (artifact && !artifact.value && installed.path) artifact.value = installed.path;
-          if (sha && !sha.value && (installed.expected_sha256 || installed.sha256)) sha.value = installed.expected_sha256 || installed.sha256;
+          const executableCandidates = Array.isArray(installed.executable_candidates) ? installed.executable_candidates : [];
+          const preferredExecutable = executableCandidates[0] || {{}};
+          if (artifact && !artifact.value && (preferredExecutable.path || installed.path)) artifact.value = preferredExecutable.path || installed.path;
+          if (sha && !sha.value && (preferredExecutable.sha256 || installed.expected_sha256 || installed.sha256)) sha.value = preferredExecutable.sha256 || installed.expected_sha256 || installed.sha256;
           if (releaseTag && !releaseTag.value && (installed.tag_name || preferredChecksum.tag_name)) releaseTag.value = installed.tag_name || preferredChecksum.tag_name;
           if (releaseAsset && !releaseAsset.value && (installed.asset_name || preferredChecksum.asset_name)) releaseAsset.value = installed.asset_name || preferredChecksum.asset_name;
           if (releaseSha && !releaseSha.value && (installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256)) releaseSha.value = installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256;
@@ -14921,12 +14923,14 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           }};
           const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/install-release', 'POST', body);
           const install = payload.install || {{}};
+          const executableCandidates = Array.isArray(install.executable_candidates) ? install.executable_candidates : [];
+          const preferredExecutable = executableCandidates[0] || {{}};
           const artifact = document.getElementById('kernel-artifact-path');
           const sha = document.getElementById('kernel-expected-sha256');
           const version = document.getElementById('kernel-version');
           const preview = document.getElementById('kernel-install-path-preview');
-          if (artifact && install.path) artifact.value = install.path;
-          if (sha && (install.expected_sha256 || install.sha256)) sha.value = install.expected_sha256 || install.sha256;
+          if (artifact && (preferredExecutable.path || install.path)) artifact.value = preferredExecutable.path || install.path;
+          if (sha && (preferredExecutable.sha256 || install.expected_sha256 || install.sha256)) sha.value = preferredExecutable.sha256 || install.expected_sha256 || install.sha256;
           if (version && install.tag_name) version.value = install.tag_name;
           if (preview && install.path) preview.value = install.path;
           proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
@@ -14950,6 +14954,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           }};
           const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/install-release-candidate', 'POST', body);
           const install = payload.install || {{}};
+          const executableCandidates = Array.isArray(install.executable_candidates) ? install.executable_candidates : [];
+          const preferredExecutable = executableCandidates[0] || {{}};
           const artifact = document.getElementById('kernel-artifact-path');
           const sha = document.getElementById('kernel-expected-sha256');
           const releaseSha = document.getElementById('kernel-release-sha256');
@@ -14957,8 +14963,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const releaseAsset = document.getElementById('kernel-release-asset');
           const version = document.getElementById('kernel-version');
           const preview = document.getElementById('kernel-install-path-preview');
-          if (artifact && install.path) artifact.value = install.path;
-          if (sha && (install.expected_sha256 || install.sha256)) sha.value = install.expected_sha256 || install.sha256;
+          if (artifact && (preferredExecutable.path || install.path)) artifact.value = preferredExecutable.path || install.path;
+          if (sha && (preferredExecutable.sha256 || install.expected_sha256 || install.sha256)) sha.value = preferredExecutable.sha256 || install.expected_sha256 || install.sha256;
           if (releaseSha && (install.expected_sha256 || install.sha256)) releaseSha.value = install.expected_sha256 || install.sha256;
           if (releaseTag && install.tag_name) releaseTag.value = install.tag_name;
           if (releaseAsset && install.asset_name) releaseAsset.value = install.asset_name;
@@ -20528,8 +20534,14 @@ def build_proxy_kernel_runtime_delivery_plan(db: Session, provider_id: str) -> d
     installed = kernel.get("installed") if isinstance(kernel.get("installed"), dict) else {}
     process = kernel.get("process") if isinstance(kernel.get("process"), dict) else {}
     default_base_url = kernel.get("runtime_base_url") or proxy_kernel_runtime_default_base_url(provider_id)
-    artifact_path = str(installed.get("path") or "<verified-artifact-path>")
-    expected_sha = str(installed.get("expected_sha256") or installed.get("sha256") or "<64-hex-sha256>")
+    executable_candidates = [
+        item
+        for item in installed.get("executable_candidates") or []
+        if isinstance(item, dict) and item.get("path")
+    ] if isinstance(installed, dict) else []
+    executable_candidate = executable_candidates[0] if executable_candidates else {}
+    artifact_path = str(executable_candidate.get("path") or installed.get("path") or "<verified-artifact-path>")
+    expected_sha = str(executable_candidate.get("sha256") or installed.get("expected_sha256") or installed.get("sha256") or "<64-hex-sha256>")
     try:
         parsed = urlparse(default_base_url)
         host = parsed.hostname or "127.0.0.1"
