@@ -194,8 +194,9 @@ repositories are synced into `source-repo/` only when release assets are
 missing, protocol details must be inspected, local builds are unavoidable, or
 an adapter rewrite needs reference code. Synced source repositories can be
 inspected for Node/Go/Python/Docker runtime commands, then wrapped in a
-SHA256-recorded launcher artifact under `MEDIA2API_PROXY_KERNEL_DIR`; the
-launcher still runs through the same loopback-only `start-runtime` gate.
+SHA256-recorded launcher artifact under the persistent
+`MEDIA2API_PROXY_KERNEL_DIR` runtime directory; the launcher still runs through
+the same loopback-only `start-runtime` gate.
 
 In the proxy-kernel dashboard, "可直接用" is intentionally strict: route
 mappings, a loopback runtime, real account material, runtime health, and live

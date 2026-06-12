@@ -44,7 +44,7 @@ class Settings:
         for host in os.getenv("MEDIA2API_ASSET_REMOTE_URL_ALLOWED_HOSTS", "").split(",")
         if host.strip()
     }
-    proxy_kernel_dir = Path(os.getenv("MEDIA2API_PROXY_KERNEL_DIR", "./var/proxy-kernels"))
+    proxy_kernel_dir = Path(os.getenv("MEDIA2API_PROXY_KERNEL_DIR", str(PROJECT_ROOT / "var" / "proxy-kernels")))
     source_repo_dir = Path(os.getenv("MEDIA2API_SOURCE_REPO_DIR", str(PROJECT_ROOT / "source-repo")))
     asset_signing_secret = os.getenv("MEDIA2API_ASSET_SIGNING_SECRET") or bootstrap_api_key
     secret_encryption_key = os.getenv("MEDIA2API_SECRET_ENCRYPTION_KEY") or asset_signing_secret

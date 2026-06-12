@@ -197,8 +197,8 @@ def finalized_kernel_provider_ids() -> list[str]:
 
 class ProxyKernelRuntimeService:
     def __init__(self, root: Path | None = None) -> None:
-        self.root = root or settings.proxy_kernel_dir
-        self.source_root = settings.source_repo_dir
+        self.root = (root or settings.proxy_kernel_dir).expanduser().resolve()
+        self.source_root = settings.source_repo_dir.expanduser().resolve()
 
     def state_path(self) -> Path:
         return self.root / "state.json"

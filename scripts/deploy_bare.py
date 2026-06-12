@@ -84,6 +84,8 @@ Environment=MEDIA2API_INLINE_ASYNC=false
 Environment=MEDIA2API_WORKER_CONCURRENCY=2
 Environment=MEDIA2API_SEED_DEFAULTS={seed_defaults_value}
 Environment=MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true
+Environment=MEDIA2API_PROXY_KERNEL_DIR={data_dir}/proxy-kernels
+Environment=MEDIA2API_SOURCE_REPO_DIR={remote_dir}/source-repo
 ExecStart={app_dir}/.venv/bin/python -m uvicorn media2api.main:app --host 0.0.0.0 --port {public_port}
 Restart=always
 RestartSec=3
@@ -109,6 +111,8 @@ Environment=MEDIA2API_INLINE_ASYNC=false
 Environment=MEDIA2API_WORKER_CONCURRENCY=2
 Environment=MEDIA2API_SEED_DEFAULTS={seed_defaults_value}
 Environment=MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true
+Environment=MEDIA2API_PROXY_KERNEL_DIR={data_dir}/proxy-kernels
+Environment=MEDIA2API_SOURCE_REPO_DIR={remote_dir}/source-repo
 ExecStart={app_dir}/.venv/bin/python -m media2api.worker
 Restart=always
 RestartSec=3

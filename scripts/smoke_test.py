@@ -273,8 +273,11 @@ def main() -> None:
         )
         launcher_path = Path(source_launcher["launcher"]["path"])
         assert source_launcher["object"] == "media2api.proxy_kernel.source_runtime_launcher" and launcher_path.exists(), source_launcher
+        assert launcher_path.is_absolute(), source_launcher
         assert str(launcher_path.resolve()).startswith(str(PROXY_KERNEL_DIR.resolve())) and hashlib.sha256(launcher_path.read_bytes()).hexdigest() == source_launcher["launcher"]["sha256"], source_launcher
-        assert source_launcher["start_payload_template"]["artifact_path"] == str(launcher_path), source_launcher
+        start_payload = source_launcher["start_payload_template"]
+        assert start_payload["artifact_path"] == str(launcher_path) and Path(start_payload["artifact_path"]).is_absolute(), source_launcher
+        assert start_payload["command"][1] == str(launcher_path) and Path(start_payload["cwd"]).is_absolute(), source_launcher
         extract_service = ProxyKernelRuntimeService(root=PROXY_KERNEL_DIR / "extract-smoke")
         extract_install_dir = extract_service.root / "openai_web_session" / "archive-smoke"
         extract_install_dir.mkdir(parents=True, exist_ok=True)
