@@ -1234,6 +1234,18 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/materials-re
 - `routing_materials`: provider/model mapping 是否已准备。
 - `validation_materials`: 真实样本验收所需的 admin/user key、样本模型和操作范围。
 
+账号材料矩阵是操作员的第一入口，用来回答“每个平台到底要给什么”。它按 provider 聚合选型编号、账号是否已导入、敏感凭据字段、非敏感资源画像字段、导入模板和下一步按钮。该接口只读，不调用上游、不下载 release、不 clone `source-repo/`、不创建假账号：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/account-materials-matrix" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/account-materials-matrix?provider_ids=openai_web_session,gemini_cli_oauth" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+矩阵返回中的 `what_to_prepare` 会把字段分到 `credential_value`、`resource_profile`、`runtime_or_provider_base_url` 和 `other`。敏感 cookie/session/OAuth/profile/token 只放入 `credential_value`；Discord `guild_id/channel_id`、Gemini `project_id`、区域、套餐等非敏感路由资料放入 `resource_profile`。`policy.release_binary_first=true` 且 `policy.source_repo_only_when_needed=true` 表示运行时仍优先使用 release 二进制，只有 release 不可用、协议细节必须审计、需要本地构建或重写 adapter 时才同步 `source-repo/`。
+
 账号材料预检用于把“我要粘什么”变成可校验的导入包。后台可在“反代内核 -> 启动执行器 -> 账号材料导入”卡片中直接读取模板、粘贴材料、预检和导入；API 也可以直接调用。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
 
 ```bash

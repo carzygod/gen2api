@@ -235,6 +235,13 @@ normal user/API key when `dry_run=false`, `create_user=true`, and
 For a single provider, `POST /v1/admin/proxy-kernels/{provider_id}/activation-run`
 turns the same checklist into a dry-run-first activation session, then returns
 the refreshed production gap report and the next required material.
+`GET /v1/admin/proxy-kernels/account-materials-matrix` is the first account
+import screen for operators. It lists every finalized kernel, the selected
+repository number, whether a real account is already available, which fields
+belong in encrypted `credential_value`, which fields belong in non-secret
+`resource_profile`, and the next UI/API action. The endpoint is read-only: it
+does not call upstream providers, download release assets, clone source repos,
+or create fake accounts.
 `GET/POST /v1/admin/proxy-kernels/{provider_id}/account-materials` gives the
 operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also
