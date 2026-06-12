@@ -192,6 +192,12 @@ repositories are synced into `source-repo/` only when release assets are
 missing, protocol details must be inspected, local builds are unavoidable, or
 an adapter rewrite needs reference code.
 
+In the proxy-kernel dashboard, "可直接用" is intentionally strict: route
+mappings, a loopback runtime, real account material, runtime health, and live
+image/video acceptance samples must all have evidence. Providers that have the
+first prerequisites but no live sample evidence are shown as "待验收", not
+production-usable.
+
 ## Local Development
 
 ```powershell

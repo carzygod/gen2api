@@ -98,7 +98,9 @@ def main() -> None:
         assert {"database_query", "operation_coverage", "external_connector_accounts", "external_mixed_media_provider"}.issubset({check["name"] for check in readiness["checks"]}), readiness
         proxy_kernels = assert_ok(client.get("/v1/admin/proxy-kernels", headers=headers))
         assert proxy_kernels["object"] == "media2api.proxy_kernel.list" and proxy_kernels["summary"]["total"] >= 10, proxy_kernels
+        assert {"ready_for_live_acceptance", "needs_live_acceptance", "needs_route", "needs_health", "usable"}.issubset(proxy_kernels["summary"]), proxy_kernels
         assert {"openai_web_session", "gemini_cli_oauth", "doubao_web_session", "qwen_ai_web_session"}.issubset({item["provider_id"] for item in proxy_kernels["data"]}), proxy_kernels
+        assert all({"directly_usable", "route_ready", "route_evidence", "health_ok", "latest_health", "ready_for_live_acceptance", "live_acceptance_ok", "live_acceptance"}.issubset(item) for item in proxy_kernels["data"]), proxy_kernels
         bulk_routing_plan = assert_ok(client.get("/v1/admin/proxy-kernels/routing-plan", headers=headers))
         assert bulk_routing_plan["object"] == "media2api.proxy_kernel.routing_plan.list" and bulk_routing_plan["summary"]["total"] >= 10, bulk_routing_plan
         bulk_routing_apply = assert_ok(

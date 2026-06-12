@@ -1134,6 +1134,16 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/oper
 - `submission_templates.live_acceptance`: 消耗真实额度的 live 样本验收模板，建议 `max_samples=1` 起步。
 - `submission_templates.operator_handoff_run`: 可直接提交给 `/operator-handoff/run` 的安全 dry-run 编排模板。
 
+`/v1/admin/proxy-kernels` 中的 `usable` / `directly_usable` 是严格生产口径：必须已经有路由、loopback runtime、真实账号、健康检查和每个声明操作的 live 样本资产证据。只具备前置条件但缺真实样本时，`ready_for_live_acceptance=true`，但 `usable=false`。
+
+常用状态字段：
+
+- `route_ready` / `route_evidence`: 当前 provider/model 映射是否覆盖全部声明操作。
+- `health_ok` / `latest_health`: 最近一次 loopback runtime 健康检查证据。
+- `ready_for_live_acceptance`: 路由、账号、runtime、hash、健康检查均满足，可以运行 live 样本验收。
+- `live_acceptance_ok` / `live_acceptance`: 每个声明图片/视频操作是否已有完成任务与输出资产。
+- `blockers[].code`: 可能包含 `NO_ROUTE_MAPPING`、`NO_ACTIVE_ACCOUNT`、`NO_LOOPBACK_RUNTIME`、`RUNTIME_HEALTH_REQUIRED`、`LIVE_ACCEPTANCE_REQUIRED`。
+
 运行 loopback 合同自检，验证平台能把图片/视频请求真实转发到本机反代内核合同并完成资产入库。该接口只启动临时本机 runner，不调用真实上游、不消耗额度：
 
 ```bash

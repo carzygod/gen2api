@@ -238,6 +238,82 @@ class ProxyKernelRuntimeService:
         }
         return payload
 
+    def live_acceptance_evidence(self, db: Session, provider_id: str, operations: list[str]) -> dict[str, Any]:
+        operation_evidence: dict[str, dict[str, Any]] = {}
+        for operation in operations:
+            job = (
+                db.query(models.MediaJob)
+                .filter(
+                    models.MediaJob.provider_id == provider_id,
+                    models.MediaJob.operation == operation,
+                    models.MediaJob.status == "completed",
+                    models.MediaJob.output_asset_ids_json != "[]",
+                )
+                .order_by(models.MediaJob.updated_at.desc(), models.MediaJob.created_at.desc())
+                .first()
+            )
+            if not job:
+                operation_evidence[operation] = {"operation": operation, "ok": False, "status": "missing"}
+                continue
+            asset_ids = [str(item) for item in loads(job.output_asset_ids_json, []) if str(item)]
+            operation_evidence[operation] = {
+                "operation": operation,
+                "ok": bool(asset_ids),
+                "status": "passed" if asset_ids else "asset_missing",
+                "job_id": job.id,
+                "logical_model": job.logical_model,
+                "provider_model": job.provider_model,
+                "account_id": job.account_id,
+                "provider_task_id": job.provider_task_id,
+                "asset_ids": asset_ids,
+                "completed_at": job.updated_at.isoformat() + "Z",
+            }
+        missing = [operation for operation, item in operation_evidence.items() if not item.get("ok")]
+        return {
+            "required_operations": operations,
+            "passed_operations": [operation for operation, item in operation_evidence.items() if item.get("ok")],
+            "missing_operations": missing,
+            "operation_evidence": operation_evidence,
+            "ok": bool(operations) and not missing,
+        }
+
+    def route_evidence(self, db: Session, provider_id: str, operations: list[str]) -> dict[str, Any]:
+        mappings = (
+            db.query(models.ProviderModelMapping)
+            .filter(models.ProviderModelMapping.provider_id == provider_id, models.ProviderModelMapping.enabled.is_(True))
+            .all()
+        )
+        covered: set[str] = set()
+        for mapping in mappings:
+            for operation in loads(mapping.operations_json, []):
+                if operation:
+                    covered.add(str(operation))
+        missing = [operation for operation in operations if operation not in covered]
+        return {
+            "enabled_mapping_count": len(mappings),
+            "covered_operations": sorted(covered),
+            "missing_operations": missing,
+            "ok": bool(operations) and not missing,
+        }
+
+    def latest_health_evidence(self, db: Session, provider_id: str) -> dict[str, Any]:
+        check = (
+            db.query(models.ProviderHealthCheck)
+            .filter(models.ProviderHealthCheck.provider_id == provider_id)
+            .order_by(models.ProviderHealthCheck.created_at.desc())
+            .first()
+        )
+        if not check:
+            return {"status": "missing", "ok": False}
+        return {
+            "status": check.status,
+            "ok": check.status == "ok",
+            "latency_ms": check.latency_ms,
+            "message": check.message,
+            "checked_at": check.created_at.isoformat() + "Z",
+            "detail": loads(check.detail_json, {}),
+        }
+
     def kernel_summary(self, db: Session, provider_id: str) -> dict[str, Any]:
         spec = KERNEL_SPECS.get(provider_id)
         if not spec:
@@ -253,9 +329,20 @@ class ProxyKernelRuntimeService:
         installed_verified = bool(installed.get("sha256") and installed.get("expected_sha256") == installed.get("sha256"))
         process = self.process_status(provider_id)
         managed_process_configured = bool(process.get("pid"))
+        runtime_ready = bool(runtime_registered and self.is_loopback_url(base_url) and (not managed_process_configured or process.get("running")))
+        hash_ready = bool(not installed or installed_verified)
+        route_evidence = self.route_evidence(db, provider_id, spec.operations)
+        route_ready = bool(route_evidence.get("ok"))
+        health_evidence = self.latest_health_evidence(db, provider_id)
+        health_ok = bool(health_evidence.get("ok"))
+        ready_for_live_acceptance = bool(provider and active_accounts and route_ready and runtime_ready and hash_ready and health_ok)
+        live_acceptance = self.live_acceptance_evidence(db, provider_id, spec.operations)
+        live_acceptance_ok = bool(live_acceptance.get("ok"))
         blockers: list[dict[str, Any]] = []
         if not provider:
             blockers.append({"code": "PROVIDER_NOT_INITIALIZED", "message": "Import a real account or register the provider template first."})
+        if not route_ready:
+            blockers.append({"code": "NO_ROUTE_MAPPING", "message": "Apply provider/model mappings for every declared media operation.", "missing_operations": route_evidence.get("missing_operations", [])})
         if not active_accounts:
             blockers.append({"code": "NO_ACTIVE_ACCOUNT", "message": "Import an authorized Web session or Agent Provider profile for this provider."})
         if not runtime_registered:
@@ -264,6 +351,10 @@ class ProxyKernelRuntimeService:
             blockers.append({"code": "KERNEL_HASH_NOT_VERIFIED", "message": "Installed artifact hash does not match the expected SHA256."})
         if managed_process_configured and not process.get("running"):
             blockers.append({"code": "KERNEL_PROCESS_STOPPED", "message": "Managed kernel process is not running."})
+        if provider and active_accounts and route_ready and runtime_ready and hash_ready and not health_ok:
+            blockers.append({"code": "RUNTIME_HEALTH_REQUIRED", "message": "Run a successful provider health check against the loopback runtime before live acceptance.", "latest_health": health_evidence})
+        if ready_for_live_acceptance and not live_acceptance_ok:
+            blockers.append({"code": "LIVE_ACCEPTANCE_REQUIRED", "message": "Run live image/video acceptance samples for every declared operation before marking this kernel directly usable.", "missing_operations": live_acceptance.get("missing_operations", [])})
         return {
             "object": "media2api.proxy_kernel",
             "provider_id": provider_id,
@@ -278,8 +369,17 @@ class ProxyKernelRuntimeService:
             "installed": installed,
             "installed_verified": installed_verified,
             "process": process,
+            "route_ready": route_ready,
+            "route_evidence": route_evidence,
+            "runtime_ready": runtime_ready,
+            "latest_health": health_evidence,
+            "health_ok": health_ok,
+            "ready_for_live_acceptance": ready_for_live_acceptance,
+            "live_acceptance": live_acceptance,
+            "live_acceptance_ok": live_acceptance_ok,
             "state": state,
-            "usable": bool(provider and active_accounts and runtime_registered and (not installed or installed_verified) and (not managed_process_configured or process.get("running"))),
+            "usable": bool(ready_for_live_acceptance and live_acceptance_ok),
+            "directly_usable": bool(ready_for_live_acceptance and live_acceptance_ok),
             "blockers": blockers,
         }
 
@@ -291,9 +391,13 @@ class ProxyKernelRuntimeService:
             "summary": {
                 "total": len(data),
                 "usable": sum(1 for item in data if item["usable"]),
+                "ready_for_live_acceptance": sum(1 for item in data if item.get("ready_for_live_acceptance")),
+                "needs_live_acceptance": sum(1 for item in data if any(blocker["code"] == "LIVE_ACCEPTANCE_REQUIRED" for blocker in item["blockers"])),
+                "needs_route": sum(1 for item in data if any(blocker["code"] == "NO_ROUTE_MAPPING" for blocker in item["blockers"])),
                 "needs_account": sum(1 for item in data if any(blocker["code"] == "NO_ACTIVE_ACCOUNT" for blocker in item["blockers"])),
                 "needs_runtime": sum(1 for item in data if any(blocker["code"] == "NO_LOOPBACK_RUNTIME" for blocker in item["blockers"])),
                 "needs_hash": sum(1 for item in data if any(blocker["code"] == "KERNEL_HASH_NOT_VERIFIED" for blocker in item["blockers"])),
+                "needs_health": sum(1 for item in data if any(blocker["code"] == "RUNTIME_HEALTH_REQUIRED" for blocker in item["blockers"])),
             },
             "policy": [
                 "Use release binaries first when available.",

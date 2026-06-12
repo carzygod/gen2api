@@ -13393,7 +13393,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         f"<td>{admin_escape(item.get('provider_id'))}</td>"
         f"<td>{admin_escape((item.get('spec') or {}).get('repo'))}</td>"
         f"<td>{admin_escape(', '.join((item.get('spec') or {}).get('operations', [])))}</td>"
-        f"<td>{pill('可用' if item.get('usable') else '待配置')}</td>"
+        f"<td>{pill('可直接用' if item.get('usable') else '待真实验收' if item.get('ready_for_live_acceptance') else '待配置')}</td>"
         f"<td>{admin_escape(item.get('runtime_base_url') or '-')}</td>"
         f"<td>{pill('运行中' if (item.get('process') or {}).get('running') else '未运行')}</td>"
         f"<td>{admin_escape(', '.join(blocker.get('code', '') for blocker in item.get('blockers', [])) or '-')}</td>"
@@ -14043,8 +14043,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <div class="status-strip">
                 <div><span class="eyebrow">定型内核</span><b>{admin_escape(proxy_kernel_summary.get("total", 0))}</b></div>
                 <div><span class="eyebrow">可直接用</span><b>{admin_escape(proxy_kernel_summary.get("usable", 0))}</b></div>
+                <div><span class="eyebrow">待验收</span><b>{admin_escape(proxy_kernel_summary.get("needs_live_acceptance", 0))}</b></div>
+                <div><span class="eyebrow">缺路由</span><b>{admin_escape(proxy_kernel_summary.get("needs_route", 0))}</b></div>
                 <div><span class="eyebrow">缺账号</span><b>{admin_escape(proxy_kernel_summary.get("needs_account", 0))}</b></div>
                 <div><span class="eyebrow">缺运行时</span><b>{admin_escape(proxy_kernel_summary.get("needs_runtime", 0))}</b></div>
+                <div><span class="eyebrow">缺健康</span><b>{admin_escape(proxy_kernel_summary.get("needs_health", 0))}</b></div>
               </div>
               <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>操作</th><th>选型</th><th>Provider</th><th>仓库</th><th>能力</th><th>状态</th><th>Runtime</th><th>进程</th><th>阻塞项</th></tr></thead><tbody>{proxy_kernel_rows}</tbody></table></div>
             </div>
