@@ -7279,6 +7279,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
+    ("GET", "/v1/admin/proxy-kernels/materials-request"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -7519,6 +7521,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
+                ("GET", "/v1/admin/proxy-kernels/materials-request"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
@@ -13298,6 +13302,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
         ("全量上线清单", "GET", "/v1/admin/proxy-kernels/go-live-checklist"),
         ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
+        ("全量材料清单", "GET", "/v1/admin/proxy-kernels/materials-request"),
+        ("OpenAI Web 材料清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/materials-request"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
@@ -13360,6 +13366,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
+        "/v1/admin/proxy-kernels/materials-request",
+        "/v1/admin/proxy-kernels/openai_web_session/materials-request",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13391,6 +13399,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
+        "/v1/admin/proxy-kernels/materials-request",
+        "/v1/admin/proxy-kernels/openai_web_session/materials-request",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
@@ -13858,6 +13868,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
                   <button class="op" type="button" id="kernel-go-live-all">查看全部上线清单</button>
+                  <button class="op" type="button" id="kernel-materials-all">查看全部材料清单</button>
                   <button class="op" type="button" data-jump-tab="oauth">去导入账号</button>
                 </div>
               </div>
@@ -13880,6 +13891,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
+                  <button class="op" type="button" id="kernel-materials">查看材料清单</button>
                 </div>
               </div>
               <div class="kernel-rail">
@@ -14313,6 +14325,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const source = hint.source_repo || {{}};
           const routing = hint.routing_plan || {{}};
           const goLive = hint.go_live || {{}};
+          const materials = hint.materials_request || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14330,6 +14343,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>路由映射</dt><dd>${{escapeHtml(String(routing.enabled_mapping_count ?? 0))}} / ${{escapeHtml(String(routing.template_mapping_count ?? '-'))}}${{routing.route_config_ready ? ' · 已准备' : ''}}</dd>
               <dt>上线清单</dt><dd>${{escapeHtml(goLive.status || '未读取')}}${{goLive.next_step?.label ? ' · 下一步：' + escapeHtml(goLive.next_step.label) : ''}}</dd>
+              <dt>材料清单</dt><dd>${{escapeHtml(materials.status || '未读取')}}${{materials.next_step?.label ? ' · 下一步：' + escapeHtml(materials.next_step.label) : ''}}</dd>
               <dt>source-repo</dt><dd class="kernel-path-note">${{source.exists ? escapeHtml(source.path || '已同步') : escapeHtml(source.path || '未同步')}}</dd>
             </dl>
             ${{blockerHtml}}
@@ -14378,6 +14392,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }}
         async function refreshKernel(providerId) {{
           const provider = providerId || selectedKernelProvider();
+          const existingHint = kernelHint(provider);
           const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider));
           let sourcePayload = kernelHint(provider).source_repo || {{}};
           try {{
@@ -14407,6 +14422,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             usable: payload.usable || false,
             source_repo: sourcePayload,
             routing_plan: routingPayload,
+            go_live: existingHint.go_live || {{}},
+            materials_request: existingHint.materials_request || {{}},
           }};
           renderKernelSummary(provider);
           return payload;
@@ -14511,6 +14528,28 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function loadAllKernelGoLiveChecklists() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/go-live-checklist');
           mergeKernelGoLiveChecklists(payload);
+          return payload;
+        }}
+        function mergeKernelMaterialsRequests(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              materials_request: item,
+              go_live: item.next_step ? Object.assign(kernelHint(item.provider_id).go_live || {{}}, {{ next_step: item.next_step, status: item.status }}) : kernelHint(item.provider_id).go_live || {{}},
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelMaterialsRequest(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/materials-request');
+          mergeKernelMaterialsRequests(payload);
+          return payload;
+        }}
+        async function loadAllKernelMaterialsRequests() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/materials-request');
+          mergeKernelMaterialsRequests(payload);
           return payload;
         }}
         async function probeKernelRelease(providerId = null) {{
@@ -15049,6 +15088,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-go-live-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelGoLiveChecklists(); }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-materials-all')?.addEventListener('click', async () => {{
+          try {{ await loadAllKernelMaterialsRequests(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-routing-plan')?.addEventListener('click', async () => {{
           try {{ await loadKernelRoutingPlan(); }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -15057,6 +15099,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-go-live')?.addEventListener('click', async () => {{
           try {{ await loadKernelGoLiveChecklist(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-materials')?.addEventListener('click', async () => {{
+          try {{ await loadKernelMaterialsRequest(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-load-process')?.addEventListener('click', async () => {{
           const provider = selectedKernelProvider();
@@ -18995,10 +19040,29 @@ def admin_proxy_kernels_go_live_checklist(provider_ids: str = "", ctx: AuthConte
         raise HTTPException(status_code=400, detail={"error": str(exc), "checklist_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/materials-request")
+def admin_proxy_kernels_materials_request(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_materials_requests(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}/go-live-checklist")
 def admin_proxy_kernel_go_live_checklist(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_go_live_checklist(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/materials-request")
+def admin_proxy_kernel_materials_request(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_materials_request(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -19476,6 +19540,290 @@ def build_proxy_kernel_go_live_checklists(db: Session, provider_ids: list[str] |
         "object": "media2api.proxy_kernel.go_live_checklist.list",
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "summary": proxy_kernel_go_live_checklist_summary(rows),
+        "data": rows,
+    }
+
+
+def proxy_kernel_material_field(item: dict[str, Any]) -> dict[str, Any]:
+    name = str(item.get("name") or "").strip()
+    store_as = str(item.get("store_as") or "")
+    auth_method = str(item.get("auth_method") or "")
+    if name in RUNTIME_BASE_URL_FIELD_NAMES:
+        where_to_put = "runtime_or_provider_base_url"
+    elif auth_method or "secret" in store_as or "credential" in store_as:
+        where_to_put = "encrypted_credential_or_agent_ref"
+    else:
+        where_to_put = "account_resource_profile"
+    payload = {
+        "name": name,
+        "label": item.get("label") or name,
+        "required": bool(item.get("required")),
+        "any_of_group": item.get("any_of_group") or "",
+        "auth_method": auth_method,
+        "store_as": store_as,
+        "where_to_put": where_to_put,
+        "when": item.get("when") or "",
+        "evidence": item.get("evidence") or "",
+        "aliases": item.get("aliases") or [],
+        "require_named_field": bool(item.get("require_named_field")),
+    }
+    return payload
+
+
+def proxy_kernel_material_groups(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for field in fields:
+        group = str(field.get("any_of_group") or "").strip()
+        if group:
+            groups.setdefault(group, []).append(field)
+    return [
+        {
+            "group": group,
+            "required": any(field.get("required") for field in group_fields),
+            "choose": "one_of",
+            "fields": group_fields,
+        }
+        for group, group_fields in sorted(groups.items())
+    ]
+
+
+def proxy_kernel_required_account_materials(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped = {field.get("any_of_group") for field in fields if field.get("any_of_group")}
+    materials = [
+        {
+            "type": "account_field",
+            "name": field.get("name"),
+            "label": field.get("label"),
+            "where_to_put": field.get("where_to_put"),
+            "required_from_user": True,
+        }
+        for field in fields
+        if field.get("required") and not field.get("any_of_group")
+    ]
+    for group in sorted(grouped):
+        group_fields = [field for field in fields if field.get("any_of_group") == group]
+        if any(field.get("required") for field in group_fields):
+            materials.append(
+                {
+                    "type": "account_any_of_group",
+                    "name": group,
+                    "label": " / ".join(str(field.get("label") or field.get("name")) for field in group_fields),
+                    "where_to_put": "encrypted_credential_or_agent_ref",
+                    "required_from_user": True,
+                    "choose": "one_of",
+                    "fields": group_fields,
+                }
+            )
+    return materials
+
+
+def proxy_kernel_materials_request_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "total": len(rows),
+        "ready_for_live_acceptance": sum(1 for row in rows if row.get("ready_for_live_acceptance")),
+        "materials_required": sum(1 for row in rows if row.get("status") == "materials_required"),
+        "needs_account_materials": sum(1 for row in rows if row.get("account_materials", {}).get("status") != "ready"),
+        "needs_runtime_materials": sum(1 for row in rows if row.get("runtime_materials", {}).get("status") != "ready"),
+        "needs_routing_materials": sum(1 for row in rows if row.get("routing_materials", {}).get("status") != "ready"),
+        "needs_live_acceptance": sum(1 for row in rows if row.get("validation_materials", {}).get("status") != "ready_to_run"),
+        "required_material_count": sum(len(row.get("required_materials", [])) for row in rows),
+    }
+
+
+def build_proxy_kernel_materials_request(db: Session, provider_id: str) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise KeyError(provider_id)
+    go_live = build_proxy_kernel_go_live_checklist(db, provider_id)
+    kernel = go_live.get("kernel") or proxy_kernel_service.kernel_summary(db, provider_id)
+    routing = go_live.get("routing") or proxy_kernel_routing_plan(db, provider_id)
+    guide = connector_registry_service.provider_guide(db, provider_id)
+    input_requirements = PLATFORM_INPUT_REQUIREMENTS.get(provider_id, {}).get("user_inputs", [])
+    fields = [proxy_kernel_material_field(item) for item in input_requirements if item.get("name")]
+    runtime_input_fields = [field for field in fields if field.get("name") in RUNTIME_BASE_URL_FIELD_NAMES or field.get("where_to_put") == "runtime_or_provider_base_url"]
+    account_input_fields = [field for field in fields if field not in runtime_input_fields]
+    account_required = proxy_kernel_required_account_materials(account_input_fields)
+    runtime_ok = bool(kernel.get("runtime_registered") and kernel.get("runtime_loopback_only"))
+    route_ok = bool(routing.get("route_config_ready"))
+    account_ok = bool(routing.get("active_account_count", 0) > 0)
+    ready_for_acceptance = bool(go_live.get("ready_for_live_acceptance"))
+    release_ok = any(step.get("id") == "release_asset" and step.get("ok") for step in go_live.get("steps", []))
+    required_materials: list[dict[str, Any]] = []
+    if not account_ok:
+        required_materials.extend(account_required)
+        if not account_required:
+            required_materials.append(
+                {
+                    "type": "authorized_account",
+                    "name": "account_credential",
+                    "label": "Authorized Web session / OAuth profile / agent credential",
+                    "where_to_put": "encrypted_credential_or_agent_ref",
+                    "required_from_user": True,
+                }
+            )
+    if not runtime_ok:
+        required_materials.append(
+            {
+                "type": "runtime_release_or_loopback",
+                "name": "runtime_material",
+                "label": "Release asset + SHA256, or an already started loopback runtime",
+                "fields": [
+                    {"name": "tag_name", "required": False, "where_to_put": "install_release"},
+                    {"name": "asset_name", "required": True, "where_to_put": "install_release"},
+                    {"name": "expected_sha256", "required": True, "where_to_put": "install_release_or_start_runtime"},
+                    {"name": "base_url", "required": True, "where_to_put": "register_runtime", "example": "http://127.0.0.1:19081"},
+                    {"name": "command", "required": True, "where_to_put": "start_runtime", "format": "one argument per line or JSON string array"},
+                ],
+                "required_from_user": True,
+            }
+        )
+    if not route_ok:
+        required_materials.append(
+            {
+                "type": "routing_apply",
+                "name": "provider_model_mappings",
+                "label": "Provider/model route mappings",
+                "platform_can_generate": True,
+                "required_from_user": False,
+            }
+        )
+    if route_ok and runtime_ok and account_ok and not ready_for_acceptance:
+        required_materials.append(
+            {
+                "type": "live_acceptance",
+                "name": "one_real_sample",
+                "label": "One real image/video acceptance sample",
+                "requires_user_api_key": True,
+                "required_from_user": False,
+            }
+        )
+
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    commands = {
+        "materials_request": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/materials-request",
+        "go_live_checklist": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/go-live-checklist",
+        "routing_plan": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/routing-plan",
+        "apply_routing": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/apply-routing -d '{{\"status\":\"active\",\"enable_mappings\":true,\"priority_offset\":0,\"update_provider_base_url\":true}}'",
+        "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
+        "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64-hex-sha256\"}}'",
+        "register_runtime": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/register-runtime -d '{{\"base_url\":\"http://127.0.0.1:19081\",\"version\":\"vX.Y.Z\",\"sha256\":\"64-hex-sha256\"}}'",
+        "account_guide": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-guides/{provider_id}",
+        "account_setup_workflow": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-setup-workflows/{provider_id}",
+        "account_onboarding": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-onboarding",
+    }
+    for key in ["account_acceptance_suite", "sample_image_generation", "sample_video_generation"]:
+        if key in (go_live.get("commands") or {}):
+            commands[key] = go_live["commands"][key]
+
+    account_labels = [str(item.get("label") or item.get("name")) for item in account_required]
+    runtime_labels = ["release tag/asset/SHA256", "loopback base_url", "start command"] if not runtime_ok else []
+    message_to_user = [
+        f"{kernel.get('selection_id') or provider_id} / {provider_id}",
+        "Need real account material: " + (", ".join(account_labels) if account_labels else "already satisfied") if not account_ok else "Account material is already satisfied.",
+        "Need runtime material: " + ", ".join(runtime_labels) if not runtime_ok else "Runtime material is already satisfied.",
+        "Route mappings can be generated by the platform without fake accounts." if not route_ok else "Route mappings are ready.",
+        "Run one live acceptance sample only after account, runtime, and routing are ready.",
+    ]
+    return {
+        "object": "media2api.proxy_kernel.materials_request",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "status": "ready_for_live_acceptance" if ready_for_acceptance else "materials_required",
+        "usable": bool(kernel.get("usable")),
+        "ready_for_live_acceptance": ready_for_acceptance,
+        "production_ready": False,
+        "next_step": go_live.get("next_step"),
+        "required_materials": required_materials,
+        "message_to_user": message_to_user,
+        "account_materials": {
+            "status": "ready" if account_ok else "needed",
+            "resource_type": guide.get("resource_type"),
+            "accepted_resource_types": guide.get("accepted_resource_types", []),
+            "auth_methods": guide.get("recommended_auth_methods", []),
+            "credential_ref_example": guide.get("credential_ref_example"),
+            "required_fields": [field for field in account_input_fields if field.get("required") and not field.get("any_of_group")],
+            "optional_fields": [field for field in account_input_fields if not field.get("required")],
+            "any_of_groups": proxy_kernel_material_groups(account_input_fields),
+            "resource_profile_template": platform_resource_profile_template(provider_id),
+            "user_actions": guide.get("user_actions", []),
+            "existing_account_count": routing.get("account_count", 0),
+            "active_account_count": routing.get("active_account_count", 0),
+        },
+        "runtime_materials": {
+            "status": "ready" if runtime_ok else "needed",
+            "release_asset_status": "ready" if release_ok else "needed",
+            "runtime_registered": bool(kernel.get("runtime_registered")),
+            "runtime_base_url": kernel.get("runtime_base_url") or "",
+            "runtime_loopback_only": bool(kernel.get("runtime_loopback_only")),
+            "runtime_input_fields": runtime_input_fields,
+            "installed": kernel.get("installed", {}),
+            "installed_verified": bool(kernel.get("installed_verified")),
+            "release_required_fields": [
+                {"name": "tag_name", "required": False},
+                {"name": "asset_name", "required": True},
+                {"name": "expected_sha256", "required": True},
+            ],
+            "register_runtime_required_fields": [
+                {"name": "base_url", "required": True, "example": "http://127.0.0.1:19081"},
+                {"name": "version", "required": False},
+                {"name": "binary_path", "required": False},
+                {"name": "sha256", "required": False},
+            ],
+            "start_runtime_required_fields": [
+                {"name": "command", "required": True},
+                {"name": "base_url", "required": True},
+                {"name": "artifact_path", "required": True},
+                {"name": "expected_sha256", "required": True},
+            ],
+            "source_repo_fallback": (kernel.get("spec") or {}).get("source_repo_policy", {}),
+            "install_policy": (kernel.get("spec") or {}).get("install_policy", {}),
+        },
+        "routing_materials": {
+            "status": "ready" if route_ok else "needed",
+            "platform_can_generate": True,
+            "route_config_ready": route_ok,
+            "template_mapping_count": routing.get("template_mapping_count", 0),
+            "enabled_mapping_count": routing.get("enabled_mapping_count", 0),
+            "missing_mapping_count": len(routing.get("missing_mappings", [])),
+            "apply_payload": {"status": "active", "enable_mappings": True, "priority_offset": 0, "update_provider_base_url": True},
+        },
+        "validation_materials": {
+            "status": "ready_to_run" if ready_for_acceptance else "waiting_for_account_runtime_routing",
+            "admin_api_key_env": "$MEDIA2API_API_KEY",
+            "user_api_key_env": "$MEDIA2API_USER_API_KEY",
+            "sample_models": proxy_kernel_sample_models(routing),
+            "operations": template.operations,
+        },
+        "platform_can_generate": [
+            "provider/model route mappings from finalized templates",
+            "encrypted credential refs after the operator submits account material",
+            "user API keys from the platform key management workflow",
+            "controlled runtime registration once a loopback base_url or verified artifact is provided",
+        ],
+        "must_be_provided_by_operator": [item for item in required_materials if item.get("required_from_user")],
+        "commands": commands,
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "no_fake_account_created": True,
+            "read_only": True,
+            "upstream_calls": False,
+        },
+    }
+
+
+def build_proxy_kernel_materials_requests(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_materials_request(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.materials_request.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": proxy_kernel_materials_request_summary(rows),
         "data": rows,
     }
 
