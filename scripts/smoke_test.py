@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 from media2api import models as db_models
 from media2api.config import settings
 from media2api.database import SessionLocal
-from media2api.main import app, build_proxy_kernel_release_checksums, proxy_kernel_asset_digest_sha256, proxy_kernel_best_release_candidate, proxy_kernel_runtime_acquisition_next_action, proxy_kernel_service
+from media2api.main import app, build_proxy_kernel_release_checksums, proxy_kernel_asset_digest_sha256, proxy_kernel_best_release_candidate, proxy_kernel_runtime_acquisition_next_action, proxy_kernel_service, proxy_kernel_source_repo_sync_decision
 from media2api.provider_templates import FINALIZED_PROVIDER_IDS, PROVIDER_TEMPLATES
 from media2api.services_core import AccountScheduler, ModelRouter
 from media2api.services_proxy_kernels import ProxyKernelRuntimeService
@@ -150,6 +150,33 @@ def main() -> None:
         resolve_release=True,
     )
     assert preflight_failed_with_source["id"] == "source_runtime_plan", preflight_failed_with_source
+    source_sync_needed_after_preflight = proxy_kernel_source_repo_sync_decision(
+        kernel={
+            "installed": {"path": "/tmp/runner"},
+            "installed_verified": True,
+            "runtime_preflight": {"ok": False, "status": "failed"},
+        },
+        release_state={"status": "ok", "install_ready_candidate_count": 1, "preferred_asset_count": 1},
+        source_repo={"exists": False, "is_git_repo": False},
+        only_when_needed=True,
+        resolve_release=True,
+    )
+    assert source_sync_needed_after_preflight["should_sync"] is True, source_sync_needed_after_preflight
+    assert source_sync_needed_after_preflight["next_action"]["id"] == "source_repo_reference", source_sync_needed_after_preflight
+    source_sync_skipped_for_release = proxy_kernel_source_repo_sync_decision(
+        kernel={"installed": {}, "installed_verified": False},
+        release_state={
+            "status": "ok",
+            "install_ready_candidate_count": 1,
+            "preferred_asset_count": 1,
+            "source_repo_fallback": False,
+            "next_step": {"reason": "release path is still preferred"},
+        },
+        source_repo={"exists": False, "is_git_repo": False},
+        only_when_needed=True,
+        resolve_release=True,
+    )
+    assert source_sync_skipped_for_release["should_sync"] is False, source_sync_skipped_for_release
 
     source_repo = SOURCE_REPO_DIR / "basketikun__chatgpt2api"
     source_repo.mkdir(parents=True, exist_ok=True)

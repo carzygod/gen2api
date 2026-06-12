@@ -1491,7 +1491,7 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/source-repo/sync" \
   -H "Content-Type: application/json" \
   -d '{"dry_run":true,"only_when_needed":true,"resolve_release":true,"provider_ids":[]}'
 
-# 批量执行：release 明确没有可安装资产时，才同步 allowlist 中的源码参考仓库
+# 批量执行：release 无可安装资产，或 verified release 预检失败且源码未就绪时，才同步 allowlist 中的源码参考仓库
 curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/source-repo/sync" \
   -H "Authorization: Bearer $MEDIA2API_API_KEY" \
   -H "Content-Type: application/json" \

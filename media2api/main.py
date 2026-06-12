@@ -26459,6 +26459,52 @@ def proxy_kernel_source_repo_sync_matrix_summary(rows: list[dict[str, Any]]) -> 
     }
 
 
+def proxy_kernel_source_repo_sync_decision(
+    *,
+    kernel: dict[str, Any],
+    release_state: dict[str, Any],
+    source_repo: dict[str, Any],
+    only_when_needed: bool,
+    resolve_release: bool,
+) -> dict[str, Any]:
+    if not only_when_needed:
+        return {
+            "should_sync": True,
+            "reason": "source-repo sync was explicitly requested.",
+            "next_action": {},
+        }
+    if not resolve_release:
+        return {
+            "should_sync": False,
+            "reason": "resolve_release=false; source-repo need was not evaluated.",
+            "next_action": {},
+        }
+    next_action = proxy_kernel_runtime_acquisition_next_action(
+        kernel=kernel,
+        release_state=release_state,
+        source_repo=source_repo,
+        resolve_release=True,
+    )
+    if next_action.get("id") == "source_repo_reference":
+        return {
+            "should_sync": True,
+            "reason": str(next_action.get("reason") or "source-repo is now the required fallback path."),
+            "next_action": next_action,
+        }
+    if release_state.get("source_repo_fallback"):
+        return {
+            "should_sync": True,
+            "reason": "release has no installable asset; source-repo is the fallback.",
+            "next_action": next_action,
+        }
+    next_step = release_state.get("next_step") if isinstance(release_state.get("next_step"), dict) else {}
+    return {
+        "should_sync": False,
+        "reason": str(next_action.get("reason") or next_step.get("reason") or next_step.get("id") or "release path is still preferred"),
+        "next_action": next_action,
+    }
+
+
 def build_proxy_kernel_source_repo_sync_matrix(
     db: Session,
     req: ProxyKernelBulkSourceRepoSyncRequest,
@@ -26470,17 +26516,30 @@ def build_proxy_kernel_source_repo_sync_matrix(
         release_state: dict[str, Any] = {}
         should_sync = True
         skip_reason = ""
+        sync_decision: dict[str, Any] = {}
         try:
             if req.only_when_needed:
                 if req.resolve_release:
                     release_state = build_proxy_kernel_release_checksums(db, provider_id, dry_run=False)
-                    should_sync = bool(release_state.get("source_repo_fallback"))
-                    if not should_sync:
-                        next_step = release_state.get("next_step") if isinstance(release_state.get("next_step"), dict) else {}
-                        skip_reason = str(next_step.get("reason") or next_step.get("id") or "release path is still preferred")
+                    sync_decision = proxy_kernel_source_repo_sync_decision(
+                        kernel=proxy_kernel_service.kernel_summary(db, provider_id),
+                        release_state=release_state,
+                        source_repo=source_before,
+                        only_when_needed=True,
+                        resolve_release=True,
+                    )
+                    should_sync = bool(sync_decision.get("should_sync"))
+                    skip_reason = str(sync_decision.get("reason") or "")
                 else:
-                    should_sync = False
-                    skip_reason = "resolve_release=false; source-repo need was not evaluated."
+                    sync_decision = proxy_kernel_source_repo_sync_decision(
+                        kernel={},
+                        release_state={},
+                        source_repo=source_before,
+                        only_when_needed=True,
+                        resolve_release=False,
+                    )
+                    should_sync = bool(sync_decision.get("should_sync"))
+                    skip_reason = str(sync_decision.get("reason") or "")
             if req.dry_run:
                 status = "planned" if should_sync else ("needs_release_resolution" if req.only_when_needed and not req.resolve_release else "skipped")
                 rows.append({
@@ -26489,9 +26548,10 @@ def build_proxy_kernel_source_repo_sync_matrix(
                     "dry_run": True,
                     "status": status,
                     "will_sync": bool(should_sync),
-                    "reason": "release has no installable asset; source-repo is the fallback." if should_sync else skip_reason,
+                    "reason": str((sync_decision.get("reason") if sync_decision else "") or ("release has no installable asset; source-repo is the fallback." if should_sync else skip_reason)),
                     "source_repo_before": source_before,
                     "source_repo_after": source_before,
+                    "runtime_acquisition_next_action": sync_decision.get("next_action") if sync_decision else {},
                     "release_state": {
                         "status": release_state.get("status"),
                         "next_step": release_state.get("next_step"),
@@ -26511,6 +26571,7 @@ def build_proxy_kernel_source_repo_sync_matrix(
                     "reason": skip_reason,
                     "source_repo_before": source_before,
                     "source_repo_after": source_before,
+                    "runtime_acquisition_next_action": sync_decision.get("next_action") if sync_decision else {},
                     "release_state": {
                         "status": release_state.get("status"),
                         "next_step": release_state.get("next_step"),
@@ -26527,9 +26588,10 @@ def build_proxy_kernel_source_repo_sync_matrix(
                 "dry_run": False,
                 "status": "synced",
                 "will_sync": True,
-                "reason": "source-repo synced because release binary is missing or insufficient.",
+                "reason": str((sync_decision.get("reason") if sync_decision else "") or "source-repo synced because release binary is missing or insufficient."),
                 "source_repo_before": source_before,
                 "source_repo_after": source_after,
+                "runtime_acquisition_next_action": sync_decision.get("next_action") if sync_decision else {},
                 "release_state": {
                     "status": release_state.get("status"),
                     "next_step": release_state.get("next_step"),
@@ -26551,6 +26613,7 @@ def build_proxy_kernel_source_repo_sync_matrix(
                 "message": str(exc),
                 "source_repo_before": source_before,
                 "source_repo_after": source_before,
+                "runtime_acquisition_next_action": sync_decision.get("next_action") if sync_decision else {},
                 "release_state": release_state,
             })
     return {
