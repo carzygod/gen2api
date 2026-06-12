@@ -1236,6 +1236,11 @@ class ProxyKernelRuntimeStopRequest(BaseModel):
     grace_seconds: float = 5
 
 
+class ProxyKernelSourceRepoSyncRequest(BaseModel):
+    ref: str = ""
+    force: bool = False
+
+
 class TemplateInstallRequest(BaseModel):
     base_url: str | None = None
     credential_ref: str = "agent://providers/template/acct_01"
@@ -7268,6 +7273,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
     ("GET", "/v1/admin/account-guides"),
     ("GET", "/v1/admin/account-guides/{provider_id}"),
     ("POST", "/v1/admin/account-onboarding/plan"),
@@ -7500,6 +7507,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
             ],
             proxy_kernel_service.list_kernels(db)["summary"],
             action_items=[{"check": "proxy_kernel_runtime", "detail": {"message": "Import real accounts and register verified loopback runtimes before marking providers production usable."}}],
@@ -12898,6 +12907,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             "process": item.get("process", {}),
             "blockers": item.get("blockers", []),
             "usable": item.get("usable", False),
+            "source_repo": proxy_kernel_service.source_repo_status(str(item.get("provider_id"))),
         }
         for item in proxy_kernel_items
     }
@@ -13794,6 +13804,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <button class="subnav-item active" type="button" data-subtab="kernels-status-pane">运行状态</button>
               <button class="subnav-item" type="button" data-subtab="kernels-start-pane">启动执行器</button>
               <button class="subnav-item" type="button" data-subtab="kernels-logs-pane">日志与停止</button>
+              <button class="subnav-item" type="button" data-subtab="kernels-source-pane">源码参考</button>
               <button class="subnav-item" type="button" data-subtab="kernels-guide-pane">操作说明</button>
             </div>
             <div class="panel subtab active" id="kernels-status-pane">
@@ -13870,6 +13881,35 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <button class="op" type="button" id="kernel-clear-runtime">清除 Runtime</button>
               </div>
               <pre id="kernel-log-output" style="margin-top:14px;white-space:pre-wrap">尚未读取日志。</pre>
+            </div>
+            <div class="panel subtab" id="kernels-source-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>source-repo 源码参考</h2>
+                  <p class="note">优先使用 release 二进制。只有 release 不存在、资产不可用、需要确认协议，或需要重写 adapter 时，才把定型仓库同步到 `source-repo/`。</p>
+                </div>
+                <button class="op" type="button" id="kernel-source-status">查看源码状态</button>
+              </div>
+              <div class="kernel-rail">
+                <div>
+                  <div class="formline">
+                    <div><label>Provider</label><select id="kernel-source-provider">{proxy_kernel_options}</select></div>
+                    <div><label>Git ref（可选）</label><input id="kernel-source-ref" placeholder="main / vX.Y.Z / commit" /></div>
+                    <div><label>已存在时更新</label><select id="kernel-source-force"><option value="false">只 clone/fetch</option><option value="true">fetch 后 ff-only pull</option></select></div>
+                    <button class="primary" type="button" id="kernel-source-sync">同步到 source-repo</button>
+                  </div>
+                  <p class="note" style="margin-top:10px">路径固定为项目根的 `source-repo/<owner>__<repo>`。已有目录如果不是同一个 GitHub 仓库，会拒绝同步。</p>
+                  <pre id="kernel-source-output" style="margin-top:14px;white-space:pre-wrap">尚未读取源码状态。</pre>
+                </div>
+                <div class="kernel-summary" id="kernel-source-summary">
+                  <h3>源码参考边界</h3>
+                  <dl>
+                    <dt>用途</dt><dd>协议阅读、本地构建输入、adapter 重写参考</dd>
+                    <dt>禁止</dt><dd>作为公网第三方反代服务直接暴露</dd>
+                    <dt>优先级</dt><dd>release 二进制优先，源码参考只在必要时使用</dd>
+                  </dl>
+                </div>
+              </div>
             </div>
             <div class="panel subtab" id="kernels-guide-pane">
               <h2>从 release 到可调用</h2>
@@ -14186,10 +14226,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         function selectedKernelProvider() {{
           return document.getElementById('kernel-provider')?.value
             || document.getElementById('kernel-log-provider')?.value
+            || document.getElementById('kernel-source-provider')?.value
             || 'openai_web_session';
         }}
         function syncKernelSelects(providerId) {{
-          ['kernel-provider', 'kernel-log-provider'].forEach(id => {{
+          ['kernel-provider', 'kernel-log-provider', 'kernel-source-provider'].forEach(id => {{
             const select = document.getElementById(id);
             if (select && providerId) select.value = providerId;
           }});
@@ -14204,6 +14245,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (!box) return;
           const process = hint.process || {{}};
           const installed = hint.installed || {{}};
+          const source = hint.source_repo || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14219,6 +14261,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>Hash</dt><dd>${{installed.sha256 ? '已记录' : '未记录'}}${{hint.installed_verified ? ' · 已校验' : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
+              <dt>source-repo</dt><dd class="kernel-path-note">${{source.exists ? escapeHtml(source.path || '已同步') : escapeHtml(source.path || '未同步')}}</dd>
             </dl>
             ${{blockerHtml}}
           `;
@@ -14259,6 +14302,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function refreshKernel(providerId) {{
           const provider = providerId || selectedKernelProvider();
           const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider));
+          let sourcePayload = kernelHint(provider).source_repo || {{}};
+          try {{
+            const response = await fetch('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/source-repo', {{ credentials: 'same-origin' }});
+            sourcePayload = await response.json();
+          }} catch (_) {{}}
           proxyKernelHints[provider] = {{
             selection_id: payload.selection_id,
             provider_id: payload.provider_id,
@@ -14275,9 +14323,32 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             process: payload.process || {{}},
             blockers: payload.blockers || [],
             usable: payload.usable || false,
+            source_repo: sourcePayload,
           }};
           renderKernelSummary(provider);
           return payload;
+        }}
+        async function loadKernelSourceStatus(providerId = null) {{
+          const provider = providerId || document.getElementById('kernel-source-provider')?.value || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/source-repo');
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{ source_repo: payload }});
+          const output = document.getElementById('kernel-source-output');
+          if (output) output.textContent = JSON.stringify(payload, null, 2);
+          renderKernelSummary(provider);
+          return payload;
+        }}
+        async function syncKernelSourceRepo() {{
+          const provider = document.getElementById('kernel-source-provider')?.value || selectedKernelProvider();
+          const payload = {{
+            ref: document.getElementById('kernel-source-ref')?.value.trim() || '',
+            force: document.getElementById('kernel-source-force')?.value === 'true',
+          }};
+          const response = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/source-repo/sync', 'POST', payload);
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{ source_repo: response }});
+          const output = document.getElementById('kernel-source-output');
+          if (output) output.textContent = JSON.stringify(response, null, 2);
+          renderKernelSummary(provider);
         }}
         async function startKernelRuntime() {{
           const provider = selectedKernelProvider();
@@ -14747,6 +14818,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           syncKernelSelects(event.target.value);
           renderKernelSummary(event.target.value);
         }});
+        document.getElementById('kernel-source-provider')?.addEventListener('change', event => {{
+          syncKernelSelects(event.target.value);
+          renderKernelSummary(event.target.value);
+        }});
         document.querySelectorAll('.kernel-row-select').forEach(button => button.addEventListener('click', () => {{
           const provider = button.dataset.providerId;
           syncKernelSelects(provider);
@@ -14790,6 +14865,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/clear-runtime', 'POST', {{}});
             await refreshKernel(provider);
           }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-status')?.addEventListener('click', async () => {{
+          try {{ await loadKernelSourceStatus(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-sync')?.addEventListener('click', async () => {{
+          try {{ await syncKernelSourceRepo(); }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('open-oauth-guide')?.addEventListener('click', () => {{
           document.getElementById('oauth-guide')?.classList.add('open');
@@ -18789,6 +18870,28 @@ def admin_proxy_kernel_logs(
         return proxy_kernel_service.tail_logs(provider_id, stream=stream, max_bytes=max(1, min(max_bytes, 65536)))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/source-repo")
+def admin_proxy_kernel_source_repo(provider_id: str, ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.source_repo_status(provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/source-repo/sync")
+def admin_proxy_kernel_source_repo_sync(
+    provider_id: str,
+    req: ProxyKernelSourceRepoSyncRequest,
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.sync_source_repo(provider_id, ref=req.ref, force=req.force)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "source_repo_policy": "only finalized kernel repositories may be cloned into source-repo"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/clear-runtime")

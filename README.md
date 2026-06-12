@@ -178,7 +178,10 @@ The admin API exposes the runtime lifecycle through
 loopback runtime registration, controlled subprocess start/stop, process
 status, and stdout/stderr log inspection. The `/admin` dashboard has a
 dedicated "反代内核" workspace for the same workflow, so operators do not need
-to hand-write JSON for routine runtime start/stop checks.
+to hand-write JSON for routine runtime start/stop checks. When release
+binaries are not enough, the same workspace can sync allowlisted selected
+repositories into `source-repo/` for protocol inspection, local builds, or
+adapter rewrite reference.
 
 ## Local Development
 

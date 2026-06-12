@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 class Settings:
     app_name = "media2api"
@@ -42,6 +44,7 @@ class Settings:
         if host.strip()
     }
     proxy_kernel_dir = Path(os.getenv("MEDIA2API_PROXY_KERNEL_DIR", "./var/proxy-kernels"))
+    source_repo_dir = Path(os.getenv("MEDIA2API_SOURCE_REPO_DIR", str(PROJECT_ROOT / "source-repo")))
     asset_signing_secret = os.getenv("MEDIA2API_ASSET_SIGNING_SECRET") or bootstrap_api_key
     secret_encryption_key = os.getenv("MEDIA2API_SECRET_ENCRYPTION_KEY") or asset_signing_secret
     webhook_max_attempts = int(os.getenv("MEDIA2API_WEBHOOK_MAX_ATTEMPTS", "3"))
@@ -61,6 +64,7 @@ class Settings:
         if self.asset_store == "local":
             self.asset_dir.mkdir(parents=True, exist_ok=True)
         self.proxy_kernel_dir.mkdir(parents=True, exist_ok=True)
+        self.source_repo_dir.mkdir(parents=True, exist_ok=True)
         if self.database_url.startswith("sqlite:///"):
             db_path = self.database_url.replace("sqlite:///", "", 1)
             if db_path and db_path != ":memory:":

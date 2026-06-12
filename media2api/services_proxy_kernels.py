@@ -194,6 +194,7 @@ def finalized_kernel_provider_ids() -> list[str]:
 class ProxyKernelRuntimeService:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or settings.proxy_kernel_dir
+        self.source_root = settings.source_repo_dir
 
     def state_path(self) -> Path:
         return self.root / "state.json"
@@ -226,6 +227,11 @@ class ProxyKernelRuntimeService:
             "hash_required": True,
             "listener": "loopback_only",
             "public_exposure": "forbidden",
+        }
+        payload["source_repo_policy"] = {
+            "root": str(self.source_root),
+            "allowed_repo": spec.repo,
+            "checkout": "source-repo only when release binary is missing, protocol inspection is required, or adapter rewrite is needed",
         }
         return payload
 
@@ -429,6 +435,84 @@ class ProxyKernelRuntimeService:
         entry.pop("process", None)
         self.save_state(state)
         return {"object": "media2api.proxy_kernel.runtime", "provider_id": provider_id, "runtime": {}}
+
+    def source_repo_status(self, provider_id: str) -> dict[str, Any]:
+        spec = self.require_spec(provider_id)
+        state = self.load_state()
+        entry = state.get("kernels", {}).get(provider_id, {})
+        source = entry.get("source_repo") if isinstance(entry.get("source_repo"), dict) else {}
+        path = self.source_repo_path(spec)
+        git_dir = path / ".git"
+        exists = path.exists()
+        is_git_repo = git_dir.exists() and git_dir.is_dir()
+        remote_url = self.git_output(path, ["remote", "get-url", "origin"]) if is_git_repo else ""
+        current_ref = self.git_output(path, ["rev-parse", "--abbrev-ref", "HEAD"]) if is_git_repo else ""
+        head = self.git_output(path, ["rev-parse", "HEAD"]) if is_git_repo else ""
+        dirty = bool(self.git_output(path, ["status", "--porcelain"])) if is_git_repo else False
+        return {
+            "object": "media2api.proxy_kernel.source_repo",
+            "provider_id": provider_id,
+            "selection_id": spec.selection_id,
+            "repo": spec.repo,
+            "repo_url": spec.repo_url,
+            "path": str(path),
+            "exists": exists,
+            "is_git_repo": is_git_repo,
+            "remote_url": remote_url,
+            "current_ref": current_ref,
+            "head": head,
+            "dirty": dirty,
+            "state": source,
+            "policy": {
+                "allowlist_only": True,
+                "root": str(self.source_root),
+                "purpose": "protocol inspection, local build input, or adapter rewrite reference when release binary is insufficient",
+            },
+        }
+
+    def sync_source_repo(self, provider_id: str, ref: str = "", force: bool = False) -> dict[str, Any]:
+        spec = self.require_spec(provider_id)
+        ref = (ref or "").strip()
+        if ref and not re.fullmatch(r"[A-Za-z0-9._/\-]+", ref):
+            raise ValueError("INVALID_GIT_REF")
+        path = self.source_repo_path(spec)
+        root = self.source_root.resolve()
+        if not self.path_within(path.resolve(), root):
+            raise ValueError("SOURCE_REPO_OUTSIDE_ROOT")
+        root.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not (path / ".git").exists():
+            if any(path.iterdir()):
+                raise ValueError("SOURCE_PATH_NOT_EMPTY")
+        if (path / ".git").exists():
+            remote_url = self.git_output(path, ["remote", "get-url", "origin"])
+            if remote_url and not self.same_repo_url(remote_url, spec.repo_url):
+                raise ValueError("SOURCE_REMOTE_MISMATCH")
+            self.run_git(path, ["fetch", "origin", "--tags", "--prune"], timeout=120)
+            if ref:
+                self.run_git(path, ["checkout", ref], timeout=60)
+            elif force:
+                self.run_git(path, ["pull", "--ff-only"], timeout=120)
+        else:
+            command = ["clone", "--depth", "1"]
+            if ref:
+                command.extend(["--branch", ref])
+            command.extend([spec.repo_url, str(path)])
+            self.run_git(root, command, timeout=180)
+        status = self.source_repo_status(provider_id)
+        state = self.load_state()
+        entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        entry["source_repo"] = {
+            "repo": spec.repo,
+            "repo_url": spec.repo_url,
+            "path": status["path"],
+            "ref": status["current_ref"] or ref,
+            "head": status["head"],
+            "synced_at": self.utcnow(),
+            "dirty": status["dirty"],
+        }
+        self.save_state(state)
+        status["state"] = entry["source_repo"]
+        return status
 
     def start_runtime(
         self,
@@ -649,6 +733,48 @@ class ProxyKernelRuntimeService:
             os.kill(pid, signal.SIGKILL if force and hasattr(signal, "SIGKILL") else signal.SIGTERM)
         except Exception:
             return
+
+    def source_repo_path(self, spec: ProxyKernelSpec) -> Path:
+        owner, repo = spec.repo.split("/", 1)
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{owner}__{repo}").strip("-")
+        return (self.source_root / slug).resolve()
+
+    def run_git(self, cwd: Path, args: list[str], timeout: int = 120) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                timeout=timeout,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise ValueError("GIT_NOT_AVAILABLE") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("GIT_COMMAND_TIMEOUT") from exc
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()[:800]
+            raise ValueError(f"GIT_COMMAND_FAILED: {message}")
+        return result.stdout.strip()
+
+    def git_output(self, cwd: Path, args: list[str]) -> str:
+        try:
+            return self.run_git(cwd, args, timeout=30).strip()
+        except ValueError:
+            return ""
+
+    def same_repo_url(self, actual: str, expected: str) -> bool:
+        def normalize(value: str) -> str:
+            text = value.strip()
+            if text.startswith("git@github.com:"):
+                text = "https://github.com/" + text.split(":", 1)[1]
+            text = text.removesuffix(".git").rstrip("/")
+            return text.lower()
+
+        return normalize(actual) == normalize(expected)
 
     def record_install(
         self,
