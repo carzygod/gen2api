@@ -1223,6 +1223,16 @@ class ProxyKernelReleaseCandidateInstallRequest(BaseModel):
     max_checksum_bytes: int = 1024 * 1024
 
 
+class ProxyKernelReleaseCandidateBulkInstallRequest(BaseModel):
+    provider_ids: list[str] = Field(default_factory=list)
+    force: bool = False
+    dry_run: bool = True
+    resolve_release: bool = False
+    allow_non_preferred: bool = False
+    max_checksum_bytes: int = 1024 * 1024
+    continue_on_error: bool = True
+
+
 class ProxyKernelRuntimeRegisterRequest(BaseModel):
     base_url: str
     version: str = ""
@@ -7306,6 +7316,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
     ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
+    ("POST", "/v1/admin/proxy-kernels/install-release-candidates"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
@@ -7559,6 +7570,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
                 ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
+                ("POST", "/v1/admin/proxy-kernels/install-release-candidates"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
@@ -13343,6 +13355,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量运行时交付计划", "GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
+        ("全量安装 Hash 候选计划", "POST", "/v1/admin/proxy-kernels/install-release-candidates"),
         ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
         ("全量生产就绪矩阵", "GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
@@ -13418,6 +13431,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
+        "/v1/admin/proxy-kernels/install-release-candidates",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
@@ -13462,6 +13476,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
+        "/v1/admin/proxy-kernels/install-release-candidates",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
@@ -13943,6 +13958,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
                   <button class="op" type="button" id="kernel-release-checksum-matrix">全量 Hash 候选</button>
+                  <button class="op" type="button" id="kernel-install-release-candidates-plan">批量安装候选计划</button>
                   <button class="op" type="button" id="kernel-runtime-contract-matrix">运行合同矩阵</button>
                   <button class="op" type="button" id="kernel-production-readiness-matrix">生产就绪矩阵</button>
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
@@ -14687,6 +14703,30 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           mergeKernelReleaseChecksumMatrix(payload);
           return payload;
         }}
+        function mergeKernelReleaseCandidateInstallMatrix(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            const install = item.install || {{}};
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              release_candidate_install: item,
+              release_checksums: item.release_checksums || kernelHint(item.provider_id).release_checksums || {{}},
+              installed: install.path ? install : kernelHint(item.provider_id).installed || {{}},
+              installed_verified: install.sha256 && install.expected_sha256 ? install.sha256 === install.expected_sha256 : Boolean(kernelHint(item.provider_id).installed_verified),
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadAllKernelReleaseCandidateInstallPlan(resolveRelease = true) {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/install-release-candidates', 'POST', {{
+            dry_run: true,
+            resolve_release: Boolean(resolveRelease),
+            allow_non_preferred: false,
+            force: false,
+            continue_on_error: true,
+          }});
+          mergeKernelReleaseCandidateInstallMatrix(payload);
+          return payload;
+        }}
         function mergeKernelRuntimeContractMatrix(payload) {{
           const rows = Array.isArray(payload?.data) ? payload.data : [payload];
           rows.filter(item => item?.provider_id).forEach(item => {{
@@ -15408,6 +15448,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-release-checksum-matrix')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelReleaseChecksumMatrix(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-install-release-candidates-plan')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelReleaseCandidateInstallPlan(true);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -19473,6 +19519,20 @@ def admin_proxy_kernels_loopback_contract_test(
     return run_proxy_kernel_loopback_contract_test(db, ctx, req)
 
 
+@app.post("/v1/admin/proxy-kernels/install-release-candidates")
+def admin_proxy_kernels_install_release_candidates(
+    req: ProxyKernelReleaseCandidateBulkInstallRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_release_candidate_install_matrix(db, req)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "hash_policy": "only checksum-resolved release candidates may be installed without a manually supplied SHA256"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/{provider_id}/go-live-checklist")
 def admin_proxy_kernel_go_live_checklist(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -21339,6 +21399,85 @@ def build_proxy_kernel_release_candidate_install(
             "official_sdk_api": "forbidden",
             "third_party_public_service": "forbidden",
             "managed_runtime_listener": "loopback_only",
+        },
+    }
+
+
+def proxy_kernel_release_candidate_install_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "total": len(rows),
+        "planned": status_counts.get("planned", 0),
+        "installable": status_counts.get("installable", 0),
+        "installed": status_counts.get("installed", 0),
+        "candidate_not_found": status_counts.get("candidate_not_found", 0),
+        "non_preferred_candidate_requires_override": status_counts.get("non_preferred_candidate_requires_override", 0),
+        "failed": status_counts.get("failed", 0),
+        "resolved_release": sum(1 for row in rows if row.get("resolved_release")),
+        "downloaded_binaries": sum(1 for row in rows if (row.get("policy") or {}).get("downloaded_binaries")),
+        "status_counts": status_counts,
+    }
+
+
+def build_proxy_kernel_release_candidate_install_matrix(
+    db: Session,
+    req: ProxyKernelReleaseCandidateBulkInstallRequest,
+) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, req.provider_ids)
+    rows: list[dict[str, Any]] = []
+    for provider_id in selected:
+        single_req = ProxyKernelReleaseCandidateInstallRequest(
+            force=bool(req.force),
+            dry_run=bool(req.dry_run),
+            resolve_release=bool(req.resolve_release),
+            allow_non_preferred=bool(req.allow_non_preferred),
+            max_checksum_bytes=int(req.max_checksum_bytes or 1024 * 1024),
+        )
+        try:
+            rows.append(build_proxy_kernel_release_candidate_install(db, provider_id, single_req))
+        except Exception as exc:
+            if not req.continue_on_error:
+                raise
+            rows.append({
+                "object": "media2api.proxy_kernel.release_candidate_install",
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "provider_id": provider_id,
+                "dry_run": bool(req.dry_run),
+                "resolved_release": bool(req.resolve_release),
+                "status": "failed",
+                "error": exc.__class__.__name__,
+                "message": str(exc),
+                "candidate": {},
+                "install_payload_template": {},
+                "policy": {
+                    "read_only": bool(req.dry_run),
+                    "release_binary_first": True,
+                    "hash_required": True,
+                    "downloaded_binaries": False,
+                    "official_sdk_api": "forbidden",
+                    "third_party_public_service": "forbidden",
+                    "managed_runtime_listener": "loopback_only",
+                },
+            })
+    return {
+        "object": "media2api.proxy_kernel.release_candidate_install_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "dry_run": bool(req.dry_run),
+        "resolve_release": bool(req.resolve_release),
+        "summary": proxy_kernel_release_candidate_install_matrix_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": bool(req.dry_run),
+            "release_binary_first": True,
+            "hash_required": True,
+            "downloaded_binaries": any((row.get("policy") or {}).get("downloaded_binaries") for row in rows),
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "default_mode": "dry_run_planning",
         },
     }
 
