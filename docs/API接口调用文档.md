@@ -1145,7 +1145,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/materials-re
 - `routing_materials`: provider/model mapping 是否已准备。
 - `validation_materials`: 真实样本验收所需的 admin/user key、样本模型和操作范围。
 
-账号材料预检用于把“我要粘什么”变成可校验的导入包。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
+账号材料预检用于把“我要粘什么”变成可校验的导入包。后台可在“反代内核 -> 启动执行器 -> 账号材料导入”卡片中直接读取模板、粘贴材料、预检和导入；API 也可以直接调用。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
 
 ```bash
 curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/account-materials" \
@@ -1161,6 +1161,8 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/acco
 - `credential_value_env_template`: 等价的 `.env` 风格模板。
 - `preflight`: 是否已经满足该 provider 的开源项目输入要求。
 - `payload_preview`: 脱敏导入 payload，用于确认字段位置。
+
+如果直接提交模板里的 `<...>` 占位值，预检会返回 `CREDENTIAL_PLACEHOLDER_VALUE`；必须替换为真实 cookie/session/profile 后才能进入导入步骤。
 
 查看操作者交付包，直接拿到账号导入、release 安装、runtime 启动、dry-run/live 验收的可复制模板。该接口只读，不会调用上游：
 

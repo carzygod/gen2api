@@ -13815,6 +13815,25 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .kernel-blockers {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }}
         .kernel-blockers span {{ border:1px solid rgba(224,177,90,.3); border-radius:999px; padding:5px 8px; color:#ffe1a3; background:rgba(224,177,90,.08); font-size:12px; font-weight:900; }}
         .kernel-side {{ display:grid; gap:12px; }}
+        .account-material-card {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0c1219); box-shadow:var(--shadow-soft); }}
+        .account-material-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; }}
+        .account-material-head h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
+        .account-material-head p {{ margin:4px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }}
+        .account-material-badge {{ border:1px solid var(--line); border-radius:999px; padding:5px 9px; color:var(--soft); background:#0d1118; font-size:12px; font-weight:900; white-space:nowrap; }}
+        .account-material-badge.ready {{ color:#6ee7a8; border-color:rgba(110,231,168,.32); background:rgba(110,231,168,.08); }}
+        .account-material-badge.needs {{ color:#e0b15a; border-color:rgba(224,177,90,.34); background:rgba(224,177,90,.09); }}
+        .account-material-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+        .account-material-card textarea {{ min-height:116px; font-family:var(--font-data); font-size:12px; }}
+        .account-material-card .compact-textarea {{ min-height:72px; }}
+        .account-material-actions {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }}
+        .account-material-status {{ margin-top:10px; border:1px solid var(--line); border-radius:var(--radius); background:#0d1118; padding:10px; color:var(--soft); font-size:13px; line-height:1.5; }}
+        .account-material-status.ok {{ border-color:rgba(110,231,168,.32); background:rgba(110,231,168,.08); }}
+        .account-material-status.warn {{ border-color:rgba(224,177,90,.34); background:rgba(224,177,90,.08); }}
+        .account-material-status b {{ display:block; color:var(--text); margin-bottom:4px; }}
+        .account-material-status ul {{ margin:6px 0 0 18px; padding:0; }}
+        .account-material-template {{ margin-top:10px; border-top:1px solid var(--line); padding-top:10px; }}
+        .account-material-template summary {{ cursor:pointer; color:var(--soft); font-weight:900; }}
+        .account-material-template pre {{ max-height:220px; overflow:auto; margin:8px 0 0; border:1px solid var(--line); border-radius:var(--radius); background:#090d13; padding:10px; color:#cbd5e1; font-family:var(--font-data); font-size:12px; white-space:pre-wrap; }}
         .activation-panel {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0d131b); box-shadow:var(--shadow-soft); }}
         .activation-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }}
         .activation-head h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
@@ -13915,7 +13934,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -14286,6 +14305,45 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <div class="kernel-summary" id="kernel-provider-summary">
                     <h3>选择一个内核</h3>
                     <p class="note">选择左侧 Provider 后，这里会显示仓库、媒体能力、账号边界、runtime 和阻塞项。</p>
+                  </div>
+                  <div class="account-material-card" id="kernel-account-material-panel">
+                    <div class="account-material-head">
+                      <div>
+                        <h3>账号材料导入</h3>
+                        <p>先读取模板，再把真实 cookie/session/profile 粘到这里预检；确认通过后再导入账号池。</p>
+                      </div>
+                      <span class="account-material-badge needs" id="kernel-account-material-badge">未读取</span>
+                    </div>
+                    <div class="formline">
+                      <div><label>账号 ID</label><input id="kernel-account-id" placeholder="留空自动生成" /></div>
+                      <div><label>账号标签</label><input id="kernel-account-label" placeholder="OpenAI Web 账号 01" /></div>
+                    </div>
+                    <div class="formline" style="margin-top:10px">
+                      <div><label>Credential Ref</label><input id="kernel-account-credential-ref" placeholder="可选：secret://... / agent://..." /></div>
+                      <div><label>并发</label><input id="kernel-account-concurrency" value="1" /></div>
+                    </div>
+                    <label style="margin-top:10px">Credential Value JSON</label>
+                    <textarea id="kernel-account-credential" placeholder="点击“账号材料预检”后自动填入模板；把 <...> 替换成真实账号材料"></textarea>
+                    <div class="account-material-grid" style="margin-top:10px">
+                      <div><label>支持操作</label><textarea class="compact-textarea" id="kernel-account-operations" placeholder='["text_to_image","image_edit"]'></textarea></div>
+                      <div><label>支持平台模型</label><textarea class="compact-textarea" id="kernel-account-models" placeholder='["gpt-image-2"]'></textarea></div>
+                    </div>
+                    <div class="formline" style="margin-top:10px">
+                      <div><label>区域</label><input id="kernel-account-region" placeholder="global" /></div>
+                      <div><label>套餐</label><input id="kernel-account-plan" placeholder="web / pro / cli" /></div>
+                    </div>
+                    <div class="account-material-actions">
+                      <button class="op" type="button" id="kernel-account-preflight">预检材料</button>
+                      <button class="primary" type="button" id="kernel-account-import">导入账号池</button>
+                    </div>
+                    <div class="account-material-status warn" id="kernel-account-material-status">
+                      <b>等待账号材料</b>
+                      选择 provider 后点击“账号材料预检”，系统会显示该平台具体要粘贴的字段。
+                    </div>
+                    <details class="account-material-template">
+                      <summary>字段模板和获取说明</summary>
+                      <pre id="kernel-account-material-template">尚未读取模板。</pre>
+                    </details>
                   </div>
                   <div class="activation-panel" id="kernel-activation-panel">
                     <div class="activation-empty">点击“上线执行向导”，这里会展示该 provider 的 6 步上线顺序和下一步操作。</div>
@@ -15439,6 +15497,86 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           mergeKernelMaterialsRequests(payload);
           return payload;
         }}
+        function prettyJson(value, fallback = '') {{
+          if (value === undefined || value === null || value === '') return fallback;
+          try {{ return JSON.stringify(value, null, 2); }} catch (_) {{ return String(value); }}
+        }}
+        function readJsonOrText(id) {{
+          const raw = document.getElementById(id)?.value.trim() || '';
+          if (!raw) return '';
+          try {{ return JSON.parse(raw); }} catch (_) {{ return raw; }}
+        }}
+        function readJsonArrayOrLines(id, fallback = []) {{
+          const raw = document.getElementById(id)?.value.trim() || '';
+          if (!raw) return fallback;
+          try {{
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed.map(item => String(item).trim()).filter(Boolean);
+          }} catch (_) {{}}
+          return raw.split(/[,\\n]/).map(item => item.trim()).filter(Boolean);
+        }}
+        function renderKernelAccountMaterialsPanel(providerId, payload) {{
+          const provider = providerId || selectedKernelProvider();
+          const badge = document.getElementById('kernel-account-material-badge');
+          const statusBox = document.getElementById('kernel-account-material-status');
+          const templateBox = document.getElementById('kernel-account-material-template');
+          const credential = document.getElementById('kernel-account-credential');
+          const operations = document.getElementById('kernel-account-operations');
+          const models = document.getElementById('kernel-account-models');
+          const concurrency = document.getElementById('kernel-account-concurrency');
+          const region = document.getElementById('kernel-account-region');
+          const plan = document.getElementById('kernel-account-plan');
+          if (!payload || !payload.object) return;
+          const preflight = payload.preflight || {{}};
+          const preview = payload.payload_preview || {{}};
+          const template = payload.credential_value_json_template || {{}};
+          const templateText = prettyJson(template, '');
+          if (credential && (!credential.value.trim() || credential.dataset.providerId !== provider || credential.dataset.templateLoaded === 'true')) {{
+            credential.value = templateText;
+            credential.dataset.providerId = provider;
+            credential.dataset.templateLoaded = 'true';
+          }}
+          if (operations && (!operations.value.trim() || operations.dataset.providerId !== provider)) {{
+            operations.value = prettyJson(preview.supported_operations || [], '[]');
+            operations.dataset.providerId = provider;
+          }}
+          if (models && (!models.value.trim() || models.dataset.providerId !== provider)) {{
+            models.value = prettyJson(preview.supported_provider_models || [], '[]');
+            models.dataset.providerId = provider;
+          }}
+          if (concurrency && !concurrency.value && preview.concurrency_limit) concurrency.value = String(preview.concurrency_limit);
+          if (region && !region.value && preview.region) region.value = preview.region;
+          if (plan && !plan.value && preview.plan) plan.value = preview.plan;
+          if (badge) {{
+            badge.textContent = preflight.ok ? '预检通过' : '需要材料';
+            badge.className = 'account-material-badge ' + (preflight.ok ? 'ready' : 'needs');
+          }}
+          const missing = Array.isArray(preflight.missing_input_fields) ? preflight.missing_input_fields : [];
+          const missingHtml = missing.length
+            ? `<ul>${{missing.map(item => `<li>${{escapeHtml(item.label || item.name || item.section || '待补字段')}}</li>`).join('')}}</ul>`
+            : '';
+          if (statusBox) {{
+            statusBox.className = 'account-material-status ' + (preflight.ok ? 'ok' : 'warn');
+            statusBox.innerHTML = `
+              <b>${{escapeHtml(preflight.ok ? '可以导入' : '还不能导入')}}</b>
+              ${{escapeHtml(preflight.message || payload.status || '等待预检')}}
+              ${{missingHtml}}
+            `;
+          }}
+          if (templateBox) {{
+            templateBox.textContent = prettyJson({{
+              credential_value_json_template: template,
+              credential_value_env_template: payload.credential_value_env_template || '',
+              required_fields: payload.required_fields || [],
+              any_of_groups: payload.any_of_groups || [],
+              guide: payload.guide || {{}},
+            }}, '尚未读取模板。');
+          }}
+        }}
+        function focusKernelAccountMaterials() {{
+          const panel = document.getElementById('kernel-account-material-panel');
+          if (panel) panel.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+        }}
         async function loadKernelAccountMaterials(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
           syncKernelSelects(provider);
@@ -15448,6 +15586,53 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             materials_request: Object.assign(kernelHint(provider).materials_request || {{}}, {{ account_materials: payload.account_materials || {{}} }}),
           }});
           renderKernelSummary(provider);
+          renderKernelAccountMaterialsPanel(provider, payload);
+          return payload;
+        }}
+        function buildKernelAccountMaterialsBody(provider, dryRun) {{
+          const packagePayload = kernelHint(provider).account_materials_package || {{}};
+          const preview = packagePayload.payload_preview || {{}};
+          const credentialRef = document.getElementById('kernel-account-credential-ref')?.value.trim() || null;
+          const credentialInput = document.getElementById('kernel-account-credential');
+          const credentialValue = credentialRef && credentialInput?.dataset.templateLoaded === 'true' ? '' : readJsonOrText('kernel-account-credential');
+          const body = {{
+            dry_run: dryRun,
+            account_id: document.getElementById('kernel-account-id')?.value.trim() || null,
+            label: document.getElementById('kernel-account-label')?.value.trim() || null,
+            credential_ref: credentialRef,
+            credential_value: credentialValue,
+            supported_operations: readJsonArrayOrLines('kernel-account-operations', preview.supported_operations || []),
+            supported_provider_models: readJsonArrayOrLines('kernel-account-models', preview.supported_provider_models || []),
+            concurrency_limit: Number(document.getElementById('kernel-account-concurrency')?.value || preview.concurrency_limit || 1),
+            region: document.getElementById('kernel-account-region')?.value.trim() || preview.region || null,
+            plan: document.getElementById('kernel-account-plan')?.value.trim() || preview.plan || null,
+            auth_method: preview.auth_method || null,
+            resource_type: preview.resource_type || null,
+            resource_profile: preview.resource_profile || {{}},
+            provider_config: preview.provider_config || {{}},
+            upsert: true,
+            auto_create_mappings: true,
+            sync_capabilities: false,
+            run_health_check: false,
+          }};
+          Object.keys(body).forEach(key => {{
+            if (body[key] === null || body[key] === '') delete body[key];
+          }});
+          return body;
+        }}
+        async function submitKernelAccountMaterials(dryRun = true, providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          if (!kernelHint(provider).account_materials_package) await loadKernelAccountMaterials(provider);
+          const body = buildKernelAccountMaterialsBody(provider, dryRun);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/account-materials', 'POST', body);
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            account_materials_package: payload,
+            materials_request: Object.assign(kernelHint(provider).materials_request || {{}}, {{ account_materials: payload.account_materials || {{}} }}),
+          }});
+          renderKernelSummary(provider);
+          renderKernelAccountMaterialsPanel(provider, payload);
+          if (!dryRun && payload.ok) await loadKernelActivationWorkflow(provider);
           return payload;
         }}
         async function loadAllKernelMaterialsRequests() {{
@@ -15578,10 +15763,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             return;
           }}
           if (action === 'open-account') {{
-            syncProviderEntryFields(provider);
-            activateMainTab('oauth');
-            activateSubtab('oauth-guide-pane');
-            result.textContent = provider + '：请按指南导入真实账号材料。';
+            activateMainTab('kernels');
+            activateSubtab('kernels-start-pane');
+            await loadKernelAccountMaterials(provider);
+            focusKernelAccountMaterials();
+            result.textContent = provider + '：请在账号材料卡里粘贴真实 cookie/session/profile，先预检再导入。';
             return;
           }}
           if (action === 'open-runtime') {{
@@ -16394,6 +16580,22 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-account-materials')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelAccountMaterials();
+            focusKernelAccountMaterials();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-account-credential')?.addEventListener('input', event => {{
+          event.target.dataset.templateLoaded = 'false';
+        }});
+        document.getElementById('kernel-account-preflight')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await submitKernelAccountMaterials(true);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-account-import')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await submitKernelAccountMaterials(false);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -21552,6 +21754,20 @@ def proxy_kernel_redact_account_material_payload(payload: dict[str, Any]) -> dic
     return safe
 
 
+def credential_material_contains_template_placeholder(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        lowered = text.lower()
+        return bool(re.fullmatch(r"<[^<>]+>", text)) or "<paste" in lowered or "paste-real" in lowered
+    if isinstance(value, dict):
+        return any(credential_material_contains_template_placeholder(child) for child in value.values())
+    if isinstance(value, list):
+        return any(credential_material_contains_template_placeholder(child) for child in value)
+    return False
+
+
 def proxy_kernel_account_material_payload_from_request(
     provider_id: str,
     template: Any,
@@ -21639,6 +21855,15 @@ def proxy_kernel_account_material_preflight(db: Session, provider_id: str, paylo
         )
         if not payload.get("credential_ref") and not credential_material_to_text(payload.get("credential_value")) and not payload.get("credential_secret_id"):
             raise HTTPException(status_code=400, detail={"error": "CREDENTIAL_VALUE_REQUIRED", "message": "Paste credential_value or submit a secret:// / agent:// credential_ref."})
+        if credential_material_contains_template_placeholder(payload.get("credential_value")):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "CREDENTIAL_PLACEHOLDER_VALUE",
+                    "message": "Credential material still contains template placeholders. Replace every <...> value with the real cookie/session/profile before importing.",
+                    "missing_input_fields": [{"name": "credential_value", "label": "Real cookie/session/profile material"}],
+                },
+            )
         if not payload.get("supported_operations") or not payload.get("supported_provider_models"):
             raise HTTPException(status_code=400, detail={"error": "ACCOUNT_CAPABILITIES_REQUIRED"})
         return {
