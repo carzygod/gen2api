@@ -7285,6 +7285,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
     ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
     ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
+    ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
@@ -7294,6 +7295,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
@@ -7533,6 +7535,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
+                ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
@@ -7542,6 +7545,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-readiness"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
@@ -13320,6 +13324,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量运行时交付计划", "GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
+        ("全量生产就绪矩阵", "GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
         ("全量上线清单", "GET", "/v1/admin/proxy-kernels/go-live-checklist"),
         ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
@@ -13328,6 +13333,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("Loopback 合同自检", "POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
         ("OpenAI Web 运行时交付计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan"),
         ("OpenAI Web 运行合同", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-contract"),
+        ("OpenAI Web 生产就绪", "GET", "/v1/admin/proxy-kernels/openai_web_session/production-readiness"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
@@ -13390,6 +13396,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
+        "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
@@ -13398,6 +13405,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/loopback-contract-test",
         "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/openai_web_session/runtime-contract",
+        "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13429,6 +13437,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/runtime-contract-matrix",
+        "/v1/admin/proxy-kernels/production-readiness-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
@@ -13437,6 +13446,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/loopback-contract-test",
         "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/openai_web_session/runtime-contract",
+        "/v1/admin/proxy-kernels/openai_web_session/production-readiness",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
@@ -13905,6 +13915,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
                   <button class="op" type="button" id="kernel-runtime-contract-matrix">运行合同矩阵</button>
+                  <button class="op" type="button" id="kernel-production-readiness-matrix">生产就绪矩阵</button>
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
                   <button class="op" type="button" id="kernel-go-live-all">查看全部上线清单</button>
                   <button class="op" type="button" id="kernel-materials-all">查看全部材料清单</button>
@@ -13930,6 +13941,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
                   <button class="op" type="button" id="kernel-runtime-delivery">运行时交付计划</button>
                   <button class="op" type="button" id="kernel-runtime-contract">运行合同</button>
+                  <button class="op" type="button" id="kernel-production-readiness">生产就绪</button>
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
@@ -14371,6 +14383,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const runtimePlan = hint.runtime_delivery_plan || {{}};
           const releaseProbe = hint.release_probe || {{}};
           const runtimeContract = hint.runtime_contract || {{}};
+          const productionReadiness = hint.production_readiness || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14386,6 +14399,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>Hash</dt><dd>${{installed.sha256 ? '已记录' : '未记录'}}${{hint.installed_verified ? ' · 已校验' : ''}}</dd>
               <dt>Release 探测</dt><dd>${{escapeHtml(releaseProbe.status || '未探测')}}${{releaseProbe.next_step?.label ? ' · 下一步：' + escapeHtml(releaseProbe.next_step.label) : ''}}</dd>
               <dt>运行合同</dt><dd>${{escapeHtml(runtimeContract.status || '未读取')}}${{runtimeContract.next_action ? ' · 下一步：' + escapeHtml(runtimeContract.next_action) : ''}}</dd>
+              <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>交付计划</dt><dd>${{escapeHtml(runtimePlan.status || '未读取')}}${{runtimePlan.next_step?.label ? ' · 下一步：' + escapeHtml(runtimePlan.next_step.label) : ''}}</dd>
@@ -14462,6 +14476,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             const response = await fetch('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-contract', {{ credentials: 'same-origin' }});
             runtimeContractPayload = await response.json();
           }} catch (_) {{}}
+          let productionReadinessPayload = kernelHint(provider).production_readiness || {{}};
+          try {{
+            const response = await fetch('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/production-readiness', {{ credentials: 'same-origin' }});
+            productionReadinessPayload = await response.json();
+          }} catch (_) {{}}
           proxyKernelHints[provider] = {{
             selection_id: payload.selection_id,
             provider_id: payload.provider_id,
@@ -14483,6 +14502,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             runtime_delivery_plan: runtimePlanPayload,
             release_probe: existingHint.release_probe || {{}},
             runtime_contract: runtimeContractPayload,
+            production_readiness: productionReadinessPayload,
             go_live: existingHint.go_live || {{}},
             materials_request: existingHint.materials_request || {{}},
           }};
@@ -14627,6 +14647,32 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function loadAllKernelRuntimeContractMatrix() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/runtime-contract-matrix');
           mergeKernelRuntimeContractMatrix(payload);
+          return payload;
+        }}
+        function mergeKernelProductionReadinessMatrix(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              production_readiness: item,
+              runtime_contract: item.evidence?.runtime_contract || kernelHint(item.provider_id).runtime_contract || {{}},
+              runtime_delivery_plan: item.evidence?.runtime_delivery || kernelHint(item.provider_id).runtime_delivery_plan || {{}},
+              routing_plan: item.evidence?.routing || kernelHint(item.provider_id).routing_plan || {{}},
+              materials_request: item.evidence?.materials || kernelHint(item.provider_id).materials_request || {{}},
+              blockers: item.evidence?.routing?.blockers || kernelHint(item.provider_id).blockers || [],
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelProductionReadiness(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/production-readiness');
+          mergeKernelProductionReadinessMatrix(payload);
+          return payload;
+        }}
+        async function loadAllKernelProductionReadinessMatrix() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/production-readiness-matrix');
+          mergeKernelProductionReadinessMatrix(payload);
           return payload;
         }}
         async function applyAllKernelRouting() {{
@@ -15227,6 +15273,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-production-readiness')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelProductionReadiness();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-install-release')?.addEventListener('click', async () => {{
           try {{ await installKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -15245,6 +15297,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-runtime-contract-matrix')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelRuntimeContractMatrix();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-production-readiness-matrix')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelProductionReadinessMatrix();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -19261,6 +19319,17 @@ def admin_proxy_kernels_runtime_contract_matrix(provider_ids: str = "", ctx: Aut
         raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_contract_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/production-readiness-matrix")
+def admin_proxy_kernels_production_readiness_matrix(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_production_readiness_matrix(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "production_readiness_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.post("/v1/admin/proxy-kernels/loopback-contract-test")
 def admin_proxy_kernels_loopback_contract_test(
     req: ProxyKernelLoopbackContractTestRequest,
@@ -19298,6 +19367,14 @@ def admin_proxy_kernel_runtime_delivery_plan(provider_id: str, ctx: AuthContext 
 def admin_proxy_kernel_runtime_contract(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_runtime_contract(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/production-readiness")
+def admin_proxy_kernel_production_readiness(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_production_readiness(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -20616,6 +20693,280 @@ def build_proxy_kernel_runtime_contract_matrix(db: Session, provider_ids: list[s
             "release_binary_first": True,
             "loopback_contract_first": True,
             "public_api_priority": ["/v1/images/*", "/v1/videos/*"],
+        },
+    }
+
+
+def latest_provider_health_check(db: Session, provider_id: str) -> dict[str, Any] | None:
+    check = (
+        db.query(models.ProviderHealthCheck)
+        .filter(models.ProviderHealthCheck.provider_id == provider_id)
+        .order_by(models.ProviderHealthCheck.created_at.desc())
+        .first()
+    )
+    return serialize_health_check(check) if check else None
+
+
+def proxy_kernel_acceptance_sample_evidence(db: Session, provider_id: str, operations: list[str]) -> dict[str, Any]:
+    operation_rows: dict[str, dict[str, Any]] = {}
+    for operation in operations:
+        job = (
+            db.query(models.MediaJob)
+            .filter(
+                models.MediaJob.provider_id == provider_id,
+                models.MediaJob.operation == operation,
+                models.MediaJob.status == "completed",
+                models.MediaJob.output_asset_ids_json != "[]",
+            )
+            .order_by(models.MediaJob.updated_at.desc(), models.MediaJob.created_at.desc())
+            .first()
+        )
+        if not job:
+            operation_rows[operation] = {"operation": operation, "ok": False, "status": "missing"}
+            continue
+        assets = []
+        for asset_id in loads(job.output_asset_ids_json, []):
+            asset = db.get(models.MediaAsset, asset_id)
+            if asset:
+                assets.append(
+                    {
+                        "asset_id": asset.id,
+                        "kind": asset.kind,
+                        "mime_type": asset.mime_type,
+                        "size_bytes": asset.size_bytes,
+                        "created_at": asset.created_at.isoformat() + "Z",
+                    }
+                )
+        operation_rows[operation] = {
+            "operation": operation,
+            "ok": bool(assets),
+            "status": "passed" if assets else "asset_missing",
+            "job_id": job.id,
+            "logical_model": job.logical_model,
+            "provider_model": job.provider_model,
+            "account_id": job.account_id,
+            "provider_task_id": job.provider_task_id,
+            "completed_at": job.updated_at.isoformat() + "Z",
+            "assets": assets,
+        }
+    missing = [operation for operation, item in operation_rows.items() if not item.get("ok")]
+    return {
+        "required_operations": operations,
+        "passed_operations": [operation for operation, item in operation_rows.items() if item.get("ok")],
+        "missing_operations": missing,
+        "operation_evidence": operation_rows,
+        "ok": not missing and bool(operations),
+    }
+
+
+def proxy_kernel_production_phase(phase_id: str, label: str, ok: bool, detail: dict[str, Any], action: str) -> dict[str, Any]:
+    return {
+        "id": phase_id,
+        "label": label,
+        "status": "done" if ok else "action_required",
+        "ok": bool(ok),
+        "detail": detail,
+        "action": action,
+    }
+
+
+def proxy_kernel_production_next_step(phases: list[dict[str, Any]]) -> dict[str, Any]:
+    for phase in phases:
+        if not phase.get("ok"):
+            return {
+                "id": phase["id"],
+                "label": phase["label"],
+                "action": phase["action"],
+                "detail": phase.get("detail", {}),
+            }
+    return {
+        "id": "production_ready",
+        "label": "生产可用",
+        "action": "保持健康检查、额度同步和真实样本回归。",
+    }
+
+
+def build_proxy_kernel_production_readiness(db: Session, provider_id: str) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise KeyError(provider_id)
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    routing = proxy_kernel_routing_plan(db, provider_id)
+    contract = build_proxy_kernel_runtime_contract(db, provider_id)
+    delivery = build_proxy_kernel_runtime_delivery_plan(db, provider_id)
+    go_live = build_proxy_kernel_go_live_checklist(db, provider_id)
+    materials = build_proxy_kernel_materials_request(db, provider_id)
+    health = latest_provider_health_check(db, provider_id)
+    accounts = db.query(models.AccountResource).filter(models.AccountResource.provider_id == provider_id).all()
+    active_accounts = [account for account in accounts if account.status == "active"]
+    available_accounts = [account for account in active_accounts if account_credential_available(db, account)]
+    process = kernel.get("process") if isinstance(kernel.get("process"), dict) else {}
+    runtime_process_ok = not process.get("pid") or bool(process.get("running"))
+    route_ok = bool(routing.get("route_config_ready"))
+    contract_ok = bool(contract.get("contract_ready"))
+    runtime_ok = bool(kernel.get("runtime_registered") and kernel.get("runtime_loopback_only") and runtime_process_ok)
+    release_ok = bool(kernel.get("installed_verified") or kernel.get("runtime_registered"))
+    account_ok = bool(available_accounts)
+    health_ok = bool(health and health.get("status") == "ok")
+    sample_evidence = proxy_kernel_acceptance_sample_evidence(db, provider_id, template.operations)
+    live_acceptance_ok = bool(sample_evidence.get("ok"))
+    phases = [
+        proxy_kernel_production_phase(
+            "routing",
+            "路由映射",
+            route_ok,
+            {"provider_status": routing.get("provider_status"), "enabled_mapping_count": routing.get("enabled_mapping_count"), "blockers": routing.get("blockers", [])},
+            "调用 apply-routing 或在后台点击“补齐路由映射”。",
+        ),
+        proxy_kernel_production_phase(
+            "runtime_contract",
+            "运行合同",
+            contract_ok,
+            {"status": contract.get("status"), "checks": contract.get("checks", [])},
+            "修正 provider 配置，确保媒体操作映射到 /v1/images/* 和 /v1/videos/*。",
+        ),
+        proxy_kernel_production_phase(
+            "runtime",
+            "Loopback 执行器",
+            runtime_ok,
+            {"runtime_registered": kernel.get("runtime_registered"), "runtime_loopback_only": kernel.get("runtime_loopback_only"), "runtime_base_url": kernel.get("runtime_base_url"), "process": process},
+            "安装/登记或启动已校验的 loopback runtime。",
+        ),
+        proxy_kernel_production_phase(
+            "release_or_runtime_artifact",
+            "Release/执行器资产",
+            release_ok,
+            {"installed": kernel.get("installed", {}), "installed_verified": kernel.get("installed_verified"), "runtime_registered": kernel.get("runtime_registered")},
+            "优先使用 release 二进制并提供 SHA256；无 release 时同步 source-repo 做协议参考或本地构建。",
+        ),
+        proxy_kernel_production_phase(
+            "account",
+            "真实账号",
+            account_ok,
+            {"account_count": len(accounts), "active_account_count": len(active_accounts), "available_account_count": len(available_accounts), "materials": materials.get("account_materials", {})},
+            "在授权资源/账号池导入真实 Web session、CLI OAuth 或 Agent Provider 账号材料。",
+        ),
+        proxy_kernel_production_phase(
+            "health",
+            "运行时健康检查",
+            health_ok,
+            {"latest_health": health},
+            "调用 provider health-check，确认 loopback runner 可达。",
+        ),
+        proxy_kernel_production_phase(
+            "live_acceptance",
+            "真实样本验收",
+            live_acceptance_ok,
+            sample_evidence,
+            "运行 account acceptance suite，并至少让每个声明操作产生可下载资产。",
+        ),
+    ]
+    production_ready = all(phase["ok"] for phase in phases)
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    readiness = {
+        "object": "media2api.proxy_kernel.production_readiness",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "repo": (kernel.get("spec") or {}).get("repo"),
+        "repo_url": (kernel.get("spec") or {}).get("repo_url"),
+        "status": "production_ready" if production_ready else "ready_for_live_acceptance" if route_ok and contract_ok and runtime_ok and account_ok and health_ok else "action_required",
+        "production_ready": production_ready,
+        "ready_for_live_acceptance": bool(route_ok and contract_ok and runtime_ok and account_ok and health_ok),
+        "next_step": proxy_kernel_production_next_step(phases),
+        "phases": phases,
+        "state": {
+            "route_ready": route_ok,
+            "contract_ready": contract_ok,
+            "runtime_ready": runtime_ok,
+            "release_or_runtime_ready": release_ok,
+            "account_ready": account_ok,
+            "health_ok": health_ok,
+            "live_acceptance_ok": live_acceptance_ok,
+        },
+        "evidence": {
+            "kernel": kernel,
+            "routing": routing,
+            "runtime_contract": {
+                "status": contract.get("status"),
+                "adapter_contract": contract.get("adapter_contract"),
+                "checks": contract.get("checks"),
+            },
+            "runtime_delivery": {
+                "status": delivery.get("status"),
+                "next_step": delivery.get("next_step"),
+                "state": delivery.get("state"),
+            },
+            "go_live": {
+                "status": go_live.get("status"),
+                "ready_for_live_acceptance": go_live.get("ready_for_live_acceptance"),
+                "next_step": go_live.get("next_step"),
+            },
+            "materials": materials,
+            "latest_health": health,
+            "acceptance_samples": sample_evidence,
+        },
+        "commands": {
+            "production_readiness": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/production-readiness",
+            "apply_routing": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/apply-routing -d '{{\"status\":\"active\",\"enable_mappings\":true,\"priority_offset\":0,\"update_provider_base_url\":true}}'",
+            "runtime_contract": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-contract",
+            "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
+            "runtime_delivery_plan": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan",
+            "health_check": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/providers/{provider_id}/health-check",
+            "materials_request": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/materials-request",
+            "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/account-acceptance-suite -d '{json.dumps({'dry_run': False, 'external_only': True, 'provider_ids': [provider_id], 'operations': template.operations, 'run_samples': True, 'max_samples': max(1, min(len(template.operations), 3)), 'require_production_ready': False}, ensure_ascii=False, separators=(',', ':'))}'",
+        },
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "requires_real_acceptance_samples": True,
+        },
+    }
+    return readiness
+
+
+def proxy_kernel_production_readiness_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    next_step_counts: dict[str, int] = {}
+    phase_blockers: dict[str, int] = {}
+    for row in rows:
+        step_id = str((row.get("next_step") or {}).get("id") or "unknown")
+        next_step_counts[step_id] = next_step_counts.get(step_id, 0) + 1
+        for phase in row.get("phases", []):
+            if not phase.get("ok"):
+                phase_id = str(phase.get("id") or "unknown")
+                phase_blockers[phase_id] = phase_blockers.get(phase_id, 0) + 1
+    return {
+        "total": len(rows),
+        "production_ready": sum(1 for row in rows if row.get("production_ready")),
+        "ready_for_live_acceptance": sum(1 for row in rows if row.get("ready_for_live_acceptance")),
+        "route_ready": sum(1 for row in rows if (row.get("state") or {}).get("route_ready")),
+        "contract_ready": sum(1 for row in rows if (row.get("state") or {}).get("contract_ready")),
+        "runtime_ready": sum(1 for row in rows if (row.get("state") or {}).get("runtime_ready")),
+        "account_ready": sum(1 for row in rows if (row.get("state") or {}).get("account_ready")),
+        "health_ok": sum(1 for row in rows if (row.get("state") or {}).get("health_ok")),
+        "live_acceptance_ok": sum(1 for row in rows if (row.get("state") or {}).get("live_acceptance_ok")),
+        "next_step_counts": next_step_counts,
+        "phase_blockers": phase_blockers,
+    }
+
+
+def build_proxy_kernel_production_readiness_matrix(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_production_readiness(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.production_readiness_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": proxy_kernel_production_readiness_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "release_binary_first": True,
+            "loopback_contract_first": True,
+            "requires_real_acceptance_samples": True,
         },
     }
 
