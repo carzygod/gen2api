@@ -1486,6 +1486,15 @@ class ProxyKernelRuntimeService:
             extensionless = "." not in path.name
             if not (executable_bit or executable_ext or extensionless):
                 continue
+            made_executable = False
+            if os.name != "nt" and not executable_bit and (extensionless or lower.endswith((".bin", ".sh"))):
+                try:
+                    path.chmod(mode | stat.S_IXUSR)
+                    mode = path.stat().st_mode
+                    executable_bit = bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+                    made_executable = True
+                except OSError:
+                    pass
             relative = str(path.relative_to(root)).replace("\\", "/") if self.path_within(path.resolve(), root.resolve()) else path.name
             score = 0
             if executable_bit:
@@ -1503,6 +1512,7 @@ class ProxyKernelRuntimeService:
                 "sha256": self.file_sha256(path),
                 "mode": oct(mode & 0o777),
                 "candidate_score": score,
+                "made_executable": made_executable,
             })
         candidates.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
         return candidates[:20]

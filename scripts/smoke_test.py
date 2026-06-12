@@ -87,6 +87,15 @@ def main() -> None:
     assert proxy_kernel_service.asset_candidate_score("tool-darwin-aarch64.tar.gz") == 0
     assert proxy_kernel_service.asset_candidate_score("tool-linux-arm64.tar.gz") == 0
     assert proxy_kernel_service.asset_candidate_score("tool-linux-x64-docker.tar.gz") == 0
+    executable_probe_dir = PROXY_KERNEL_DIR / "executable-probe"
+    executable_probe_dir.mkdir(parents=True, exist_ok=True)
+    executable_probe = executable_probe_dir / "codex-register"
+    executable_probe.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable_probe.chmod(0o644)
+    executable_payloads = proxy_kernel_service.executable_candidate_payloads([executable_probe], executable_probe_dir, "openai_codex")
+    assert executable_payloads and executable_payloads[0]["relative_path"] == "codex-register", executable_payloads
+    if os.name != "nt":
+        assert executable_probe.stat().st_mode & 0o100 and executable_payloads[0]["made_executable"] is True, executable_payloads
     best_gemini_candidate = proxy_kernel_best_release_candidate(
         [
             {"asset_name": "CLIProxyAPI_7.1.68_darwin_aarch64.tar.gz", "candidate_score": 1, "preferred": True},
