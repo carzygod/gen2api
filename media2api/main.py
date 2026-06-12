@@ -7409,6 +7409,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/live-workspace"),
     ("GET", "/v1/admin/proxy-kernels/activation-workflow"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
+    ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -7675,6 +7677,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/live-workspace"),
                 ("GET", "/v1/admin/proxy-kernels/activation-workflow"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
+                ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -14115,6 +14119,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:360px">
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="primary" type="button" id="kernel-activation-workflow-all">上线执行向导</button>
+                  <button class="op" type="button" id="kernel-production-gap-report-all">生产缺口报告</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
                   <button class="op" type="button" id="kernel-live-workspace-plan">上线工作台预检</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
@@ -14160,6 +14165,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
                   <button class="primary" type="button" id="kernel-activation-workflow">上线执行向导</button>
+                  <button class="op" type="button" id="kernel-production-gap-report">生产缺口报告</button>
                   <button class="op" type="button" id="kernel-live-acceptance">真实样本验收</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
@@ -14645,6 +14651,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             blocked: '被阻塞',
             production_ready: '生产可用',
             ready_for_live_acceptance: '可跑真实验收',
+            ready_to_use: '最终可用',
           }};
           return labels[status] || labels[String(status || '').replace(/-/g, '_')] || String(status || '未读取');
         }}
@@ -14780,6 +14787,44 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <span class="activation-badge action-required">需操作 ${{escapeHtml(summary.action_required || 0)}}</span>
                 <span class="activation-badge needs-input">需材料 ${{escapeHtml(summary.needs_user_input || 0)}}</span>
                 <span class="activation-badge done">生产可用 ${{escapeHtml(summary.production_ready || 0)}}</span>
+              </div>
+            </div>
+            <div class="activation-provider-grid">${{cards}}</div>
+          `;
+        }}
+        function renderProductionGapReportOverview(payload) {{
+          const panel = document.getElementById('kernel-activation-overview');
+          if (!panel) return;
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          if (!rows.length) {{
+            panel.innerHTML = '<div class="activation-empty">生产缺口报告暂无数据。</div>';
+            return;
+          }}
+          const summary = payload.summary || {{}};
+          const cards = rows.map(row => {{
+            const nextGap = row.next_gap || {{}};
+            const blocking = Array.isArray(row.blocking_stages) ? row.blocking_stages : [];
+            return `
+              <div class="activation-provider-card">
+                <b>${{escapeHtml(row.provider_id || '-')}}</b>
+                <span class="activation-badge ${{row.ready_to_use ? 'done' : 'action-required'}}">${{row.ready_to_use ? '最终可用' : '仍有缺口'}}</span>
+                <p>${{escapeHtml('下一步：' + (nextGap.label || row.next_stage?.label || '等待读取'))}}</p>
+                <p>缺口：${{escapeHtml(blocking.join(', ') || '无')}} · 待填：${{escapeHtml(String((row.required_user_inputs || []).length))}} 项</p>
+                <div class="activation-action-row"><button class="op" type="button" data-activation-action="inspect-provider" data-provider-id="${{escapeHtml(row.provider_id || '')}}">查看阶段</button></div>
+              </div>
+            `;
+          }}).join('');
+          panel.innerHTML = `
+            <div class="activation-head">
+              <div>
+                <h3>生产启用缺口报告</h3>
+                <p>这是最终可用口径：必须有真实账号、loopback runtime、健康检查、live 样本验收和下游 API Key。</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge">总数 ${{escapeHtml(summary.total || rows.length)}}</span>
+                <span class="activation-badge done">最终可用 ${{escapeHtml(summary.ready_to_use || 0)}}</span>
+                <span class="activation-badge action-required">需操作 ${{escapeHtml(summary.action_required || 0)}}</span>
+                <span class="activation-badge needs-input">需材料 ${{escapeHtml(summary.needs_user_input || 0)}}</span>
               </div>
             </div>
             <div class="activation-provider-grid">${{cards}}</div>
@@ -15397,6 +15442,31 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function loadAllKernelActivationWorkflows() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/activation-workflow');
           mergeKernelActivationWorkflows(payload);
+          return payload;
+        }}
+        async function loadKernelProductionGapReport(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/production-gap-report');
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            activation_workflow: payload,
+            production_gap_report: payload,
+          }});
+          renderKernelSummary(provider);
+          renderActivationWorkflowPanel(provider, payload);
+          return payload;
+        }}
+        async function loadAllKernelProductionGapReports() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/production-gap-report');
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              activation_workflow: item,
+              production_gap_report: item,
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+          renderProductionGapReportOverview(payload);
           return payload;
         }}
         async function runKernelOperatorHandoff(providerId = null) {{
@@ -16127,6 +16197,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-production-gap-report')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelProductionGapReport();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-run-live-acceptance')?.addEventListener('click', async () => {{
           try {{
             const payload = await runKernelLiveAcceptance();
@@ -16148,6 +16224,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-activation-workflow-all')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelActivationWorkflows();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-production-gap-report-all')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelProductionGapReports();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -20235,6 +20317,17 @@ def admin_proxy_kernels_activation_workflow(provider_ids: str = "", ctx: AuthCon
         raise HTTPException(status_code=400, detail={"error": str(exc), "activation_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/production-gap-report")
+def admin_proxy_kernels_production_gap_report(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_production_gap_reports(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "production_gap_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/runtime-delivery-plan")
 def admin_proxy_kernels_runtime_delivery_plan(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -20380,6 +20473,14 @@ def admin_proxy_kernel_operator_handoff(provider_id: str, ctx: AuthContext = Dep
 def admin_proxy_kernel_activation_workflow(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_activation_workflow(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/production-gap-report")
+def admin_proxy_kernel_production_gap_report(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_production_gap_report(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -21769,6 +21870,116 @@ def build_proxy_kernel_activation_workflows(db: Session, provider_ids: list[str]
             "needs_user_input": sum(1 for row in rows if row.get("required_user_inputs")),
         },
         "data": rows,
+    }
+
+
+PROXY_KERNEL_GAP_ACTIONS = {
+    "route": {"action_id": "apply-routing", "label": "补齐路由", "ui_tab": "kernels", "safe_to_run": True},
+    "account": {"action_id": "open-account", "label": "导入真实账号", "ui_tab": "oauth", "safe_to_run": False},
+    "runtime": {"action_id": "open-runtime", "label": "准备并启动 runtime", "ui_tab": "kernels", "safe_to_run": False},
+    "health": {"action_id": "health-check", "label": "运行健康检查", "ui_tab": "kernels", "safe_to_run": True},
+    "live_acceptance": {"action_id": "live-acceptance", "label": "运行验收 dry-run", "ui_tab": "kernels", "safe_to_run": True},
+    "user_api_key": {"action_id": "open-users", "label": "发放下游 API Key", "ui_tab": "users", "safe_to_run": False},
+}
+
+
+def proxy_kernel_gap_from_stage(stage: dict[str, Any]) -> dict[str, Any]:
+    action = dict(PROXY_KERNEL_GAP_ACTIONS.get(stage.get("id") or "", {}))
+    status = stage.get("status") or "waiting"
+    if stage.get("id") == "health" and not stage.get("platform_can_run"):
+        action.update({"action_id": "open-runtime", "label": "先打开 runtime", "safe_to_run": False})
+    if stage.get("id") == "live_acceptance" and not stage.get("platform_can_run"):
+        action.update({"action_id": "go-live", "label": "查看上线清单", "safe_to_run": False})
+    severity = "operator_action"
+    if status == "needs_input":
+        severity = "user_input"
+    elif status in {"waiting", "blocked"}:
+        severity = "blocked"
+    return {
+        "stage": stage.get("id"),
+        "label": stage.get("label"),
+        "status": status,
+        "severity": severity,
+        "ui_tab": stage.get("ui_tab") or action.get("ui_tab") or "",
+        "primary_api": stage.get("primary_api") or "",
+        "operator_required": bool(stage.get("operator_required")),
+        "platform_can_run": bool(stage.get("platform_can_run")),
+        "action": action,
+        "detail": stage.get("detail") or {},
+    }
+
+
+def build_proxy_kernel_production_gap_report(db: Session, provider_id: str) -> dict[str, Any]:
+    workflow = build_proxy_kernel_activation_workflow(db, provider_id)
+    stages = list(workflow.get("stages") or [])
+    gaps = [proxy_kernel_gap_from_stage(stage) for stage in stages if stage.get("status") != "done"]
+    blocking_stages = [gap["stage"] for gap in gaps]
+    next_gap = gaps[0] if gaps else {}
+    ready_to_use = not gaps and bool(workflow.get("usable"))
+    return {
+        "object": "media2api.proxy_kernel.production_gap_report",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": workflow.get("selection_id"),
+        "status": "ready_to_use" if ready_to_use else workflow.get("status") or "action_required",
+        "ready_to_use": ready_to_use,
+        "usable": bool(workflow.get("usable")),
+        "ready_for_live_acceptance": bool(workflow.get("ready_for_live_acceptance")),
+        "next_stage": workflow.get("next_stage") or {},
+        "next_gap": next_gap,
+        "blocking_stages": blocking_stages,
+        "gaps": gaps,
+        "stages": stages,
+        "required_user_inputs": workflow.get("required_user_inputs") or [],
+        "sample_requests": workflow.get("sample_requests") or {},
+        "commands": {
+            "activation_workflow": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {settings.public_base_url}/v1/admin/proxy-kernels/{provider_id}/activation-workflow",
+            "production_gap_report": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {settings.public_base_url}/v1/admin/proxy-kernels/{provider_id}/production-gap-report",
+        },
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "ready_to_use_requires_user_api_key": True,
+            "ready_to_use_requires_live_acceptance": True,
+        },
+    }
+
+
+def build_proxy_kernel_production_gap_reports(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_production_gap_report(db, provider_id) for provider_id in selected]
+    next_stage_counts: dict[str, int] = {}
+    gap_counts: dict[str, int] = {}
+    for row in rows:
+        next_stage_id = (row.get("next_stage") or {}).get("id") or "none"
+        next_stage_counts[next_stage_id] = next_stage_counts.get(next_stage_id, 0) + 1
+        for stage_id in row.get("blocking_stages") or []:
+            gap_counts[stage_id] = gap_counts.get(stage_id, 0) + 1
+    return {
+        "object": "media2api.proxy_kernel.production_gap_report.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": {
+            "total": len(rows),
+            "ready_to_use": sum(1 for row in rows if row.get("ready_to_use")),
+            "usable": sum(1 for row in rows if row.get("usable")),
+            "ready_for_live_acceptance": sum(1 for row in rows if row.get("ready_for_live_acceptance")),
+            "action_required": sum(1 for row in rows if row.get("gaps")),
+            "needs_user_input": sum(1 for row in rows if row.get("required_user_inputs")),
+            "next_stage_counts": next_stage_counts,
+            "gap_counts": gap_counts,
+        },
+        "data": rows,
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "ready_to_use_requires_user_api_key": True,
+            "ready_to_use_requires_live_acceptance": True,
+        },
     }
 
 
