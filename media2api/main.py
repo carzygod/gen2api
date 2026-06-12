@@ -19978,6 +19978,7 @@ def run_proxy_kernel_loopback_contract_test(db: Session, ctx: AuthContext, req: 
                 notes="Temporary loopback contract self-test provider. Disabled after the run.",
             )
         )
+        db.flush()
         db.add(
             models.LogicalModel(
                 id=image_model_id,
