@@ -241,6 +241,13 @@ also exposed as a planned command runner and only executes commands discovered
 by `source-runtime-plan` with `shell=false`. Operator handoff packages include
 the same source setup and launcher payloads, so release and source fallback
 paths can be advanced through one dry-run-first workflow.
+After a release asset is installed and SHA256-verified, operators should run
+`POST /v1/admin/proxy-kernels/{provider_id}/runtime-preflight` before
+`start-runtime`. The preflight executes the selected artifact with a short
+`--help` timeout to catch server-local failures such as missing GLIBC versions,
+wrong architecture, missing dynamic libraries, or permission problems. If it
+fails, runtime acquisition moves to the `source-repo/` build/reference fallback
+instead of presenting the release as start-ready.
 
 In the proxy-kernel dashboard, "可直接用" is intentionally strict: route
 mappings, a loopback runtime, real account material, runtime health, and live

@@ -1257,6 +1257,12 @@ class ProxyKernelRuntimeStartRequest(BaseModel):
     fail_on_health_check: bool = False
 
 
+class ProxyKernelRuntimePreflightRequest(BaseModel):
+    artifact_path: str = ""
+    expected_sha256: str = ""
+    timeout_seconds: float = 8
+
+
 class ProxyKernelRuntimeHealthCheckRequest(BaseModel):
     sync_provider_base_url: bool = True
     require_running_process: bool = False
@@ -7498,6 +7504,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/apply-routing"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-preflight"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/live-acceptance"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
@@ -7777,6 +7784,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/apply-routing"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-preflight"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/live-acceptance"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
@@ -14353,6 +14361,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-runtime-contract">运行合同</button>
                   <button class="op" type="button" id="kernel-production-readiness">生产就绪</button>
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
+                  <button class="op" type="button" id="kernel-runtime-preflight">Runtime 预检</button>
                   <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
                   <button class="primary" type="button" id="kernel-activation-workflow">上线执行向导</button>
                   <button class="op" type="button" id="kernel-go-live-package-open">上线包</button>
@@ -15358,6 +15367,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const goLivePackage = hint.go_live_package || {{}};
           const downstream = hint.downstream_call_package || {{}};
           const runtimeHealth = hint.runtime_health_check || {{}};
+          const runtimePreflight = hint.runtime_preflight || runtimePlan.runtime?.runtime_preflight || runtimeAcquisition.state?.runtime_preflight || {{}};
           const liveAcceptance = hint.live_acceptance || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
@@ -15383,6 +15393,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>上线包</dt><dd>${{escapeHtml(goLivePackage.status || '未读取')}}${{goLivePackage.next_action?.label ? ' · 下一步：' + escapeHtml(goLivePackage.next_action.label) : ''}}</dd>
               <dt>下游调用</dt><dd>${{escapeHtml(downstream.status || '未读取')}}${{downstream.next_action?.label ? ' · 下一步：' + escapeHtml(downstream.next_action.label) : ''}}</dd>
               <dt>Runtime 健康</dt><dd>${{runtimeHealth.health_check ? escapeHtml(runtimeHealth.health_check.status || (runtimeHealth.ok ? 'ok' : 'failed')) : '未检查'}}${{runtimeHealth.health_check?.message ? ' · ' + escapeHtml(runtimeHealth.health_check.message) : ''}}</dd>
+              <dt>Runtime 预检</dt><dd>${{runtimePreflight.status ? escapeHtml(runtimePreflight.status) : '未运行'}}${{runtimePreflight.ok ? ' · 可执行' : ''}}${{runtimePreflight.failure_patterns?.length ? ' · ' + escapeHtml(runtimePreflight.failure_patterns.join(', ')) : ''}}</dd>
               <dt>真实验收</dt><dd>${{escapeHtml(liveAcceptance.status || '未运行')}}${{liveAcceptance.next_step?.label ? ' · 下一步：' + escapeHtml(liveAcceptance.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
@@ -15415,6 +15426,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (releaseSha && !releaseSha.value && (installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256)) releaseSha.value = installed.expected_sha256 || installed.sha256 || preferredChecksum.expected_sha256;
           if (installPreview) installPreview.value = installed.path || '';
           if (base && hint.runtime_base_url) base.value = hint.runtime_base_url;
+          fillKernelRuntimeStartTemplate(provider, false);
           renderActivationWorkflowPanel(provider, activation);
           renderDownstreamCallPackagePanel(provider, downstream);
         }}
@@ -15432,7 +15444,30 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const raw = document.getElementById('kernel-env-json')?.value.trim() || '';
           return raw ? JSON.parse(raw) : {{}};
         }}
+        function fillKernelRuntimeStartTemplate(providerId = null, overwrite = true) {{
+          const provider = providerId || selectedKernelProvider();
+          const runtime = kernelHint(provider).runtime_delivery_plan?.runtime || {{}};
+          const template = runtime.start_payload_template || {{}};
+          const command = Array.isArray(template.command) ? template.command : [];
+          if (!command.length) return false;
+          const commandBox = document.getElementById('kernel-command');
+          const envBox = document.getElementById('kernel-env-json');
+          const baseBox = document.getElementById('kernel-base-url');
+          const artifactBox = document.getElementById('kernel-artifact-path');
+          const shaBox = document.getElementById('kernel-expected-sha256');
+          const versionBox = document.getElementById('kernel-version');
+          const notesBox = document.getElementById('kernel-notes');
+          if (commandBox && (overwrite || !commandBox.value.trim())) commandBox.value = command.join('\\n');
+          if (envBox && (overwrite || !envBox.value.trim())) envBox.value = JSON.stringify(template.env || {{}}, null, 2);
+          if (baseBox && template.base_url && (overwrite || !baseBox.value.trim())) baseBox.value = template.base_url;
+          if (artifactBox && template.artifact_path && (overwrite || !artifactBox.value.trim())) artifactBox.value = template.artifact_path;
+          if (shaBox && template.expected_sha256 && (overwrite || !shaBox.value.trim())) shaBox.value = template.expected_sha256;
+          if (versionBox && template.version && (overwrite || !versionBox.value.trim())) versionBox.value = template.version;
+          if (notesBox && template.notes && (overwrite || !notesBox.value.trim())) notesBox.value = template.notes;
+          return true;
+        }}
         function fillKernelCommandFromArtifact() {{
+          if (fillKernelRuntimeStartTemplate(null, true)) return;
           const artifact = document.getElementById('kernel-artifact-path')?.value.trim() || '';
           const baseUrl = document.getElementById('kernel-base-url')?.value.trim() || 'http://127.0.0.1:19081';
           if (!artifact) throw new Error('请先填写已校验资产路径');
@@ -15485,6 +15520,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             runtime_kind: payload.spec?.runtime_kind || '',
             runtime_base_url: payload.runtime_base_url || '',
             runtime_registered: payload.runtime_registered || false,
+            runtime_preflight: payload.runtime_preflight || {{}},
+            runtime_preflight_ok: Boolean(payload.runtime_preflight_ok),
             installed: payload.installed || {{}},
             installed_verified: payload.installed_verified || false,
             process: payload.process || {{}},
@@ -15653,6 +15690,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           rows.filter(item => item?.provider_id).forEach(item => {{
             proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
               runtime_delivery_plan: item,
+              runtime_preflight: item.runtime?.runtime_preflight || kernelHint(item.provider_id).runtime_preflight || {{}},
+              runtime_preflight_ok: Boolean(item.state?.runtime_preflight_ok || kernelHint(item.provider_id).runtime_preflight_ok),
               routing_plan: item.routing || kernelHint(item.provider_id).routing_plan || {{}},
               go_live: item.go_live || kernelHint(item.provider_id).go_live || {{}},
               materials_request: item.materials ? Object.assign(kernelHint(item.provider_id).materials_request || {{}}, {{
@@ -15779,6 +15818,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               runtime_contract: item.runtime_contract || kernelHint(item.provider_id).runtime_contract || {{}},
               runtime_base_url: item.state?.runtime_base_url || kernelHint(item.provider_id).runtime_base_url || '',
               runtime_registered: Boolean(item.state?.runtime_registered),
+              runtime_preflight: item.state?.runtime_preflight || kernelHint(item.provider_id).runtime_preflight || {{}},
+              runtime_preflight_ok: Boolean(item.state?.runtime_preflight_ok || kernelHint(item.provider_id).runtime_preflight_ok),
               installed_verified: Boolean(item.state?.installed_verified),
             }});
           }});
@@ -16392,6 +16433,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             installed_verified: Boolean(install.sha256 && install.expected_sha256 && install.sha256 === install.expected_sha256),
             release_checksums: payload.release_checksums || kernelHint(provider).release_checksums || {{}},
           }});
+          try {{ await loadKernelRuntimeDeliveryPlan(provider); }} catch (_) {{}}
           renderKernelSummary(provider);
           return payload;
         }}
@@ -16418,6 +16460,24 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             runtime_health_check: payload.runtime_health_check || kernelHint(provider).runtime_health_check || {{}},
           }});
           await refreshKernel(provider);
+        }}
+        async function runKernelRuntimePreflight(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const runtime = kernelHint(provider).runtime_delivery_plan?.runtime || {{}};
+          const template = runtime.preflight_payload_template || {{}};
+          const body = {{
+            artifact_path: document.getElementById('kernel-artifact-path')?.value.trim() || template.artifact_path || '',
+            expected_sha256: document.getElementById('kernel-expected-sha256')?.value.trim() || template.expected_sha256 || '',
+            timeout_seconds: Number(template.timeout_seconds || 8),
+          }};
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-preflight', 'POST', body);
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            runtime_preflight: payload,
+            runtime_preflight_ok: Boolean(payload.ok),
+          }});
+          await refreshKernel(provider);
+          return payload;
         }}
         async function checkKernelRuntimeHealth(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
@@ -17203,6 +17263,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           try {{
             await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/process');
             await refreshKernel(provider);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-runtime-preflight')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await runKernelRuntimePreflight();
+            result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-start-runtime')?.addEventListener('click', async () => {{
@@ -24223,6 +24289,81 @@ def proxy_kernel_runtime_default_base_url(provider_id: str) -> str:
     return f"http://127.0.0.1:{19081 + index}"
 
 
+def proxy_kernel_runtime_start_templates(
+    provider_id: str,
+    artifact_path: str,
+    expected_sha: str,
+    base_url: str,
+    version: str,
+    notes: str,
+) -> dict[str, Any]:
+    try:
+        parsed = urlparse(base_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = str(parsed.port or (443 if parsed.scheme == "https" else 80))
+    except Exception:
+        host = "127.0.0.1"
+        port = proxy_kernel_runtime_default_base_url(provider_id).rsplit(":", 1)[-1]
+    env = {"HOST": host, "PORT": port, "BASE_URL": base_url}
+    candidates = [
+        {
+            "id": "env_only",
+            "label": "Executable with HOST/PORT environment",
+            "command": [artifact_path],
+            "env": env,
+            "confidence": "low",
+            "operator_note": "Use when the selected runtime reads HOST/PORT from environment or its own config file.",
+        },
+        {
+            "id": "host_port_flags",
+            "label": "Executable with --host/--port flags",
+            "command": [artifact_path, "--host", host, "--port", port],
+            "env": {"NO_COLOR": "1"},
+            "confidence": "low",
+            "operator_note": "Use only after the runtime help output confirms --host and --port are supported.",
+        },
+        {
+            "id": "port_flag",
+            "label": "Executable with --port flag",
+            "command": [artifact_path, "--port", port],
+            "env": {"HOST": host, "BASE_URL": base_url},
+            "confidence": "low",
+            "operator_note": "Use only after the runtime help output confirms --port is supported.",
+        },
+    ]
+    if provider_id == "gemini_cli_oauth":
+        candidates.insert(0, {
+            "id": "cliproxyapi_standalone",
+            "label": "CLIProxyAPI embedded standalone server",
+            "command": [artifact_path, "-standalone"],
+            "env": env,
+            "confidence": "medium",
+            "operator_note": "CLIProxyAPI help exposes -standalone. Confirm the configured listener port matches base_url before health acceptance.",
+        })
+    recommended = candidates[0] if candidates else {"id": "env_only", "command": [artifact_path], "env": env}
+    payload = {
+        "command": recommended.get("command") or [artifact_path],
+        "base_url": base_url,
+        "artifact_path": artifact_path,
+        "expected_sha256": expected_sha,
+        "cwd": "",
+        "env": recommended.get("env") or {},
+        "version": version,
+        "notes": notes,
+        "replace_existing": True,
+        "update_provider_base_url": True,
+        "run_health_check": True,
+        "fail_on_health_check": False,
+    }
+    return {
+        "recommended_template_id": recommended.get("id") or "env_only",
+        "recommended_payload": payload,
+        "candidates": candidates,
+        "operator_confirmation_required": True,
+        "preflight_required": True,
+    }
+
+
 def proxy_kernel_runtime_delivery_next_step(
     *,
     routing: dict[str, Any],
@@ -24256,6 +24397,24 @@ def proxy_kernel_runtime_delivery_next_step(
             "ui_pane": "启动执行器",
             "reason": "资产存在但 hash 证据不完整或不匹配，不能作为受控执行器启动。",
             "primary_api": "/v1/admin/proxy-kernels/{provider_id}/install-release",
+        }
+    preflight = kernel.get("runtime_preflight") if isinstance(kernel.get("runtime_preflight"), dict) else {}
+    if installed and kernel.get("installed_verified") and not kernel.get("runtime_registered") and not preflight:
+        return {
+            "id": "runtime_preflight",
+            "label": "Run executable preflight",
+            "ui_pane": "启动执行器",
+            "reason": "Release and SHA256 are ready. Before starting it as a managed runtime, verify the executable can run on this server.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-preflight",
+        }
+    if installed and kernel.get("installed_verified") and preflight and not preflight.get("ok"):
+        return {
+            "id": "source_runtime_plan",
+            "label": "Use source-repo/build fallback",
+            "ui_pane": "source-repo 源码参考",
+            "reason": "The verified release artifact failed executable preflight on this server. Use source-repo only now, for protocol inspection, local build, or adapter rewrite.",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan",
+            "preflight": preflight,
         }
     if not kernel.get("runtime_registered"):
         return {
@@ -24310,25 +24469,15 @@ def build_proxy_kernel_runtime_delivery_plan(db: Session, provider_id: str) -> d
     executable_candidate = executable_candidates[0] if executable_candidates else {}
     artifact_path = str(executable_candidate.get("path") or installed.get("path") or "<verified-artifact-path>")
     expected_sha = str(executable_candidate.get("sha256") or installed.get("expected_sha256") or installed.get("sha256") or "<64-hex-sha256>")
-    try:
-        parsed = urlparse(default_base_url)
-        host = parsed.hostname or "127.0.0.1"
-        port = str(parsed.port or (443 if parsed.scheme == "https" else 80))
-    except Exception:
-        host = "127.0.0.1"
-        port = proxy_kernel_runtime_default_base_url(provider_id).rsplit(":", 1)[-1]
-    start_payload = {
-        "command": [artifact_path, "--host", host, "--port", port],
-        "base_url": default_base_url,
-        "artifact_path": artifact_path,
-        "expected_sha256": expected_sha,
-        "version": str(installed.get("tag_name") or "vX.Y.Z"),
-        "notes": f"{kernel.get('selection_id') or provider_id} verified release",
-        "replace_existing": True,
-        "update_provider_base_url": True,
-        "run_health_check": True,
-        "fail_on_health_check": False,
-    }
+    start_templates = proxy_kernel_runtime_start_templates(
+        provider_id,
+        artifact_path,
+        expected_sha,
+        default_base_url,
+        str(installed.get("tag_name") or "vX.Y.Z"),
+        f"{kernel.get('selection_id') or provider_id} verified release",
+    )
+    start_payload = start_templates["recommended_payload"]
     install_payload = {
         "tag_name": str(installed.get("tag_name") or "vX.Y.Z"),
         "asset_name": str(installed.get("asset_name") or "<release-asset-name>"),
@@ -24357,6 +24506,7 @@ def build_proxy_kernel_runtime_delivery_plan(db: Session, provider_id: str) -> d
             "installed_verified": bool(kernel.get("installed_verified")),
             "runtime_registered": bool(kernel.get("runtime_registered")),
             "runtime_loopback_only": bool(kernel.get("runtime_loopback_only")),
+            "runtime_preflight_ok": bool(kernel.get("runtime_preflight_ok")),
             "managed_process_configured": bool(process.get("pid")),
             "managed_process_running": bool(process.get("running")),
             "active_account_count": int(routing.get("active_account_count") or 0),
@@ -24372,6 +24522,15 @@ def build_proxy_kernel_runtime_delivery_plan(db: Session, provider_id: str) -> d
             "start_required_fields": ["command", "base_url", "artifact_path", "expected_sha256"],
             "install_payload_template": install_payload,
             "start_payload_template": start_payload,
+            "start_template_id": start_templates.get("recommended_template_id"),
+            "start_command_candidates": start_templates.get("candidates", []),
+            "start_operator_confirmation_required": bool(start_templates.get("operator_confirmation_required")),
+            "runtime_preflight": kernel.get("runtime_preflight") if isinstance(kernel.get("runtime_preflight"), dict) else {},
+            "preflight_payload_template": {
+                "artifact_path": artifact_path,
+                "expected_sha256": expected_sha,
+                "timeout_seconds": 8,
+            },
             "source_repo_payload_template": source_payload,
         },
         "materials": {
@@ -24393,6 +24552,7 @@ def build_proxy_kernel_runtime_delivery_plan(db: Session, provider_id: str) -> d
             "apply_routing": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/apply-routing -d '{{\"status\":\"active\",\"enable_mappings\":true,\"priority_offset\":0,\"update_provider_base_url\":true}}'",
             "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
             "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{json.dumps(install_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "runtime_preflight": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-preflight -d '{json.dumps({'artifact_path': artifact_path, 'expected_sha256': expected_sha, 'timeout_seconds': 8}, ensure_ascii=False, separators=(',', ':'))}'",
             "start_runtime": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/start-runtime -d '{json.dumps(start_payload, ensure_ascii=False, separators=(',', ':'))}'",
             "runtime_health_check": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-health-check -d '{{\"sync_provider_base_url\":true,\"require_running_process\":false,\"fail_on_health_check\":false}}'",
             "source_repo_sync": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-repo/sync -d '{json.dumps(source_payload, ensure_ascii=False, separators=(',', ':'))}'",
@@ -25433,10 +25593,26 @@ def proxy_kernel_runtime_acquisition_next_action(
             "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check",
         }
     if installed and installed_verified:
+        preflight = kernel.get("runtime_preflight") if isinstance(kernel.get("runtime_preflight"), dict) else {}
+        if not preflight:
+            return {
+                "id": "runtime_preflight",
+                "label": "Run executable preflight",
+                "reason": "A fixed release artifact is installed. Verify the extracted executable can run on this server before starting it.",
+                "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-preflight",
+            }
+        if not preflight.get("ok"):
+            return {
+                "id": "source_runtime_plan",
+                "label": "Use source-repo/build fallback",
+                "reason": "The installed release artifact failed executable preflight. Source checkout is now allowed for build/reference or adapter rewrite.",
+                "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan",
+                "preflight": preflight,
+            }
         return {
             "id": "start_runtime",
             "label": "Start verified runtime",
-            "reason": "A fixed release artifact is already installed and SHA256-verified.",
+            "reason": "A fixed release artifact is installed, SHA256-verified, and executable preflight passed.",
             "primary_api": "/v1/admin/proxy-kernels/{provider_id}/start-runtime",
         }
     if install_ready:
@@ -25528,6 +25704,7 @@ def build_proxy_kernel_runtime_acquisition_plan(
             "source_repo_reason": "Allowed only because release binary is missing/insufficient or a checkout already exists for inspection." if source_repo_allowed else "Not allowed yet. Resolve Release first and prefer a fixed binary when possible.",
             "requires_manual_sha256": next_action.get("id") == "manual_sha256_required",
             "can_install_resolved_release": bool(preferred_candidate),
+            "runtime_preflight_ok": bool(kernel.get("runtime_preflight_ok")),
             "downloaded_binaries": False,
             "synced_source_repo": False,
         },
@@ -25564,6 +25741,8 @@ def build_proxy_kernel_runtime_acquisition_plan(
         },
         "state": {
             "installed_verified": bool(kernel.get("installed_verified")),
+            "runtime_preflight": kernel.get("runtime_preflight") if isinstance(kernel.get("runtime_preflight"), dict) else {},
+            "runtime_preflight_ok": bool(kernel.get("runtime_preflight_ok")),
             "runtime_registered": bool(kernel.get("runtime_registered")),
             "runtime_loopback_only": bool(kernel.get("runtime_loopback_only")),
             "runtime_base_url": kernel.get("runtime_base_url") or proxy_kernel_runtime_default_base_url(provider_id),
@@ -25576,6 +25755,7 @@ def build_proxy_kernel_runtime_acquisition_plan(
             "release_checksums": f"curl -H \"Authorization: Bearer {admin_key}\" \"{base}{provider_path}/release-checksums\"",
             "install_release_candidate": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}{provider_path}/install-release-candidate -d '{{\"dry_run\":false,\"resolve_release\":true}}'",
             "manual_install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}{provider_path}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64-hex-sha256\"}}'",
+            "runtime_preflight": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}{provider_path}/runtime-preflight -d '{{\"timeout_seconds\":8}}'",
             "source_repo_sync": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}{provider_path}/source-repo/sync -d '{{\"ref\":\"\",\"force\":false}}'",
             "source_runtime_plan": f"curl -H \"Authorization: Bearer {admin_key}\" {base}{provider_path}/source-runtime-plan",
         },
@@ -25605,6 +25785,8 @@ def proxy_kernel_runtime_acquisition_summary(rows: list[dict[str, Any]]) -> dict
         "can_install_resolved_release": sum(1 for row in rows if (row.get("decision") or {}).get("can_install_resolved_release")),
         "requires_manual_sha256": sum(1 for row in rows if (row.get("decision") or {}).get("requires_manual_sha256")),
         "source_repo_allowed_now": sum(1 for row in rows if (row.get("decision") or {}).get("source_repo_allowed_now")),
+        "needs_runtime_preflight": sum(1 for row in rows if (row.get("next_action") or {}).get("id") == "runtime_preflight"),
+        "runtime_preflight_failed": sum(1 for row in rows if (row.get("state") or {}).get("runtime_preflight") and not (row.get("state") or {}).get("runtime_preflight_ok")),
         "runtime_registered": sum(1 for row in rows if (row.get("state") or {}).get("runtime_registered")),
         "source_repo_synced": sum(1 for row in rows if (row.get("state") or {}).get("source_repo_synced")),
         "next_action_counts": action_counts,
@@ -26993,6 +27175,25 @@ def admin_proxy_kernel_start_runtime(
             if req.fail_on_health_check:
                 raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "runtime was started but health check failed"}) from exc
     return result
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/runtime-preflight")
+def admin_proxy_kernel_runtime_preflight(
+    provider_id: str,
+    req: ProxyKernelRuntimePreflightRequest = ProxyKernelRuntimePreflightRequest(),
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.runtime_executable_preflight(
+            provider_id,
+            artifact_path=req.artifact_path,
+            expected_sha256=req.expected_sha256,
+            timeout_seconds=req.timeout_seconds,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_preflight_policy": "artifact must be a SHA256-verified executable under MEDIA2API_PROXY_KERNEL_DIR"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/runtime-health-check")

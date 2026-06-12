@@ -1352,7 +1352,22 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/appl
   -d '{"status":"active","enable_mappings":true,"priority_offset":0,"update_provider_base_url":true}'
 ```
 
-如果希望由平台受控启动 release 资产，使用 `start-runtime`。`command` 必须是参数数组，`artifact_path` 必须位于 `MEDIA2API_PROXY_KERNEL_DIR` 下，并且必须出现在 `command` 中：
+如果希望由平台受控启动 release 资产，先使用 `runtime-preflight` 对已校验的可执行候选做短超时 `--help` 预检。它用于发现 glibc 版本不匹配、架构不匹配、权限不足、动态库缺失或入口不可执行等问题；它不调上游、不消耗额度、不启动长期服务：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/runtime-preflight" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "artifact_path": "/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/example-linux-amd64",
+    "expected_sha256": "64位十六进制sha256",
+    "timeout_seconds": 8
+  }'
+```
+
+`ok=true` 只代表该可执行文件能在当前服务器上启动并打印帮助。若响应中 `status=failed`，且 `failure_patterns` 出现 `glibc_`、`exec format error`、`permission denied` 等内容，应更换 release 资产，或进入 `source-repo/` 做本地构建、协议参考或 adapter 重写。
+
+预检通过后再使用 `start-runtime`。`command` 必须是参数数组，`artifact_path` 必须位于 `MEDIA2API_PROXY_KERNEL_DIR` 下，并且必须出现在 `command` 中。`runtime-delivery-plan` 会返回 `runtime.start_command_candidates` 和 `runtime.start_payload_template`，但不同开源仓库 CLI 参数不统一，操作者必须根据预检输出或项目文档确认最终命令：
 
 ```bash
 curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/start-runtime" \
@@ -1530,6 +1545,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
 | Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/routing-plan`、`/v1/admin/proxy-kernels/runtime-delivery-plan`、`/v1/admin/proxy-kernels/live-workspace`、`/v1/admin/proxy-kernels/activation-workflow`、`/v1/admin/proxy-kernels/production-gap-report`、`/v1/admin/proxy-kernels/go-live-package`、`/v1/admin/proxy-kernels/downstream-call-package`、`/v1/admin/proxy-kernels/release-probe-matrix`、`/v1/admin/proxy-kernels/release-checksum-matrix`、`/v1/admin/proxy-kernels/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/install-release-candidates`、`/v1/admin/proxy-kernels/source-repo/sync`、`/v1/admin/proxy-kernels/runtime-contract-matrix`、`/v1/admin/proxy-kernels/production-readiness-matrix`、`/v1/admin/proxy-kernels/apply-routing`、`/v1/admin/proxy-kernels/go-live-checklist`、`/v1/admin/proxy-kernels/{provider_id}/go-live-checklist`、`/v1/admin/proxy-kernels/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/materials-request`、`/v1/admin/proxy-kernels/{provider_id}/account-materials`、`/v1/admin/proxy-kernels/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff`、`/v1/admin/proxy-kernels/{provider_id}/activation-workflow`、`/v1/admin/proxy-kernels/{provider_id}/production-gap-report`、`/v1/admin/proxy-kernels/{provider_id}/go-live-package`、`/v1/admin/proxy-kernels/{provider_id}/downstream-call-package`、`/v1/admin/proxy-kernels/{provider_id}/activation-run`、`/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run`、`/v1/admin/proxy-kernels/loopback-contract-test`、`/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan`、`/v1/admin/proxy-kernels/{provider_id}/runtime-contract`、`/v1/admin/proxy-kernels/{provider_id}/production-readiness`、`/v1/admin/proxy-kernels/{provider_id}/release-checksums`、`/v1/admin/proxy-kernels/{provider_id}/runtime-acquisition-plan`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/install-release-candidate`、`/v1/admin/proxy-kernels/{provider_id}/install-release`、`/v1/admin/proxy-kernels/{provider_id}/routing-plan`、`/v1/admin/proxy-kernels/{provider_id}/apply-routing`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/runtime-health-check`、`/v1/admin/proxy-kernels/{provider_id}/live-acceptance`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/source-repo`、`/v1/admin/proxy-kernels/{provider_id}/source-repo/sync`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup`、`/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel Runtime Preflight | `/v1/admin/proxy-kernels/{provider_id}/runtime-preflight` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |

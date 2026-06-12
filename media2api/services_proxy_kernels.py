@@ -329,6 +329,8 @@ class ProxyKernelRuntimeService:
         runtime_registered = bool(base_url)
         installed = state.get("install", {})
         installed_verified = bool(installed.get("sha256") and installed.get("expected_sha256") == installed.get("sha256"))
+        runtime_preflight = state.get("runtime_preflight") if isinstance(state.get("runtime_preflight"), dict) else {}
+        runtime_preflight_ok = bool(runtime_preflight.get("ok"))
         process = self.process_status(provider_id)
         managed_process_configured = bool(process.get("pid"))
         runtime_ready = bool(runtime_registered and self.is_loopback_url(base_url) and (not managed_process_configured or process.get("running")))
@@ -351,6 +353,14 @@ class ProxyKernelRuntimeService:
             blockers.append({"code": "NO_LOOPBACK_RUNTIME", "message": "Register a verified loopback runtime or complete a native adapter rewrite."})
         if installed and not installed_verified:
             blockers.append({"code": "KERNEL_HASH_NOT_VERIFIED", "message": "Installed artifact hash does not match the expected SHA256."})
+        if installed and installed_verified and not runtime_registered and not runtime_preflight:
+            blockers.append({"code": "RUNTIME_PREFLIGHT_REQUIRED", "message": "Run a short executable preflight before using the verified release as a managed runtime."})
+        if installed and installed_verified and runtime_preflight and not runtime_preflight_ok:
+            blockers.append({
+                "code": "KERNEL_EXECUTABLE_PREFLIGHT_FAILED",
+                "message": "The verified release artifact is present but did not start cleanly on this server. Use another release asset or switch to source-repo for build/reference.",
+                "preflight": runtime_preflight,
+            })
         if managed_process_configured and not process.get("running"):
             blockers.append({"code": "KERNEL_PROCESS_STOPPED", "message": "Managed kernel process is not running."})
         if provider and active_accounts and route_ready and runtime_ready and hash_ready and not health_ok:
@@ -370,6 +380,8 @@ class ProxyKernelRuntimeService:
             "runtime_loopback_only": self.is_loopback_url(base_url) if base_url else False,
             "installed": installed,
             "installed_verified": installed_verified,
+            "runtime_preflight": runtime_preflight,
+            "runtime_preflight_ok": runtime_preflight_ok,
             "process": process,
             "route_ready": route_ready,
             "route_evidence": route_evidence,
@@ -398,6 +410,7 @@ class ProxyKernelRuntimeService:
                 "needs_route": sum(1 for item in data if any(blocker["code"] == "NO_ROUTE_MAPPING" for blocker in item["blockers"])),
                 "needs_account": sum(1 for item in data if any(blocker["code"] == "NO_ACTIVE_ACCOUNT" for blocker in item["blockers"])),
                 "needs_runtime": sum(1 for item in data if any(blocker["code"] == "NO_LOOPBACK_RUNTIME" for blocker in item["blockers"])),
+                "needs_preflight": sum(1 for item in data if any(blocker["code"] == "RUNTIME_PREFLIGHT_REQUIRED" for blocker in item["blockers"])),
                 "needs_hash": sum(1 for item in data if any(blocker["code"] == "KERNEL_HASH_NOT_VERIFIED" for blocker in item["blockers"])),
                 "needs_health": sum(1 for item in data if any(blocker["code"] == "RUNTIME_HEALTH_REQUIRED" for blocker in item["blockers"])),
             },
@@ -763,6 +776,183 @@ class ProxyKernelRuntimeService:
             content = self.tail_file(path, max_bytes)
         return {"object": "media2api.proxy_kernel.logs", "provider_id": provider_id, "stream": stream, "path": str(path) if path else "", "content": content}
 
+    def installed_executable_candidate(self, provider_id: str) -> dict[str, Any]:
+        state = self.load_state()
+        installed = state.get("kernels", {}).get(provider_id, {}).get("install", {})
+        if not isinstance(installed, dict):
+            return {}
+        for item in installed.get("executable_candidates") or []:
+            if isinstance(item, dict) and item.get("path"):
+                return item
+        return {}
+
+    def resolve_artifact_file(self, provider_id: str, artifact_path: str = "", expected_sha256: str = "") -> dict[str, Any]:
+        state = self.load_state()
+        installed = state.get("kernels", {}).get(provider_id, {}).get("install", {})
+        executable = self.installed_executable_candidate(provider_id)
+        path_text = artifact_path or str(executable.get("path") or installed.get("path") or "")
+        if not path_text:
+            raise ValueError("ARTIFACT_PATH_REQUIRED")
+        path = Path(path_text).expanduser().resolve()
+        root = self.root.resolve()
+        if not self.path_within(path, root):
+            raise ValueError("ARTIFACT_OUTSIDE_PROXY_KERNEL_DIR")
+        if not path.exists() or not path.is_file():
+            raise ValueError("ARTIFACT_NOT_FOUND")
+        expected = self.normalize_sha256(expected_sha256)
+        if not expected and executable.get("path"):
+            try:
+                if Path(str(executable.get("path"))).expanduser().resolve() == path:
+                    expected = self.normalize_sha256(str(executable.get("sha256") or ""))
+            except Exception:
+                pass
+        if not expected:
+            expected = self.normalize_sha256(str(installed.get("expected_sha256") or installed.get("sha256") or ""))
+        if not expected:
+            raise ValueError("EXPECTED_SHA256_REQUIRED")
+        actual = self.file_sha256(path)
+        if actual != expected:
+            raise ValueError("SHA256_MISMATCH")
+        return {"path": path, "expected_sha256": expected, "sha256": actual}
+
+    def runtime_executable_preflight(
+        self,
+        provider_id: str,
+        artifact_path: str = "",
+        expected_sha256: str = "",
+        timeout_seconds: float = 8,
+    ) -> dict[str, Any]:
+        spec = self.require_spec(provider_id)
+        selected = self.installed_executable_candidate(provider_id)
+        path_text = artifact_path or str(selected.get("path") or "")
+        expected = expected_sha256 or str(selected.get("sha256") or "")
+        timeout = max(1.0, min(float(timeout_seconds or 8), 30.0))
+        if not path_text:
+            payload = {
+                "object": "media2api.proxy_kernel.runtime_preflight",
+                "provider_id": provider_id,
+                "selection_id": spec.selection_id,
+                "ok": False,
+                "status": "skipped_no_executable_candidate",
+                "message": "No extracted executable candidate is available. Install a release with an executable asset or use source-repo fallback.",
+                "checked_at": self.utcnow(),
+            }
+            self.record_runtime_preflight(provider_id, payload)
+            return payload
+        try:
+            artifact = self.resolve_artifact_file(provider_id, path_text, expected)
+        except ValueError as exc:
+            payload = {
+                "object": "media2api.proxy_kernel.runtime_preflight",
+                "provider_id": provider_id,
+                "selection_id": spec.selection_id,
+                "ok": False,
+                "status": "artifact_invalid",
+                "error": str(exc),
+                "artifact_path": path_text,
+                "checked_at": self.utcnow(),
+            }
+            self.record_runtime_preflight(provider_id, payload)
+            return payload
+        path = Path(artifact["path"])
+        if self.release_archive_kind(path):
+            payload = {
+                "object": "media2api.proxy_kernel.runtime_preflight",
+                "provider_id": provider_id,
+                "selection_id": spec.selection_id,
+                "ok": False,
+                "status": "skipped_archive_artifact",
+                "message": "The selected artifact is an archive, not an executable. Use one of the extracted executable_candidates.",
+                "artifact_path": str(path),
+                "artifact_sha256": artifact["sha256"],
+                "checked_at": self.utcnow(),
+            }
+            self.record_runtime_preflight(provider_id, payload)
+            return payload
+        command = [str(path), "--help"]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(path.parent),
+                env={**os.environ, "NO_COLOR": "1", "CI": "1"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                timeout=timeout,
+                check=False,
+            )
+            stdout = (result.stdout or "")[-4000:]
+            stderr = (result.stderr or "")[-4000:]
+            output_lower = f"{stdout}\n{stderr}".lower()
+            failure_patterns = [
+                token
+                for token in [
+                    "glibc_",
+                    "version `glibc",
+                    "not found",
+                    "cannot execute",
+                    "exec format error",
+                    "permission denied",
+                    "failed to load",
+                    "no such file",
+                ]
+                if token in output_lower
+            ]
+            executable_started = result.returncode in {0, 1, 2} and not failure_patterns
+            payload = {
+                "object": "media2api.proxy_kernel.runtime_preflight",
+                "provider_id": provider_id,
+                "selection_id": spec.selection_id,
+                "ok": bool(executable_started),
+                "status": "passed" if executable_started else "failed",
+                "command": command,
+                "exit_code": result.returncode,
+                "timeout_seconds": timeout,
+                "artifact_path": str(path),
+                "artifact_sha256": artifact["sha256"],
+                "failure_patterns": failure_patterns,
+                "stdout_tail": stdout,
+                "stderr_tail": stderr,
+                "checked_at": self.utcnow(),
+            }
+        except subprocess.TimeoutExpired as exc:
+            payload = {
+                "object": "media2api.proxy_kernel.runtime_preflight",
+                "provider_id": provider_id,
+                "selection_id": spec.selection_id,
+                "ok": False,
+                "status": "timeout",
+                "command": command,
+                "timeout_seconds": timeout,
+                "artifact_path": str(path),
+                "artifact_sha256": artifact["sha256"],
+                "stdout_tail": (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else "",
+                "stderr_tail": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
+                "checked_at": self.utcnow(),
+            }
+        except OSError as exc:
+            payload = {
+                "object": "media2api.proxy_kernel.runtime_preflight",
+                "provider_id": provider_id,
+                "selection_id": spec.selection_id,
+                "ok": False,
+                "status": "os_error",
+                "command": command,
+                "artifact_path": str(path),
+                "artifact_sha256": artifact["sha256"],
+                "error": str(exc),
+                "checked_at": self.utcnow(),
+            }
+        self.record_runtime_preflight(provider_id, payload)
+        return payload
+
+    def record_runtime_preflight(self, provider_id: str, payload: dict[str, Any]) -> None:
+        state = self.load_state()
+        entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        entry["runtime_preflight"] = payload
+        self.save_state(state)
+
     def tail_file(self, path: Path, max_bytes: int = 12000) -> str:
         if not path.exists() or not path.is_file():
             return ""
@@ -772,26 +962,11 @@ class ProxyKernelRuntimeService:
             return fh.read(max_bytes).decode("utf-8", errors="replace")
 
     def resolve_start_artifact(self, provider_id: str, artifact_path: str, expected_sha256: str, command: list[str]) -> dict[str, Any]:
-        state = self.load_state()
-        installed = state.get("kernels", {}).get(provider_id, {}).get("install", {})
-        path_text = artifact_path or str(installed.get("path") or "")
-        if not path_text:
-            raise ValueError("ARTIFACT_PATH_REQUIRED")
-        path = Path(path_text).expanduser().resolve()
-        root = self.root.resolve()
-        if not self.path_within(path, root):
-            raise ValueError("ARTIFACT_OUTSIDE_PROXY_KERNEL_DIR")
-        if not path.exists() or not path.is_file():
-            raise ValueError("ARTIFACT_NOT_FOUND")
-        expected = self.normalize_sha256(expected_sha256) or self.normalize_sha256(str(installed.get("expected_sha256") or ""))
-        if not expected:
-            raise ValueError("EXPECTED_SHA256_REQUIRED")
-        actual = self.file_sha256(path)
-        if actual != expected:
-            raise ValueError("SHA256_MISMATCH")
+        artifact = self.resolve_artifact_file(provider_id, artifact_path, expected_sha256)
+        path = Path(artifact["path"])
         if not self.command_references_path(command, path):
             raise ValueError("ARTIFACT_PATH_NOT_IN_COMMAND")
-        return {"path": path, "expected_sha256": expected, "sha256": actual}
+        return artifact
 
     def resolve_cwd(self, provider_id: str, cwd: str, artifact: dict[str, Any]) -> Path:
         if not cwd:
