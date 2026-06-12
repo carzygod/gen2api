@@ -1965,7 +1965,11 @@ class ProxyKernelRuntimeService:
         return {"error": "GITHUB_REQUEST_FAILED", "message": "GitHub request failed without a response."}
 
     def github_headers(self) -> dict[str, str]:
-        return {"Accept": "application/vnd.github+json", "User-Agent": "media2api-proxy-kernel-runtime"}
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "media2api-proxy-kernel-runtime"}
+        token = (os.getenv("MEDIA2API_GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     def asset_payload(self, asset: dict[str, Any]) -> dict[str, Any]:
         name = str(asset.get("name") or "")

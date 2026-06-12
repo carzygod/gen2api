@@ -58,7 +58,15 @@ def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def deploy(host: str, user: str, password: str, port: int, remote_dir: str, public_port: int, api_key: str, seed_defaults: bool) -> None:
+def systemd_env_line(name: str, value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{name}={escaped}"\n'
+
+
+def deploy(host: str, user: str, password: str, port: int, remote_dir: str, public_port: int, api_key: str, seed_defaults: bool, github_token: str = "") -> None:
     tarball = make_tarball()
     client = connect(host, user, password, port)
     app_dir = posixpath.join(remote_dir, "media2api")
@@ -66,6 +74,7 @@ def deploy(host: str, user: str, password: str, port: int, remote_dir: str, publ
     db_url = "postgresql+psycopg://media2api:media2api@127.0.0.1:5432/media2api"
     redis_url = "__MEDIA2API_REDIS_URL__"
     seed_defaults_value = "true" if seed_defaults else "false"
+    github_token_env = systemd_env_line("MEDIA2API_GITHUB_TOKEN", github_token)
     service = f"""[Unit]
 Description=media2api unified media gateway
 After=network.target postgresql.service redis-server.service
@@ -86,6 +95,7 @@ Environment=MEDIA2API_SEED_DEFAULTS={seed_defaults_value}
 Environment=MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true
 Environment=MEDIA2API_PROXY_KERNEL_DIR={data_dir}/proxy-kernels
 Environment=MEDIA2API_SOURCE_REPO_DIR={remote_dir}/source-repo
+{github_token_env.rstrip()}
 ExecStart={app_dir}/.venv/bin/python -m uvicorn media2api.main:app --host 0.0.0.0 --port {public_port}
 Restart=always
 RestartSec=3
@@ -113,6 +123,7 @@ Environment=MEDIA2API_SEED_DEFAULTS={seed_defaults_value}
 Environment=MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES=true
 Environment=MEDIA2API_PROXY_KERNEL_DIR={data_dir}/proxy-kernels
 Environment=MEDIA2API_SOURCE_REPO_DIR={remote_dir}/source-repo
+{github_token_env.rstrip()}
 ExecStart={app_dir}/.venv/bin/python -m media2api.worker
 Restart=always
 RestartSec=3
@@ -215,10 +226,11 @@ def main() -> None:
     parser.add_argument("--public-port", type=int, default=int(os.getenv("MEDIA2API_PORT", "8080")))
     parser.add_argument("--api-key", default=os.getenv("MEDIA2API_BOOTSTRAP_KEY", "dev-admin-key"))
     parser.add_argument("--seed-defaults", action=argparse.BooleanOptionalAction, default=os.getenv("MEDIA2API_SEED_DEFAULTS", "true").lower() == "true")
+    parser.add_argument("--github-token", default=os.getenv("MEDIA2API_GITHUB_TOKEN", os.getenv("GITHUB_TOKEN", "")))
     args = parser.parse_args()
     if not args.password:
         parser.error("--password or DEPLOY_PASSWORD is required")
-    deploy(args.host, args.user, args.password, args.port, args.remote_dir, args.public_port, args.api_key, args.seed_defaults)
+    deploy(args.host, args.user, args.password, args.port, args.remote_dir, args.public_port, args.api_key, args.seed_defaults, args.github_token)
 
 
 if __name__ == "__main__":

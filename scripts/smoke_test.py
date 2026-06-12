@@ -99,6 +99,18 @@ def main() -> None:
     assert proxy_kernel_service.asset_candidate_score("tool-darwin-aarch64.tar.gz") == 0
     assert proxy_kernel_service.asset_candidate_score("tool-linux-arm64.tar.gz") == 0
     assert proxy_kernel_service.asset_candidate_score("tool-linux-x64-docker.tar.gz") == 0
+    original_media2api_github_token = os.environ.pop("MEDIA2API_GITHUB_TOKEN", None)
+    original_github_token = os.environ.pop("GITHUB_TOKEN", None)
+    try:
+        assert "Authorization" not in proxy_kernel_service.github_headers(), proxy_kernel_service.github_headers()
+        os.environ["MEDIA2API_GITHUB_TOKEN"] = "ghp_test_token_for_header_shape"
+        assert proxy_kernel_service.github_headers()["Authorization"] == "Bearer ghp_test_token_for_header_shape"
+    finally:
+        os.environ.pop("MEDIA2API_GITHUB_TOKEN", None)
+        if original_media2api_github_token is not None:
+            os.environ["MEDIA2API_GITHUB_TOKEN"] = original_media2api_github_token
+        if original_github_token is not None:
+            os.environ["GITHUB_TOKEN"] = original_github_token
     executable_probe_dir = PROXY_KERNEL_DIR / "executable-probe"
     executable_probe_dir.mkdir(parents=True, exist_ok=True)
     executable_probe = executable_probe_dir / "codex-register"

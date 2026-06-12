@@ -300,7 +300,12 @@ $env:MEDIA2API_BOOTSTRAP_KEY="<admin-api-key>"
 $env:MEDIA2API_ADMIN_PASSWORD="<admin-dashboard-password>"
 $env:MEDIA2API_SECRET_ENCRYPTION_KEY="<32-byte-or-longer-secret>"
 $env:MEDIA2API_ASSET_SIGNING_SECRET="<asset-url-signing-secret>"
+$env:MEDIA2API_GITHUB_TOKEN="<optional-github-token-for-release-metadata>"
 ```
+
+`MEDIA2API_GITHUB_TOKEN` is optional and is used only for GitHub Release
+metadata, asset digest, and checksum-file reads. It is not an upstream AI
+provider API key and is never forwarded to proxy runtimes.
 
 Common local checks:
 
@@ -345,6 +350,7 @@ $env:DEPLOY_HOST="<server-ip>"
 $env:DEPLOY_USER="<ssh-user>"
 $env:DEPLOY_PASSWORD="<ssh-password>"
 $env:MEDIA2API_BOOTSTRAP_KEY="<admin-api-key>"
+$env:MEDIA2API_GITHUB_TOKEN="<optional-github-token-for-release-metadata>"
 
 .venv\Scripts\python.exe scripts\deploy_bare.py `
   --host $env:DEPLOY_HOST `
