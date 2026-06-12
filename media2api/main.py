@@ -26207,6 +26207,15 @@ def proxy_kernel_runtime_acquisition_next_action(
                 "primary_api": "/v1/admin/proxy-kernels/{provider_id}/runtime-preflight",
             }
         if not preflight.get("ok"):
+            if not source_ready:
+                return {
+                    "id": "source_repo_reference",
+                    "label": "Sync source-repo after failed preflight",
+                    "reason": "The verified release artifact failed executable preflight and no source checkout is present yet. Sync source-repo first, then inspect the source runtime plan.",
+                    "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync",
+                    "follow_up_api": "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan",
+                    "preflight": preflight,
+                }
             return {
                 "id": "source_runtime_plan",
                 "label": "Use source-repo/build fallback",

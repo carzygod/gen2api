@@ -1397,6 +1397,8 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/appl
 
 如果希望由平台受控启动 release 资产，先使用 `runtime-preflight` 对已校验的可执行候选做短超时 `--help` 预检。它用于发现 glibc 版本不匹配、架构不匹配、权限不足、动态库缺失或入口不可执行等问题；它不调上游、不消耗额度、不启动长期服务：
 
+预检失败后重新读取 `runtime-acquisition-plan`：如果 `source-repo/` 尚未同步，`next_action.id=source_repo_reference`，应先调用 `/source-repo/sync`；如果源码已经在本地，`next_action.id=source_runtime_plan`，再进入依赖、构建和 hash 启动器流程。
+
 ```bash
 curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/runtime-preflight" \
   -H "Authorization: Bearer $MEDIA2API_API_KEY" \

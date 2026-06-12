@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 from media2api import models as db_models
 from media2api.config import settings
 from media2api.database import SessionLocal
-from media2api.main import app, build_proxy_kernel_release_checksums, proxy_kernel_asset_digest_sha256, proxy_kernel_best_release_candidate, proxy_kernel_service
+from media2api.main import app, build_proxy_kernel_release_checksums, proxy_kernel_asset_digest_sha256, proxy_kernel_best_release_candidate, proxy_kernel_runtime_acquisition_next_action, proxy_kernel_service
 from media2api.provider_templates import FINALIZED_PROVIDER_IDS, PROVIDER_TEMPLATES
 from media2api.services_core import AccountScheduler, ModelRouter
 from media2api.services_proxy_kernels import ProxyKernelRuntimeService
@@ -126,6 +126,30 @@ def main() -> None:
         require_preferred=True,
     )
     assert best_midjourney_candidate["asset_name"] == "midjourney-proxy-linux-x64-v11.9.7.tar.gz", best_midjourney_candidate
+    preflight_failed_without_source = proxy_kernel_runtime_acquisition_next_action(
+        kernel={
+            "installed": {"path": "/tmp/runner"},
+            "installed_verified": True,
+            "runtime_preflight": {"ok": False, "status": "failed"},
+        },
+        release_state={"status": "ok", "install_ready_candidate_count": 1, "preferred_asset_count": 1},
+        source_repo={"exists": False, "is_git_repo": False},
+        resolve_release=True,
+    )
+    assert preflight_failed_without_source["id"] == "source_repo_reference", preflight_failed_without_source
+    assert preflight_failed_without_source["primary_api"].endswith("/source-repo/sync"), preflight_failed_without_source
+    assert preflight_failed_without_source["follow_up_api"].endswith("/source-runtime-plan"), preflight_failed_without_source
+    preflight_failed_with_source = proxy_kernel_runtime_acquisition_next_action(
+        kernel={
+            "installed": {"path": "/tmp/runner"},
+            "installed_verified": True,
+            "runtime_preflight": {"ok": False, "status": "failed"},
+        },
+        release_state={"status": "ok", "install_ready_candidate_count": 1, "preferred_asset_count": 1},
+        source_repo={"exists": True, "is_git_repo": True},
+        resolve_release=True,
+    )
+    assert preflight_failed_with_source["id"] == "source_runtime_plan", preflight_failed_with_source
 
     source_repo = SOURCE_REPO_DIR / "basketikun__chatgpt2api"
     source_repo.mkdir(parents=True, exist_ok=True)

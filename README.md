@@ -261,7 +261,9 @@ After a release asset is installed and SHA256-verified, operators should run
 `--help` timeout to catch server-local failures such as missing GLIBC versions,
 wrong architecture, missing dynamic libraries, or permission problems. If it
 fails, runtime acquisition moves to the `source-repo/` build/reference fallback
-instead of presenting the release as start-ready.
+instead of presenting the release as start-ready. When the source checkout is
+not present yet, the next action is `source_repo_reference` first; after sync it
+becomes `source_runtime_plan`.
 Some binaries also need a local config file before they can stay running. The
 `start-runtime` payload supports `config_files`, written only under that
 provider's `MEDIA2API_PROXY_KERNEL_DIR` subtree before launch. GEM-CLI-02 uses
