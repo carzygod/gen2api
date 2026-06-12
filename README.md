@@ -228,6 +228,9 @@ operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also
 renders that package as a form, rejects unchanged `<...>` placeholders, and lets
 the operator preflight before importing the account pool entry.
+The form separates sensitive `credential_value` from non-secret
+`resource_profile` fields, so inputs such as Midjourney `guild_id`/`channel_id`
+or Gemini `project_id` are not mixed into cookie/token material.
 For managed runtimes that need local credential files, the import response also
 contains `runtime_credential_sync`. `POST
 /v1/admin/proxy-kernels/{provider_id}/runtime-credentials/sync` can replay that

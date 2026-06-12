@@ -1243,11 +1243,19 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/acco
 
 - `credential_value_json_template`: 推荐粘贴的 JSON 字段模板。
 - `credential_value_env_template`: 等价的 `.env` 风格模板。
+- `resource_profile_json_template`: 非敏感账号画像字段模板，例如 `guild_id`、`channel_id`、`project_id`、`region`、`plan`。
+- `submission_json_template`: 完整账号导入请求模板，已把 `credential_value` 和 `resource_profile` 分区。
+- `fields_by_destination`: 字段去向说明，区分敏感凭据、账号画像和 runtime 地址。
 - `preflight`: 是否已经满足该 provider 的开源项目输入要求。
 - `payload_preview`: 脱敏导入 payload，用于确认字段位置。
 - `runtime_credential_sync`: 需要本地凭据文件的 runtime 同步结果；例如 GEM-CLI-02 会把 Gemini CLI OAuth 材料规范化为 CLIProxyAPI 可读取的 `auth-dir/*.json`。
 
 如果直接提交模板里的 `<...>` 占位值，预检会返回 `CREDENTIAL_PLACEHOLDER_VALUE`；必须替换为真实 cookie/session/profile 后才能进入导入步骤。
+
+账号材料分两类填写：
+
+- `credential_value`: 只放敏感材料，如 Web Cookie、OAuth JSON、session token、Discord user token、Codex/Gemini profile export。平台会加密保存或转成托管 credential ref，响应不会明文回显。
+- `resource_profile`: 只放非敏感账号画像，如 Midjourney 的 `guild_id` / `channel_id`、Gemini 的 `project_id`、账号 `region` / `plan`、cookie domain。它用于路由、配额、验收和运行时落盘，不应混进 cookie/token。
 
 对于 `gemini_cli_oauth`，账号导入同时负责把 OAuth 材料写入受控 runtime 的 `auth-dir`。平台支持直接 JSON、JSON 字符串或 base64 JSON；响应只返回目标路径、大小和 SHA256，不回显 token 明文。OAuth 文件中如已包含 `client_id` / `client_secret` 会原样保留；如凭据文件缺少这些字段，可通过 `MEDIA2API_GEMINI_CLI_OAUTH_CLIENT_ID` 和 `MEDIA2API_GEMINI_CLI_OAUTH_CLIENT_SECRET` 环境变量补齐：
 

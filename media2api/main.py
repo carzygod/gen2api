@@ -14476,8 +14476,18 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                       <div><label>Credential Ref</label><input id="kernel-account-credential-ref" placeholder="可选：secret://... / agent://..." /></div>
                       <div><label>并发</label><input id="kernel-account-concurrency" value="1" /></div>
                     </div>
-                    <label style="margin-top:10px">Credential Value JSON</label>
-                    <textarea id="kernel-account-credential" placeholder="点击“账号材料预检”后自动填入模板；把 <...> 替换成真实账号材料"></textarea>
+                    <div class="account-material-grid" style="margin-top:10px">
+                      <div>
+                        <label>Credential Value JSON</label>
+                        <textarea id="kernel-account-credential" placeholder="粘贴 cookie/session/OAuth/profile/token；保存后不会明文展示"></textarea>
+                        <p class="note">只放敏感凭据：Cookie、OAuth JSON、session、token 或 profile export。</p>
+                      </div>
+                      <div>
+                        <label>Resource Profile JSON</label>
+                        <textarea id="kernel-account-resource-profile" placeholder='{{"guild_id":"...","channel_id":"..."}}'></textarea>
+                        <p class="note">只放非敏感画像：guild/channel、project、region、plan、domain 等。</p>
+                      </div>
+                    </div>
                     <div class="account-material-grid" style="margin-top:10px">
                       <div><label>支持操作</label><textarea class="compact-textarea" id="kernel-account-operations" placeholder='["text_to_image","image_edit"]'></textarea></div>
                       <div><label>支持平台模型</label><textarea class="compact-textarea" id="kernel-account-models" placeholder='["gpt-image-2"]'></textarea></div>
@@ -16022,6 +16032,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (!raw) return '';
           try {{ return JSON.parse(raw); }} catch (_) {{ return raw; }}
         }}
+        function readJsonObjectOrFallback(id, fallback = {{}}) {{
+          const parsed = readJsonOrText(id);
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+        }}
         function readJsonArrayOrLines(id, fallback = []) {{
           const raw = document.getElementById(id)?.value.trim() || '';
           if (!raw) return fallback;
@@ -16105,6 +16119,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const runtimeSyncBox = document.getElementById('kernel-account-runtime-sync-status');
           const templateBox = document.getElementById('kernel-account-material-template');
           const credential = document.getElementById('kernel-account-credential');
+          const resourceProfile = document.getElementById('kernel-account-resource-profile');
           const operations = document.getElementById('kernel-account-operations');
           const models = document.getElementById('kernel-account-models');
           const concurrency = document.getElementById('kernel-account-concurrency');
@@ -16114,11 +16129,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const preflight = payload.preflight || {{}};
           const preview = payload.payload_preview || {{}};
           const template = payload.credential_value_json_template || {{}};
+          const profileTemplate = payload.resource_profile_json_template || preview.resource_profile || {{}};
           const templateText = prettyJson(template, '');
           if (credential && (!credential.value.trim() || credential.dataset.providerId !== provider || credential.dataset.templateLoaded === 'true')) {{
             credential.value = templateText;
             credential.dataset.providerId = provider;
             credential.dataset.templateLoaded = 'true';
+          }}
+          if (resourceProfile && (!resourceProfile.value.trim() || resourceProfile.dataset.providerId !== provider || resourceProfile.dataset.templateLoaded === 'true')) {{
+            resourceProfile.value = prettyJson(profileTemplate, '{{}}');
+            resourceProfile.dataset.providerId = provider;
+            resourceProfile.dataset.templateLoaded = 'true';
           }}
           if (operations && (!operations.value.trim() || operations.dataset.providerId !== provider)) {{
             operations.value = prettyJson(preview.supported_operations || [], '[]');
@@ -16164,6 +16185,10 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             templateBox.textContent = prettyJson({{
               credential_value_json_template: template,
               credential_value_env_template: payload.credential_value_env_template || '',
+              resource_profile_json_template: payload.resource_profile_json_template || {{}},
+              submission_json_template: payload.submission_json_template || {{}},
+              field_instructions: payload.field_instructions || [],
+              fields_by_destination: payload.fields_by_destination || {{}},
               required_fields: payload.required_fields || [],
               any_of_groups: payload.any_of_groups || [],
               guide: payload.guide || {{}},
@@ -16193,6 +16218,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const credentialRef = document.getElementById('kernel-account-credential-ref')?.value.trim() || null;
           const credentialInput = document.getElementById('kernel-account-credential');
           const credentialValue = credentialRef && credentialInput?.dataset.templateLoaded === 'true' ? '' : readJsonOrText('kernel-account-credential');
+          const resourceProfile = readJsonObjectOrFallback('kernel-account-resource-profile', preview.resource_profile || packagePayload.resource_profile_json_template || {{}});
           const body = {{
             dry_run: dryRun,
             account_id: document.getElementById('kernel-account-id')?.value.trim() || null,
@@ -16206,7 +16232,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             plan: document.getElementById('kernel-account-plan')?.value.trim() || preview.plan || null,
             auth_method: preview.auth_method || null,
             resource_type: preview.resource_type || null,
-            resource_profile: preview.resource_profile || {{}},
+            resource_profile: resourceProfile,
             provider_config: preview.provider_config || {{}},
             upsert: true,
             auto_create_mappings: true,
@@ -22425,6 +22451,7 @@ def build_proxy_kernel_materials_request(db: Session, provider_id: str) -> dict[
     fields = [proxy_kernel_material_field(item) for item in input_requirements if item.get("name")]
     runtime_input_fields = [field for field in fields if field.get("name") in RUNTIME_BASE_URL_FIELD_NAMES or field.get("where_to_put") == "runtime_or_provider_base_url"]
     account_input_fields = [field for field in fields if field not in runtime_input_fields]
+    fields_by_destination = proxy_kernel_account_fields_by_destination(account_input_fields)
     account_required = proxy_kernel_required_account_materials(account_input_fields)
     runtime_ok = bool(kernel.get("runtime_registered") and kernel.get("runtime_loopback_only"))
     route_ok = bool(routing.get("route_config_ready"))
@@ -22530,6 +22557,9 @@ def build_proxy_kernel_materials_request(db: Session, provider_id: str) -> dict[
             "required_fields": [field for field in account_input_fields if field.get("required") and not field.get("any_of_group")],
             "optional_fields": [field for field in account_input_fields if not field.get("required")],
             "any_of_groups": proxy_kernel_material_groups(account_input_fields),
+            "fields_by_destination": fields_by_destination,
+            "credential_fields": fields_by_destination["credential_value"],
+            "resource_profile_fields": fields_by_destination["resource_profile"],
             "resource_profile_template": platform_resource_profile_template(provider_id),
             "user_actions": guide.get("user_actions", []),
             "existing_account_count": routing.get("account_count", 0),
@@ -22643,17 +22673,73 @@ def proxy_kernel_operator_account_payload_template(provider_id: str, template: A
 
 def proxy_kernel_account_material_value_template(account_materials: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {}
-    for field in account_materials.get("required_fields") or []:
+    credential_fields = account_materials.get("credential_fields") or account_materials.get("required_fields") or []
+    for field in credential_fields:
+        if field.get("where_to_put") and field.get("where_to_put") != "encrypted_credential_or_agent_ref":
+            continue
+        if not field.get("required"):
+            continue
+        if field.get("any_of_group"):
+            continue
         name = str(field.get("name") or "").strip()
         if name:
             fields[name] = f"<{name}>"
     for group in account_materials.get("any_of_groups") or []:
         group_name = str(group.get("group") or "one_of").strip()
-        options = [str(field.get("name") or "").strip() for field in group.get("fields") or [] if str(field.get("name") or "").strip()]
+        options = [
+            str(field.get("name") or "").strip()
+            for field in group.get("fields") or []
+            if str(field.get("name") or "").strip() and field.get("where_to_put") == "encrypted_credential_or_agent_ref"
+        ]
         if options:
             fields[f"choose_one_of_{group_name}"] = options
             fields[options[0]] = f"<{options[0]}>"
     return fields
+
+
+def proxy_kernel_account_fields_by_destination(fields: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    buckets = {
+        "credential_value": [],
+        "resource_profile": [],
+        "runtime_or_provider_base_url": [],
+        "other": [],
+    }
+    for field in fields:
+        destination = str(field.get("where_to_put") or "")
+        if destination == "encrypted_credential_or_agent_ref":
+            buckets["credential_value"].append(field)
+        elif destination == "account_resource_profile":
+            buckets["resource_profile"].append(field)
+        elif destination == "runtime_or_provider_base_url":
+            buckets["runtime_or_provider_base_url"].append(field)
+        else:
+            buckets["other"].append(field)
+    return buckets
+
+
+def proxy_kernel_account_field_instructions(account_materials: dict[str, Any]) -> list[dict[str, Any]]:
+    credential_fields = account_materials.get("credential_fields") or []
+    profile_fields = account_materials.get("resource_profile_fields") or []
+    instructions: list[dict[str, Any]] = []
+    if credential_fields or account_materials.get("any_of_groups"):
+        instructions.append(
+            {
+                "section": "credential_value",
+                "title": "Credential Value JSON",
+                "message": "Paste secret material here: cookie/session/OAuth/profile/token. This value is encrypted or converted to a managed credential ref and is never echoed back.",
+                "field_names": [field.get("name") for field in credential_fields if field.get("name")],
+            }
+        )
+    if profile_fields:
+        instructions.append(
+            {
+                "section": "resource_profile",
+                "title": "Resource Profile JSON",
+                "message": "Put non-secret routing/profile fields here, such as guild_id, channel_id, project_id, region, plan, account email, or cookie domain.",
+                "field_names": [field.get("name") for field in profile_fields if field.get("name")],
+            }
+        )
+    return instructions
 
 
 def proxy_kernel_redact_account_material_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -23074,6 +23160,7 @@ def build_proxy_kernel_account_materials(
     payload = proxy_kernel_account_material_payload_from_request(provider_id, template, materials, guide, req)
     account_materials = materials.get("account_materials") or {}
     value_template = proxy_kernel_account_material_value_template(account_materials)
+    resource_profile_template = account_materials.get("resource_profile_template") or platform_resource_profile_template(provider_id)
     preflight = proxy_kernel_account_material_preflight(db, provider_id, payload)
     applied: dict[str, Any] = {}
     runtime_credential_sync = build_proxy_kernel_runtime_credential_sync(
@@ -23129,9 +23216,21 @@ def build_proxy_kernel_account_materials(
     post_payload = {
         "dry_run": True,
         "credential_value": value_template or "<paste credential material>",
-        "resource_profile": payload.get("resource_profile") or {},
+        "resource_profile": resource_profile_template,
         "auth_method": payload.get("auth_method"),
         "resource_type": payload.get("resource_type"),
+    }
+    submission_template = {
+        **post_payload,
+        "account_id": payload.get("account_id") or f"acct_{provider_id}_01",
+        "label": payload.get("label") or f"{template.name} primary account",
+        "supported_operations": payload.get("supported_operations") or list(template.operations),
+        "supported_provider_models": payload.get("supported_provider_models") or sorted({str(item.provider_model) for item in template.mappings if getattr(item, "provider_model", "")}),
+        "concurrency_limit": payload.get("concurrency_limit") or 1,
+        "upsert": True,
+        "auto_create_mappings": True,
+        "sync_capabilities": False,
+        "run_health_check": False,
     }
     return {
         "object": "media2api.proxy_kernel.account_materials",
@@ -23149,6 +23248,10 @@ def build_proxy_kernel_account_materials(
         "payload_preview": proxy_kernel_redact_account_material_payload(payload),
         "credential_value_json_template": value_template,
         "credential_value_env_template": "\n".join(f"{key}=<{key}>" for key in value_template if not key.startswith("choose_one_of_")),
+        "resource_profile_json_template": resource_profile_template,
+        "submission_json_template": submission_template,
+        "field_instructions": proxy_kernel_account_field_instructions(account_materials),
+        "fields_by_destination": account_materials.get("fields_by_destination") or {},
         "required_fields": account_materials.get("required_fields") or [],
         "any_of_groups": account_materials.get("any_of_groups") or [],
         "guide": {

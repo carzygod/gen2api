@@ -293,6 +293,8 @@ def main() -> None:
         openai_account_materials = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/account-materials", headers=headers))
         assert openai_account_materials["object"] == "media2api.proxy_kernel.account_materials" and openai_account_materials["provider_id"] == "openai_web_session", openai_account_materials
         assert openai_account_materials["status"] == "needs_input" and openai_account_materials["credential_value_json_template"], openai_account_materials
+        assert openai_account_materials["resource_profile_json_template"] == {}, openai_account_materials
+        assert "credential_value" in openai_account_materials["fields_by_destination"], openai_account_materials
         openai_account_missing = assert_ok(client.post("/v1/admin/proxy-kernels/openai_web_session/account-materials", headers=headers, json={"dry_run": True}))
         assert openai_account_missing["preflight"]["ok"] is False and openai_account_missing["preflight"]["missing_input_fields"], openai_account_missing
         openai_account_placeholder = assert_ok(
@@ -311,6 +313,27 @@ def main() -> None:
             )
         )
         assert openai_account_ready["preflight"]["ok"] is True and openai_account_ready["payload_preview"]["credential_value"] == "[provided]", openai_account_ready
+        midjourney_account_materials = assert_ok(client.get("/v1/admin/proxy-kernels/midjourney_discord_session/account-materials", headers=headers))
+        assert midjourney_account_materials["credential_value_json_template"].get("discord_session_or_user_token"), midjourney_account_materials
+        assert "guild_id" not in midjourney_account_materials["credential_value_json_template"], midjourney_account_materials
+        assert midjourney_account_materials["resource_profile_json_template"].get("guild_id") == "<required>", midjourney_account_materials
+        assert midjourney_account_materials["resource_profile_json_template"].get("channel_id") == "<required>", midjourney_account_materials
+        assert {item["section"] for item in midjourney_account_materials["field_instructions"]} >= {"credential_value", "resource_profile"}, midjourney_account_materials
+        midjourney_account_ready = assert_ok(
+            client.post(
+                "/v1/admin/proxy-kernels/midjourney_discord_session/account-materials",
+                headers=headers,
+                json={
+                    "dry_run": True,
+                    "credential_value": {"discord_session_or_user_token": "fake-discord-session"},
+                    "resource_profile": {"guild_id": "123456789012345678", "channel_id": "234567890123456789"},
+                    "supported_operations": ["text_to_image", "image_to_image"],
+                    "supported_provider_models": ["mj-v7"],
+                    "concurrency_limit": 1,
+                },
+            )
+        )
+        assert midjourney_account_ready["preflight"]["ok"] is True and midjourney_account_ready["payload_preview"]["resource_profile"]["guild_id"] == "123456789012345678", midjourney_account_ready
         handoff_matrix = assert_ok(client.get("/v1/admin/proxy-kernels/operator-handoff", headers=headers))
         assert handoff_matrix["object"] == "media2api.proxy_kernel.operator_handoff.list" and handoff_matrix["summary"]["total"] >= 10, handoff_matrix
         openai_handoff = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/operator-handoff", headers=headers))
@@ -681,7 +704,7 @@ def main() -> None:
             assert admin_dom in admin_page.text, admin_dom
         for runtime_acquisition_dom in ["kernel-runtime-acquisition-all", "kernel-runtime-acquisition", "loadKernelRuntimeAcquisitionPlan", "loadAllKernelRuntimeAcquisitionPlans", "runtime_acquisition_plan", "/v1/admin/proxy-kernels/runtime-acquisition-plan", "/runtime-acquisition-plan", "/v1/admin/proxy-kernels/openai_web_session/runtime-acquisition-plan"]:
             assert runtime_acquisition_dom in admin_page.text, runtime_acquisition_dom
-        for account_material_dom in ["kernel-account-materials", "kernel-account-material-panel", "kernel-account-preflight", "kernel-account-import", "kernel-account-runtime-sync", "kernel-account-runtime-sync-status", "submitKernelAccountMaterials", "syncKernelRuntimeCredentials", "renderKernelAccountMaterialsPanel", "loadKernelAccountMaterials", "/account-materials", "/runtime-credentials/sync"]:
+        for account_material_dom in ["kernel-account-materials", "kernel-account-material-panel", "kernel-account-credential", "kernel-account-resource-profile", "kernel-account-preflight", "kernel-account-import", "kernel-account-runtime-sync", "kernel-account-runtime-sync-status", "submitKernelAccountMaterials", "syncKernelRuntimeCredentials", "renderKernelAccountMaterialsPanel", "loadKernelAccountMaterials", "resource_profile_json_template", "fields_by_destination", "/account-materials", "/runtime-credentials/sync"]:
             assert account_material_dom in admin_page.text, account_material_dom
         for activation_dom in ["kernel-activation-workflow-all", "kernel-activation-workflow", "kernel-production-gap-report-all", "kernel-production-gap-report", "kernel-activation-run", "kernel-activation-overview", "kernel-activation-panel", "activation-stage-grid", "activation-provider-grid", "data-activation-action", "runActivationAction", "runKernelActivationRun", "syncProviderEntryFields", "inspect-provider", "apply-routing", "open-account", "open-runtime", "open-users", "renderActivationWorkflowPanel", "renderActivationWorkflowOverview", "renderProductionGapReportOverview", "/v1/admin/proxy-kernels/activation-workflow", "/activation-workflow", "/v1/admin/proxy-kernels/production-gap-report", "/production-gap-report", "/activation-run"]:
             assert activation_dom in admin_page.text, activation_dom
