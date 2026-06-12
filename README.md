@@ -198,7 +198,9 @@ SHA256-recorded launcher artifact under the persistent
 `MEDIA2API_PROXY_KERNEL_DIR` runtime directory; the launcher still runs through
 the same loopback-only `start-runtime` gate. Source dependency/build setup is
 also exposed as a planned command runner and only executes commands discovered
-by `source-runtime-plan` with `shell=false`.
+by `source-runtime-plan` with `shell=false`. Operator handoff packages include
+the same source setup and launcher payloads, so release and source fallback
+paths can be advanced through one dry-run-first workflow.
 
 In the proxy-kernel dashboard, "可直接用" is intentionally strict: route
 mappings, a loopback runtime, real account material, runtime health, and live

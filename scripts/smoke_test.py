@@ -210,8 +210,10 @@ def main() -> None:
         assert handoff_matrix["object"] == "media2api.proxy_kernel.operator_handoff.list" and handoff_matrix["summary"]["total"] >= 10, handoff_matrix
         openai_handoff = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/operator-handoff", headers=headers))
         assert openai_handoff["object"] == "media2api.proxy_kernel.operator_handoff" and openai_handoff["provider_id"] == "openai_web_session", openai_handoff
-        assert {"account_onboarding_inline_secret", "install_release", "start_runtime", "live_acceptance_dry_run"}.issubset(openai_handoff["submission_templates"]), openai_handoff
+        assert {"account_onboarding_inline_secret", "install_release", "source_runtime_plan", "source_runtime_setup", "source_runtime_launcher", "start_runtime", "live_acceptance_dry_run"}.issubset(openai_handoff["submission_templates"]), openai_handoff
         assert "operator_handoff_run" in openai_handoff["submission_templates"], openai_handoff
+        assert {"source_runtime_setup", "source_runtime_launcher"}.issubset({step["id"] for step in openai_handoff["steps"]}), openai_handoff
+        assert "source_runtime_setup" in openai_handoff["submission_templates"]["operator_handoff_run"], openai_handoff
         assert openai_handoff["policy"]["read_only"] is True and openai_handoff["policy"]["release_binary_preferred"] is True, openai_handoff
         handoff_run = assert_ok(
             client.post(
@@ -222,6 +224,7 @@ def main() -> None:
         )
         assert handoff_run["object"] == "media2api.proxy_kernel.operator_handoff_run" and handoff_run["dry_run"] is True, handoff_run
         assert all(item["status"] == "planned" for item in handoff_run["results"]), handoff_run
+        assert {"source_runtime_setup", "source_runtime_launcher"}.issubset({item["step"] for item in handoff_run["results"]}), handoff_run
         openai_runtime_delivery = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan", headers=headers))
         assert openai_runtime_delivery["object"] == "media2api.proxy_kernel.runtime_delivery_plan" and openai_runtime_delivery["provider_id"] == "openai_web_session", openai_runtime_delivery
         assert {"install_payload_template", "start_payload_template", "source_repo_payload_template"}.issubset(openai_runtime_delivery["runtime"]), openai_runtime_delivery

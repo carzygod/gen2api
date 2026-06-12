@@ -1121,7 +1121,7 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/oper
   -d '{"dry_run":true}'
 ```
 
-如需真实执行，必须显式传入 `dry_run=false`，并把 `account_onboarding`、`install_release`、`start_runtime` 等 payload 的占位符全部替换为真实材料。`steps` 可限定本次执行范围，例如只运行 `["apply_routing","runtime_health_check","live_acceptance_dry_run"]`。
+如需真实执行，必须显式传入 `dry_run=false`，并把 `account_onboarding`、`install_release`、`source_runtime_setup`、`source_runtime_launcher`、`start_runtime` 等 payload 的占位符全部替换为真实材料。`steps` 可限定本次执行范围，例如只运行 `["apply_routing","runtime_health_check","live_acceptance_dry_run"]`。默认编排顺序包含 `apply_routing`、`submit_account_material`、`install_release`、`source_runtime_setup`、`source_runtime_launcher`、`start_runtime`、`runtime_health_check`、`live_acceptance_dry_run`；如果 `source_runtime_launcher` 成功生成 hash 启动器，后续 `start_runtime` 会自动使用其返回的 `start_payload_template`。
 
 关键字段：
 
@@ -1129,6 +1129,9 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/oper
 - `submission_templates.account_onboarding_inline_secret`: 直接提交账号材料的 JSON 模板。
 - `submission_templates.account_onboarding_secret_ref`: 已托管 `secret://` 或 `agent://` 引用时的 JSON 模板。
 - `submission_templates.install_release`: release asset 与 SHA256 安装模板。
+- `submission_templates.source_runtime_plan`: source-repo 已同步时的依赖、构建和启动候选计划。
+- `submission_templates.source_runtime_setup`: source-repo 依赖/构建准备模板；命令必须来自 `source-runtime-plan`。
+- `submission_templates.source_runtime_launcher`: source-repo hash 启动器生成模板，成功后会产出 `start_runtime` 可用的 payload。
 - `submission_templates.start_runtime`: loopback runtime 启动模板。
 - `submission_templates.live_acceptance_dry_run`: 不消耗额度的真实验收预检模板。
 - `submission_templates.live_acceptance`: 消耗真实额度的 live 样本验收模板，建议 `max_samples=1` 起步。

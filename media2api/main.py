@@ -1287,6 +1287,8 @@ class ProxyKernelOperatorHandoffRunRequest(BaseModel):
     account_onboarding: dict[str, Any] = Field(default_factory=dict)
     apply_routing: dict[str, Any] = Field(default_factory=dict)
     install_release: dict[str, Any] = Field(default_factory=dict)
+    source_runtime_setup: dict[str, Any] = Field(default_factory=dict)
+    source_runtime_launcher: dict[str, Any] = Field(default_factory=dict)
     start_runtime: dict[str, Any] = Field(default_factory=dict)
     runtime_health_check: dict[str, Any] = Field(default_factory=dict)
     live_acceptance: dict[str, Any] = Field(default_factory=dict)
@@ -21039,14 +21041,39 @@ def build_proxy_kernel_operator_handoff(db: Session, provider_id: str) -> dict[s
     onboarding_ref_command_payload = {key: value for key, value in account_ref_payload.items() if value not in ("", None)}
     install_payload = (delivery.get("runtime") or {}).get("install_payload_template") or {}
     start_payload = (delivery.get("runtime") or {}).get("start_payload_template") or {}
+    default_base_url = proxy_kernel_service.default_runtime_base_url(provider_id)
+    source_plan = proxy_kernel_service.source_runtime_plan(provider_id, base_url=default_base_url)
+    source_setup_catalog = proxy_kernel_service.source_runtime_setup_catalog(source_plan)
+    source_setup_command = next((item for item in source_setup_catalog if not item.get("reference_only")), {}) if source_setup_catalog else {}
+    source_setup_payload = {
+        "dry_run": True,
+        "command_id": source_setup_command.get("id") or "",
+        "command": source_setup_command.get("command") or [],
+        "cwd": source_setup_command.get("cwd") or "",
+        "env": {},
+        "timeout_seconds": 900,
+        "notes": "source-repo dependency/build setup before launcher",
+    }
+    source_launcher_template = source_plan.get("launcher_payload_template") or {}
+    source_launcher_payload = {
+        "dry_run": True,
+        "base_url": source_launcher_template.get("base_url") or default_base_url,
+        "command": source_launcher_template.get("command") or [],
+        "cwd": source_launcher_template.get("cwd") or "",
+        "env": source_launcher_template.get("env") or {},
+        "version": source_launcher_template.get("version") or "",
+        "notes": source_launcher_template.get("notes") or "source-repo launcher",
+    }
     live_dry_payload = {"dry_run": True, "operations": list(template.operations), "run_runtime_health": True, "require_runtime_health": True, "run_samples": True, "max_samples": 1}
     live_payload = {**live_dry_payload, "dry_run": False}
     run_payload = {
         "dry_run": True,
-        "steps": ["apply_routing", "submit_account_material", "install_release", "start_runtime", "runtime_health_check", "live_acceptance_dry_run"],
+        "steps": ["apply_routing", "submit_account_material", "install_release", "source_runtime_setup", "source_runtime_launcher", "start_runtime", "runtime_health_check", "live_acceptance_dry_run"],
         "account_onboarding": onboarding_command_payload,
         "apply_routing": (materials.get("routing_materials") or {}).get("apply_payload") or {},
         "install_release": install_payload,
+        "source_runtime_setup": source_setup_payload,
+        "source_runtime_launcher": source_launcher_payload,
         "start_runtime": start_payload,
         "runtime_health_check": {"sync_provider_base_url": True, "require_running_process": False, "fail_on_health_check": False},
         "live_acceptance": live_dry_payload,
@@ -21073,14 +21100,46 @@ def build_proxy_kernel_operator_handoff(db: Session, provider_id: str) -> dict[s
             "credential_ref_payload_template": account_ref_payload,
         },
         {
+            "id": "source_runtime_setup",
+            "label": "Source-repo 依赖 / 构建准备",
+            "status": "ready" if source_plan.get("source_available") and source_setup_payload.get("command_id") else "waiting",
+            "operator_required": False,
+            "platform_can_run": bool(source_plan.get("source_available") and source_setup_payload.get("command_id")),
+            "source_available": bool(source_plan.get("source_available")),
+            "payload_template": source_setup_payload,
+            "command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup -d '{json.dumps(source_setup_payload, ensure_ascii=False, separators=(',', ':'))}'",
+        },
+        {
+            "id": "source_runtime_launcher",
+            "label": "生成 source-repo hash 启动器",
+            "status": "ready" if source_plan.get("source_available") and source_launcher_payload.get("command") else "waiting",
+            "operator_required": False,
+            "platform_can_run": bool(source_plan.get("source_available") and source_launcher_payload.get("command")),
+            "source_available": bool(source_plan.get("source_available")),
+            "payload_template": source_launcher_payload,
+            "command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher -d '{json.dumps(source_launcher_payload, ensure_ascii=False, separators=(',', ':'))}'",
+        },
+        {
             "id": "install_or_register_runtime",
             "label": "安装或登记 loopback runtime",
             "status": "done" if (materials.get("runtime_materials") or {}).get("status") == "ready" else "action_required",
             "operator_required": (materials.get("runtime_materials") or {}).get("status") != "ready",
             "platform_can_run": True,
             "install_payload_template": install_payload,
+            "source_runtime_plan": {
+                "source_available": source_plan.get("source_available"),
+                "detected_project_types": source_plan.get("detected_project_types") or [],
+                "dependency_commands": source_plan.get("dependency_commands") or [],
+                "build_commands": source_plan.get("build_commands") or [],
+                "preferred_start_command": source_plan.get("preferred_start_command") or {},
+            },
+            "source_setup_payload_template": source_setup_payload,
+            "source_launcher_payload_template": source_launcher_payload,
             "start_payload_template": start_payload,
             "install_command": (delivery.get("commands") or {}).get("install_release"),
+            "source_runtime_plan_command": f"curl -H \"Authorization: Bearer {admin_key}\" \"{base}/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan?base_url={default_base_url}\"",
+            "source_runtime_setup_command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup -d '{json.dumps(source_setup_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "source_runtime_launcher_command": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher -d '{json.dumps(source_launcher_payload, ensure_ascii=False, separators=(',', ':'))}'",
             "start_command": (delivery.get("commands") or {}).get("start_runtime"),
             "runtime_health_command": (delivery.get("commands") or {}).get("runtime_health_check"),
         },
@@ -21127,6 +21186,9 @@ def build_proxy_kernel_operator_handoff(db: Session, provider_id: str) -> dict[s
             "account_onboarding_inline_secret": account_payload,
             "account_onboarding_secret_ref": account_ref_payload,
             "install_release": install_payload,
+            "source_runtime_plan": source_plan,
+            "source_runtime_setup": source_setup_payload,
+            "source_runtime_launcher": source_launcher_payload,
             "start_runtime": start_payload,
             "live_acceptance_dry_run": live_dry_payload,
             "live_acceptance": live_payload,
@@ -21182,6 +21244,8 @@ PROXY_KERNEL_HANDOFF_DEFAULT_STEPS = [
     "apply_routing",
     "submit_account_material",
     "install_release",
+    "source_runtime_setup",
+    "source_runtime_launcher",
     "start_runtime",
     "runtime_health_check",
     "live_acceptance_dry_run",
@@ -21248,6 +21312,8 @@ def run_proxy_kernel_operator_handoff(
         "apply_routing": req.apply_routing or (templates.get("operator_handoff_run") or {}).get("apply_routing") or {},
         "submit_account_material": req.account_onboarding or {},
         "install_release": req.install_release or {},
+        "source_runtime_setup": req.source_runtime_setup or {},
+        "source_runtime_launcher": req.source_runtime_launcher or {},
         "start_runtime": req.start_runtime or {},
         "runtime_health_check": req.runtime_health_check or {"sync_provider_base_url": True, "require_running_process": False, "fail_on_health_check": False},
         "live_acceptance_dry_run": {**(templates.get("live_acceptance_dry_run") or {}), **(req.live_acceptance or {})},
@@ -21257,6 +21323,10 @@ def run_proxy_kernel_operator_handoff(
         payloads["submit_account_material"] = templates.get("account_onboarding_inline_secret") or {}
     if not payloads["install_release"]:
         payloads["install_release"] = templates.get("install_release") or {}
+    if not payloads["source_runtime_setup"]:
+        payloads["source_runtime_setup"] = templates.get("source_runtime_setup") or {}
+    if not payloads["source_runtime_launcher"]:
+        payloads["source_runtime_launcher"] = templates.get("source_runtime_launcher") or {}
     if not payloads["start_runtime"]:
         payloads["start_runtime"] = templates.get("start_runtime") or {}
 
@@ -21305,6 +21375,40 @@ def run_proxy_kernel_operator_handoff(
                     tag_name=install_req.tag_name,
                     force=install_req.force,
                 )
+                results.append(proxy_kernel_handoff_step_result(step, "executed", executed=True, detail=result))
+            elif step == "source_runtime_setup":
+                if proxy_kernel_payload_has_placeholder(payload) or (not payload.get("command_id") and not payload.get("command")):
+                    results.append(proxy_kernel_handoff_step_result(step, "skipped_missing_material", detail={"payload": payload}, message="Sync source-repo and choose a source-runtime-plan setup command before live execution."))
+                    continue
+                setup_req = ProxyKernelSourceRuntimeSetupRequest(**{**payload, "dry_run": False})
+                result = proxy_kernel_service.prepare_source_runtime_setup(
+                    provider_id,
+                    dry_run=False,
+                    command_id=setup_req.command_id,
+                    command=setup_req.command,
+                    cwd=setup_req.cwd,
+                    env=setup_req.env,
+                    timeout_seconds=setup_req.timeout_seconds,
+                    notes=setup_req.notes,
+                    allow_reference_commands=setup_req.allow_reference_commands,
+                )
+                results.append(proxy_kernel_handoff_step_result(step, "executed" if result.get("status") == "completed" else str(result.get("status") or "executed"), executed=result.get("status") == "completed", detail=result))
+            elif step == "source_runtime_launcher":
+                if proxy_kernel_payload_has_placeholder(payload) or not payload.get("command"):
+                    results.append(proxy_kernel_handoff_step_result(step, "skipped_missing_material", detail={"payload": payload}, message="Sync source-repo and choose a source-runtime-plan start command before live execution."))
+                    continue
+                launcher_req = ProxyKernelSourceRuntimeLauncherRequest(**{**payload, "dry_run": False})
+                result = proxy_kernel_service.prepare_source_runtime_launcher(
+                    provider_id,
+                    base_url=launcher_req.base_url,
+                    command=launcher_req.command,
+                    cwd=launcher_req.cwd,
+                    env=launcher_req.env,
+                    version=launcher_req.version,
+                    notes=launcher_req.notes,
+                )
+                if not req.start_runtime and result.get("start_payload_template"):
+                    payloads["start_runtime"] = result["start_payload_template"]
                 results.append(proxy_kernel_handoff_step_result(step, "executed", executed=True, detail=result))
             elif step == "start_runtime":
                 if proxy_kernel_payload_has_placeholder(payload) or not payload.get("command"):
