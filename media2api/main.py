@@ -7283,6 +7283,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels"),
     ("GET", "/v1/admin/proxy-kernels/routing-plan"),
     ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
+    ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
@@ -7528,6 +7529,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels"),
                 ("GET", "/v1/admin/proxy-kernels/routing-plan"),
                 ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
+                ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
@@ -13312,6 +13314,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("反代内核清单", "GET", "/v1/admin/proxy-kernels"),
         ("全量路由计划", "GET", "/v1/admin/proxy-kernels/routing-plan"),
         ("全量运行时交付计划", "GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
+        ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
         ("全量上线清单", "GET", "/v1/admin/proxy-kernels/go-live-checklist"),
         ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
@@ -13379,6 +13382,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
+        "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
@@ -13415,6 +13419,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
+        "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
@@ -13888,6 +13893,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:360px">
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
+                  <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
                   <button class="op" type="button" id="kernel-go-live-all">查看全部上线清单</button>
                   <button class="op" type="button" id="kernel-materials-all">查看全部材料清单</button>
@@ -14351,6 +14357,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const goLive = hint.go_live || {{}};
           const materials = hint.materials_request || {{}};
           const runtimePlan = hint.runtime_delivery_plan || {{}};
+          const releaseProbe = hint.release_probe || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14364,6 +14371,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>能力</dt><dd>${{escapeHtml((hint.operations || []).join(', ') || '-')}}</dd>
               <dt>资产</dt><dd class="kernel-path-note">${{escapeHtml(installed.path || '尚未安装 release 资产')}}</dd>
               <dt>Hash</dt><dd>${{installed.sha256 ? '已记录' : '未记录'}}${{hint.installed_verified ? ' · 已校验' : ''}}</dd>
+              <dt>Release 探测</dt><dd>${{escapeHtml(releaseProbe.status || '未探测')}}${{releaseProbe.next_step?.label ? ' · 下一步：' + escapeHtml(releaseProbe.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>交付计划</dt><dd>${{escapeHtml(runtimePlan.status || '未读取')}}${{runtimePlan.next_step?.label ? ' · 下一步：' + escapeHtml(runtimePlan.next_step.label) : ''}}</dd>
@@ -14454,6 +14462,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             source_repo: sourcePayload,
             routing_plan: routingPayload,
             runtime_delivery_plan: runtimePlanPayload,
+            release_probe: existingHint.release_probe || {{}},
             go_live: existingHint.go_live || {{}},
             materials_request: existingHint.materials_request || {{}},
           }};
@@ -14555,6 +14564,26 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           mergeKernelRuntimeDeliveryPlans(payload);
           return payload;
         }}
+        function mergeKernelReleaseProbeMatrix(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              release_probe: item,
+              installed: item.installed || kernelHint(item.provider_id).installed || {{}},
+              installed_verified: Boolean(item.installed_verified),
+              runtime_base_url: item.runtime_base_url || kernelHint(item.provider_id).runtime_base_url || '',
+              runtime_registered: Boolean(item.runtime_registered),
+              source_repo: item.source_repo || kernelHint(item.provider_id).source_repo || {{}},
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadAllKernelReleaseProbeMatrix(dryRun = false) {{
+          const suffix = dryRun ? '?dry_run=true' : '';
+          const payload = await callAdmin('/v1/admin/proxy-kernels/release-probe-matrix' + suffix);
+          mergeKernelReleaseProbeMatrix(payload);
+          return payload;
+        }}
         async function applyAllKernelRouting() {{
           const body = {{
             provider_ids: [],
@@ -14630,6 +14659,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const preferred = Array.isArray(payload.preferred_assets) && payload.preferred_assets.length ? payload.preferred_assets[0] : null;
           const first = preferred || (Array.isArray(payload.assets) && payload.assets.length ? payload.assets[0] : null);
           if (asset && first?.name) asset.value = first.name;
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{ release_probe: payload }});
+          renderKernelSummary(provider);
           return payload;
         }}
         async function installKernelRelease() {{
@@ -15153,6 +15184,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-runtime-delivery-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelRuntimeDeliveryPlans(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-release-probe-matrix')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelReleaseProbeMatrix(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-apply-routing-all')?.addEventListener('click', async () => {{
           try {{ await applyAllKernelRouting(); }} catch (error) {{ result.textContent = String(error); }}
@@ -19140,6 +19177,22 @@ def admin_proxy_kernels_runtime_delivery_plan(provider_ids: str = "", ctx: AuthC
         raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_delivery_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/release-probe-matrix")
+def admin_proxy_kernels_release_probe_matrix(
+    provider_ids: str = "",
+    dry_run: bool = False,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_release_probe_matrix(db, selected, dry_run=dry_run)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "release_probe_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.post("/v1/admin/proxy-kernels/loopback-contract-test")
 def admin_proxy_kernels_loopback_contract_test(
     req: ProxyKernelLoopbackContractTestRequest,
@@ -20154,6 +20207,176 @@ def build_proxy_kernel_runtime_delivery_plans(db: Session, provider_ids: list[st
             "release_binary_first": True,
             "source_repo_root": str(settings.source_repo_dir),
             "proxy_kernel_root": str(settings.proxy_kernel_dir),
+        },
+    }
+
+
+def proxy_kernel_release_probe_next_step(status: str, asset_count: int, preferred_count: int, dry_run: bool = False) -> dict[str, Any]:
+    if dry_run:
+        return {
+            "id": "probe_release",
+            "label": "探测 GitHub release",
+            "reason": "当前为 dry_run，只列出将被探测的定型仓库，不访问 GitHub、不下载资产。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-probe",
+        }
+    if status == "ok" and preferred_count > 0:
+        return {
+            "id": "install_release",
+            "label": "选择候选资产并提供 SHA256",
+            "reason": "已找到适合受控 loopback runtime 的 release 资产；安装前必须人工提供 expected_sha256。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/install-release",
+        }
+    if status == "ok" and asset_count > 0:
+        return {
+            "id": "inspect_release_assets",
+            "label": "人工确认 release 资产",
+            "reason": "仓库存在 release 资产，但没有自动命中 Linux/amd64 可执行候选；需要人工确认资产、架构和启动方式。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-probe",
+        }
+    if status in {"release_without_assets", "no_release"}:
+        return {
+            "id": "source_repo_reference",
+            "label": "同步 source-repo 做协议参考",
+            "reason": "当前没有可直接安装的 release 二进制；仅在此情况下使用 source-repo 参考协议、本地构建或 adapter 重写。",
+            "primary_api": "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync",
+        }
+    if status == "failed":
+        return {
+            "id": "retry_or_source_repo_reference",
+            "label": "重试探测或进入源码参考",
+            "reason": "release 探测失败；先检查 GitHub 网络/权限，仍不可用时再同步 source-repo。",
+            "primary_api": "/v1/admin/proxy-kernels/release-probe-matrix",
+        }
+    return {
+        "id": "probe_release",
+        "label": "探测 GitHub release",
+        "reason": "尚未获得 release 状态。",
+        "primary_api": "/v1/admin/proxy-kernels/{provider_id}/release-probe",
+    }
+
+
+def proxy_kernel_release_probe_matrix_row(db: Session, provider_id: str, dry_run: bool = False) -> dict[str, Any]:
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    spec = kernel.get("spec") if isinstance(kernel.get("spec"), dict) else {}
+    source_repo = proxy_kernel_service.source_repo_status(provider_id)
+    installed = kernel.get("installed") if isinstance(kernel.get("installed"), dict) else {}
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    if dry_run:
+        probe = {
+            "status": "planned",
+            "release": {},
+            "assets": [],
+            "preferred_assets": [],
+            "message": "dry_run=true; no GitHub request was made.",
+        }
+    else:
+        try:
+            probe = proxy_kernel_service.probe_release(provider_id)
+        except Exception as exc:  # pragma: no cover - defensive envelope for unstable upstream metadata
+            probe = {
+                "object": "media2api.proxy_kernel.release_probe",
+                "provider_id": provider_id,
+                "status": "failed",
+                "error": exc.__class__.__name__,
+                "message": str(exc),
+                "repo_url": spec.get("repo_url"),
+            }
+    assets = [item for item in (probe.get("assets") or []) if isinstance(item, dict)]
+    preferred_assets = [item for item in (probe.get("preferred_assets") or []) if isinstance(item, dict)]
+    checksum_assets = [
+        item for item in assets
+        if any(token in str(item.get("name") or "").lower() for token in ("sha256", "checksum", "checksums", ".sig", ".asc"))
+    ]
+    status = str(probe.get("status") or "unknown")
+    next_step = proxy_kernel_release_probe_next_step(status, len(assets), len(preferred_assets), dry_run=dry_run)
+    return {
+        "object": "media2api.proxy_kernel.release_probe_matrix.item",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "repo": spec.get("repo"),
+        "repo_url": spec.get("repo_url"),
+        "runtime_kind": spec.get("runtime_kind"),
+        "media_scope": spec.get("media_scope"),
+        "credential_boundary": spec.get("credential_boundary"),
+        "status": status,
+        "message": probe.get("message") or probe.get("error") or "",
+        "release": probe.get("release") if isinstance(probe.get("release"), dict) else {},
+        "asset_count": len(assets),
+        "preferred_asset_count": len(preferred_assets),
+        "checksum_asset_count": len(checksum_assets),
+        "assets": assets,
+        "preferred_assets": preferred_assets,
+        "checksum_assets": checksum_assets,
+        "install_ready": bool(status == "ok" and preferred_assets),
+        "hash_required": True,
+        "installed": installed,
+        "installed_verified": bool(kernel.get("installed_verified")),
+        "runtime_registered": bool(kernel.get("runtime_registered")),
+        "runtime_base_url": kernel.get("runtime_base_url") or proxy_kernel_runtime_default_base_url(provider_id),
+        "source_repo": source_repo,
+        "source_repo_fallback": next_step.get("id") in {"source_repo_reference", "retry_or_source_repo_reference"},
+        "next_step": next_step,
+        "commands": {
+            "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
+            "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{{\"tag_name\":\"vX.Y.Z\",\"asset_name\":\"example-linux-amd64.tar.gz\",\"expected_sha256\":\"64-hex-sha256\"}}'",
+            "source_repo_sync": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-repo/sync -d '{{\"ref\":\"\",\"force\":false}}'",
+        },
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "release_binary_first": True,
+            "downloaded": False,
+            "source_repo_only_when": "release missing, asset unusable, protocol inspection, local build input, or adapter rewrite reference",
+            "managed_runtime_listener": "loopback_only",
+        },
+    }
+
+
+def proxy_kernel_release_probe_matrix_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    next_step_counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        step_id = str((row.get("next_step") or {}).get("id") or "unknown")
+        next_step_counts[step_id] = next_step_counts.get(step_id, 0) + 1
+    return {
+        "total": len(rows),
+        "planned": status_counts.get("planned", 0),
+        "ok": status_counts.get("ok", 0),
+        "release_without_assets": status_counts.get("release_without_assets", 0),
+        "no_release": status_counts.get("no_release", 0),
+        "failed": status_counts.get("failed", 0),
+        "with_assets": sum(1 for row in rows if int(row.get("asset_count") or 0) > 0),
+        "with_preferred_assets": sum(1 for row in rows if int(row.get("preferred_asset_count") or 0) > 0),
+        "install_ready": sum(1 for row in rows if row.get("install_ready")),
+        "needs_hash": sum(1 for row in rows if row.get("install_ready") and row.get("hash_required")),
+        "needs_source_repo_reference": sum(1 for row in rows if row.get("source_repo_fallback")),
+        "candidate_asset_total": sum(int(row.get("preferred_asset_count") or 0) for row in rows),
+        "status_counts": status_counts,
+        "next_step_counts": next_step_counts,
+    }
+
+
+def build_proxy_kernel_release_probe_matrix(db: Session, provider_ids: list[str] | None = None, dry_run: bool = False) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [proxy_kernel_release_probe_matrix_row(db, provider_id, dry_run=dry_run) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.release_probe_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "dry_run": bool(dry_run),
+        "summary": proxy_kernel_release_probe_matrix_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "release_binary_first": True,
+            "hash_required": True,
+            "downloaded": False,
+            "source_repo_root": str(settings.source_repo_dir),
+            "proxy_kernel_root": str(settings.proxy_kernel_dir),
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
         },
     }
 
