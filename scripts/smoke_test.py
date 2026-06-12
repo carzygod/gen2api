@@ -171,6 +171,8 @@ def main() -> None:
         openai_runtime_delivery = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan", headers=headers))
         assert openai_runtime_delivery["object"] == "media2api.proxy_kernel.runtime_delivery_plan" and openai_runtime_delivery["provider_id"] == "openai_web_session", openai_runtime_delivery
         assert {"install_payload_template", "start_payload_template", "source_repo_payload_template"}.issubset(openai_runtime_delivery["runtime"]), openai_runtime_delivery
+        assert openai_runtime_delivery["runtime"]["start_payload_template"]["run_health_check"] is True, openai_runtime_delivery
+        assert "runtime_health_check" in openai_runtime_delivery["commands"], openai_runtime_delivery
         assert openai_runtime_delivery["policy"]["preferred_runtime_source"] == "release_binary" and openai_runtime_delivery["policy"]["read_only"] is True, openai_runtime_delivery
         openai_release_checksums = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/release-checksums?dry_run=true", headers=headers))
         assert openai_release_checksums["object"] == "media2api.proxy_kernel.release_checksums" and openai_release_checksums["provider_id"] == "openai_web_session", openai_release_checksums
@@ -224,6 +226,47 @@ def main() -> None:
         )
         assert routing_apply["object"] == "media2api.proxy_kernel.routing_apply" and routing_apply["no_fake_account_created"] is True, routing_apply
         assert routing_apply["routing_plan"]["enabled_mapping_count"] >= 1, routing_apply
+        class KernelHealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path == "/health":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"status":"ok","object":"runtime.health.smoke"}')
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                return
+
+        health_server = HTTPServer(("127.0.0.1", 0), KernelHealthHandler)
+        health_thread = threading.Thread(target=health_server.serve_forever, daemon=True)
+        health_thread.start()
+        health_base_url = f"http://127.0.0.1:{health_server.server_address[1]}"
+        try:
+            registered_runtime = assert_ok(
+                client.post(
+                    "/v1/admin/proxy-kernels/openai_web_session/register-runtime",
+                    headers=headers,
+                    json={"base_url": health_base_url, "version": "health-smoke", "notes": "health smoke", "update_provider_base_url": True},
+                )
+            )
+            assert registered_runtime["runtime"]["base_url"] == health_base_url, registered_runtime
+            runtime_health = assert_ok(
+                client.post(
+                    "/v1/admin/proxy-kernels/openai_web_session/runtime-health-check",
+                    headers=headers,
+                    json={"sync_provider_base_url": True, "require_running_process": False, "fail_on_health_check": False},
+                )
+            )
+            assert runtime_health["object"] == "media2api.proxy_kernel.runtime_health_check" and runtime_health["ok"] is True, runtime_health
+            assert runtime_health["health_check"]["status"] == "ok" and runtime_health["runtime"]["base_url"] == health_base_url, runtime_health
+        finally:
+            health_server.shutdown()
+            health_server.server_close()
+            health_thread.join(timeout=2)
+            assert_ok(client.post("/v1/admin/proxy-kernels/openai_web_session/clear-runtime", headers=headers))
         runtime_dir = settings.proxy_kernel_dir / "openai_web_session" / "smoke"
         runtime_dir.mkdir(parents=True, exist_ok=True)
         runtime_script = runtime_dir / "sleep_runtime.py"
@@ -243,6 +286,8 @@ def main() -> None:
                         "notes": "smoke controlled runtime",
                         "replace_existing": True,
                         "update_provider_base_url": False,
+                        "run_health_check": False,
+                        "fail_on_health_check": False,
                     },
                 )
             )
@@ -267,6 +312,10 @@ def main() -> None:
             assert admin_control in admin_page.text, admin_control
         for admin_dom in ["wizard-base-url", "wizard-provider-config", "wizard-submit", "wizard-provider-fields", "wizard-credential-label", "wizard-credential-hint", "cookie-provider-fields", "cookie-secret-label", "cookie-secret-hint", "agent-provider-fields", "agent-secret-label", "agent-secret-hint", "oauth-provider-guide", "oauth-guide-provider", "agent_provider_credential", "runtimeEndpointNamesByScope", "syncRuntimeEndpointField", "runtimeEndpointValue", "providerProfileRequirements", "providerCredentialRequirements", "syncCredentialInputHints", "collectProviderProfileFields", "field-hidden", "authorized-session-subnav", "authorized-session-start-pane", "authorized-session-complete-pane", "authorized-session-history-pane", "session-subnav-button", "kernel-provider", "kernel-go-live-all", "kernel-go-live", "kernel-materials-all", "kernel-materials", "kernel-runtime-delivery-all", "kernel-runtime-delivery", "kernel-live-workspace-plan", "kernel-release-probe-matrix", "kernel-release-checksum-matrix", "kernel-install-release-candidates-plan", "kernel-release-checksums", "kernel-install-release-candidate", "kernel-runtime-contract-matrix", "kernel-runtime-contract", "kernel-production-readiness-matrix", "kernel-production-readiness", "kernel-loopback-contract", "kernel-routing-plan-all", "kernel-apply-routing-all", "kernel-routing-plan", "kernel-apply-routing", "kernel-routing-status", "kernel-routing-enable", "kernel-release-tag", "kernel-release-asset", "kernel-release-sha256", "kernel-install-release", "kernel-artifact-path", "kernel-expected-sha256", "kernel-command", "kernel-start-runtime", "kernel-load-logs", "kernel-provider-summary", "kernel-source-provider", "kernel-source-sync", "kernel-source-output", "/v1/admin/proxy-kernels/go-live-checklist", "/go-live-checklist", "/v1/admin/proxy-kernels/runtime-delivery-plan", "/runtime-delivery-plan", "/v1/admin/proxy-kernels/live-workspace", "/live-workspace", "/v1/admin/proxy-kernels/release-probe-matrix", "/release-probe-matrix", "/v1/admin/proxy-kernels/release-checksum-matrix", "/release-checksum-matrix", "/v1/admin/proxy-kernels/install-release-candidates", "/install-release-candidates", "/v1/admin/proxy-kernels/openai_web_session/release-checksums", "/release-checksums", "/v1/admin/proxy-kernels/openai_web_session/install-release-candidate", "/install-release-candidate", "/v1/admin/proxy-kernels/runtime-contract-matrix", "/runtime-contract-matrix", "/v1/admin/proxy-kernels/production-readiness-matrix", "/production-readiness-matrix", "/v1/admin/proxy-kernels/openai_web_session/runtime-contract", "/runtime-contract", "/v1/admin/proxy-kernels/openai_web_session/production-readiness", "/production-readiness", "/v1/admin/proxy-kernels/materials-request", "/materials-request", "/v1/admin/proxy-kernels/loopback-contract-test", "/loopback-contract-test", "/v1/admin/proxy-kernels/routing-plan", "/v1/admin/proxy-kernels/apply-routing", "/routing-plan", "/apply-routing", "/source-repo/sync", "/v1/admin/account-onboarding", "/v1/admin/account-onboarding/bulk", "/v1/admin/authorized-resource-sessions", "/v1/admin/proxy-kernels"]:
             assert admin_dom in admin_page.text, admin_dom
+        for kernel_health_control in ["Runtime 健康检查", "OpenAI Web Runtime 健康检查", "启动后健康检查", "健康失败时"]:
+            assert kernel_health_control in admin_page.text, kernel_health_control
+        for kernel_health_dom in ["kernel-runtime-health", "kernel-run-health", "kernel-fail-on-health", "/v1/admin/proxy-kernels/openai_web_session/runtime-health-check", "/runtime-health-check"]:
+            assert kernel_health_dom in admin_page.text, kernel_health_dom
         for banned_oauth_copy in ["如果该平台没有官方 API Key 或公开 OAuth", "通用第三方连接器", "无公开获取入口", "Google OAuth 2.0 Playground", "https://developers.google.com/oauthplayground/", "https://bailian.console.aliyun.com/", "https://platform.openai.com/api-keys", "OpenAI API Keys", "refresh_token"]:
             assert banned_oauth_copy not in admin_page.text, banned_oauth_copy
         assert "connector.example" not in admin_page.text

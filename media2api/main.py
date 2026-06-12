@@ -1253,6 +1253,14 @@ class ProxyKernelRuntimeStartRequest(BaseModel):
     notes: str = ""
     replace_existing: bool = False
     update_provider_base_url: bool = True
+    run_health_check: bool = False
+    fail_on_health_check: bool = False
+
+
+class ProxyKernelRuntimeHealthCheckRequest(BaseModel):
+    sync_provider_base_url: bool = True
+    require_running_process: bool = False
+    fail_on_health_check: bool = False
 
 
 class ProxyKernelRuntimeStopRequest(BaseModel):
@@ -7345,6 +7353,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/apply-routing"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
@@ -7600,6 +7609,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/apply-routing"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
@@ -13392,6 +13402,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
         ("应用 OpenAI Web 路由", "POST", "/v1/admin/proxy-kernels/openai_web_session/apply-routing"),
         ("OpenAI Web 进程", "GET", "/v1/admin/proxy-kernels/openai_web_session/process"),
+        ("OpenAI Web Runtime 健康检查", "POST", "/v1/admin/proxy-kernels/openai_web_session/runtime-health-check"),
         ("OpenAI Web 日志", "GET", "/v1/admin/proxy-kernels/openai_web_session/logs"),
         ("停止 OpenAI Web Runtime", "POST", "/v1/admin/proxy-kernels/openai_web_session/stop-runtime"),
         ("账号添加指南", "GET", "/v1/admin/account-guides"),
@@ -14009,6 +14020,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-runtime-contract">运行合同</button>
                   <button class="op" type="button" id="kernel-production-readiness">生产就绪</button>
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
+                  <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
                   <button class="op" type="button" id="kernel-materials">查看材料清单</button>
@@ -14056,7 +14068,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <div class="formline" style="margin-top:10px">
                     <div><label>替换运行中进程</label><select id="kernel-replace-existing"><option value="true">是，先停后启</option><option value="false">否，已运行则报错</option></select></div>
                     <div><label>同步 provider base_url</label><select id="kernel-update-provider"><option value="true">同步</option><option value="false">只启动进程</option></select></div>
+                    <div><label>启动后健康检查</label><select id="kernel-run-health"><option value="true">运行</option><option value="false">跳过</option></select></div>
+                  </div>
+                  <div class="formline" style="margin-top:10px">
+                    <div><label>健康失败时</label><select id="kernel-fail-on-health"><option value="false">只记录结果</option><option value="true">返回错误</option></select></div>
                     <div><label>备注</label><input id="kernel-notes" placeholder="OAI-WEB-01 verified release" /></div>
+                    <div></div>
                     <button class="primary" type="button" id="kernel-start-runtime">启动 Runtime</button>
                   </div>
                 </div>
@@ -14452,6 +14469,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const runtimeContract = hint.runtime_contract || {{}};
           const productionReadiness = hint.production_readiness || {{}};
           const liveWorkspace = hint.live_workspace || {{}};
+          const runtimeHealth = hint.runtime_health_check || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14470,6 +14488,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>运行合同</dt><dd>${{escapeHtml(runtimeContract.status || '未读取')}}${{runtimeContract.next_action ? ' · 下一步：' + escapeHtml(runtimeContract.next_action) : ''}}</dd>
               <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
               <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
+              <dt>Runtime 健康</dt><dd>${{runtimeHealth.health_check ? escapeHtml(runtimeHealth.health_check.status || (runtimeHealth.ok ? 'ok' : 'failed')) : '未检查'}}${{runtimeHealth.health_check?.message ? ' · ' + escapeHtml(runtimeHealth.health_check.message) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>交付计划</dt><dd>${{escapeHtml(runtimePlan.status || '未读取')}}${{runtimePlan.next_step?.label ? ' · 下一步：' + escapeHtml(runtimePlan.next_step.label) : ''}}</dd>
@@ -14990,9 +15009,32 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             env: kernelEnv(),
             replace_existing: document.getElementById('kernel-replace-existing')?.value === 'true',
             update_provider_base_url: document.getElementById('kernel-update-provider')?.value !== 'false',
+            run_health_check: document.getElementById('kernel-run-health')?.value !== 'false',
+            fail_on_health_check: document.getElementById('kernel-fail-on-health')?.value === 'true',
           }};
-          await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/start-runtime', 'POST', body);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/start-runtime', 'POST', body);
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            process: payload.process || kernelHint(provider).process || {{}},
+            runtime_base_url: payload.runtime?.base_url || kernelHint(provider).runtime_base_url || '',
+            runtime_registered: Boolean(payload.runtime?.base_url || kernelHint(provider).runtime_registered),
+            runtime_health_check: payload.runtime_health_check || kernelHint(provider).runtime_health_check || {{}},
+          }});
           await refreshKernel(provider);
+        }}
+        async function checkKernelRuntimeHealth(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-health-check', 'POST', {{
+            sync_provider_base_url: true,
+            require_running_process: false,
+            fail_on_health_check: false,
+          }});
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            runtime_health_check: payload,
+            runtime_base_url: payload.runtime?.base_url || kernelHint(provider).runtime_base_url || '',
+          }});
+          renderKernelSummary(provider);
+          return payload;
         }}
         async function loadKernelLogs() {{
           const provider = document.getElementById('kernel-log-provider')?.value || selectedKernelProvider();
@@ -15481,6 +15523,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-production-readiness')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelProductionReadiness();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-runtime-health')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await checkKernelRuntimeHealth();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -19731,6 +19779,54 @@ def sync_proxy_kernel_provider_base_url(db: Session, provider_id: str, base_url:
     return provider
 
 
+def run_proxy_kernel_runtime_health_check(
+    db: Session,
+    provider_id: str,
+    *,
+    sync_provider_base_url_value: bool = True,
+    require_running_process: bool = False,
+    fail_on_health_check: bool = False,
+) -> dict[str, Any]:
+    proxy_kernel_service.require_spec(provider_id)
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    runtime_base_url = str(kernel.get("runtime_base_url") or "").strip().rstrip("/")
+    if not runtime_base_url:
+        raise ValueError("LOOPBACK_RUNTIME_NOT_REGISTERED")
+    if not proxy_kernel_service.is_loopback_url(runtime_base_url):
+        raise ValueError("LOOPBACK_RUNTIME_REQUIRED")
+    process = proxy_kernel_service.process_status(provider_id)
+    if require_running_process and not process.get("running"):
+        raise ValueError("KERNEL_PROCESS_NOT_RUNNING")
+    provider = db.get(models.Provider, provider_id)
+    if sync_provider_base_url_value:
+        provider = sync_proxy_kernel_provider_base_url(db, provider_id, runtime_base_url)
+    elif not provider:
+        raise ValueError("PROVIDER_NOT_INITIALIZED")
+    health = run_provider_health_check_preserve_active(db, provider)
+    ok = health.get("status") == "ok"
+    if fail_on_health_check and not ok:
+        raise ValueError("RUNTIME_HEALTH_CHECK_FAILED")
+    return {
+        "object": "media2api.proxy_kernel.runtime_health_check",
+        "provider_id": provider_id,
+        "ok": bool(ok),
+        "runtime": {
+            "base_url": runtime_base_url,
+            "loopback_only": True,
+            "registered": True,
+        },
+        "process": process,
+        "provider": serialize_provider(provider),
+        "health_check": health,
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "uses_provider_health_record": True,
+        },
+    }
+
+
 def proxy_kernel_mapping_template_payload(provider_id: str, item: Any, priority_offset: int = 0) -> dict[str, Any]:
     return {
         "id": f"{item.logical_model}:{provider_id}:{item.provider_model}",
@@ -20395,6 +20491,8 @@ def build_proxy_kernel_materials_request(db: Session, provider_id: str) -> dict[
                 {"name": "base_url", "required": True},
                 {"name": "artifact_path", "required": True},
                 {"name": "expected_sha256", "required": True},
+                {"name": "run_health_check", "required": False, "default": True},
+                {"name": "fail_on_health_check", "required": False, "default": False},
             ],
             "source_repo_fallback": (kernel.get("spec") or {}).get("source_repo_policy", {}),
             "install_policy": (kernel.get("spec") or {}).get("install_policy", {}),
@@ -20558,6 +20656,8 @@ def build_proxy_kernel_runtime_delivery_plan(db: Session, provider_id: str) -> d
         "notes": f"{kernel.get('selection_id') or provider_id} verified release",
         "replace_existing": True,
         "update_provider_base_url": True,
+        "run_health_check": True,
+        "fail_on_health_check": False,
     }
     install_payload = {
         "tag_name": str(installed.get("tag_name") or "vX.Y.Z"),
@@ -20624,6 +20724,7 @@ def build_proxy_kernel_runtime_delivery_plan(db: Session, provider_id: str) -> d
             "release_probe": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/release-probe",
             "install_release": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/install-release -d '{json.dumps(install_payload, ensure_ascii=False, separators=(',', ':'))}'",
             "start_runtime": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/start-runtime -d '{json.dumps(start_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "runtime_health_check": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-health-check -d '{{\"sync_provider_base_url\":true,\"require_running_process\":false,\"fail_on_health_check\":false}}'",
             "source_repo_sync": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/source-repo/sync -d '{json.dumps(source_payload, ensure_ascii=False, separators=(',', ':'))}'",
             "account_guide": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/account-guides/{provider_id}",
         },
@@ -22591,7 +22692,46 @@ def admin_proxy_kernel_start_runtime(
     if req.update_provider_base_url:
         provider = sync_proxy_kernel_provider_base_url(db, provider_id, req.base_url)
         result["provider"] = serialize_provider(provider)
+    if req.run_health_check:
+        try:
+            result["runtime_health_check"] = run_proxy_kernel_runtime_health_check(
+                db,
+                provider_id,
+                sync_provider_base_url_value=req.update_provider_base_url,
+                require_running_process=False,
+                fail_on_health_check=req.fail_on_health_check,
+            )
+        except ValueError as exc:
+            result["runtime_health_check"] = {
+                "object": "media2api.proxy_kernel.runtime_health_check",
+                "provider_id": provider_id,
+                "ok": False,
+                "error": str(exc),
+            }
+            if req.fail_on_health_check:
+                raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "runtime was started but health check failed"}) from exc
     return result
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/runtime-health-check")
+def admin_proxy_kernel_runtime_health_check(
+    provider_id: str,
+    req: ProxyKernelRuntimeHealthCheckRequest = ProxyKernelRuntimeHealthCheckRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return run_proxy_kernel_runtime_health_check(
+            db,
+            provider_id,
+            sync_provider_base_url_value=req.sync_provider_base_url,
+            require_running_process=req.require_running_process,
+            fail_on_health_check=req.fail_on_health_check,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "runtime health checks require a registered loopback runtime and provider health endpoint"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/stop-runtime")
