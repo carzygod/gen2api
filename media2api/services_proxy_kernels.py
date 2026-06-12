@@ -10,6 +10,7 @@ import re
 import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import time
 from typing import Any
@@ -847,6 +848,271 @@ class ProxyKernelRuntimeService:
         owner, repo = spec.repo.split("/", 1)
         slug = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{owner}__{repo}").strip("-")
         return (self.source_root / slug).resolve()
+
+    def default_runtime_base_url(self, provider_id: str) -> str:
+        try:
+            index = finalized_kernel_provider_ids().index(provider_id)
+        except ValueError:
+            index = 0
+        return f"http://127.0.0.1:{19081 + index}"
+
+    def source_runtime_plan(self, provider_id: str, base_url: str = "") -> dict[str, Any]:
+        spec = self.require_spec(provider_id)
+        source = self.source_repo_status(provider_id)
+        repo_path = self.source_repo_path(spec)
+        url = (base_url or self.default_runtime_base_url(provider_id)).strip().rstrip("/")
+        host, port = self.host_port_from_base_url(url)
+        dependency_commands: list[dict[str, Any]] = []
+        build_commands: list[dict[str, Any]] = []
+        start_candidates: list[dict[str, Any]] = []
+        detected: list[str] = []
+        files: dict[str, bool] = {}
+        if repo_path.exists():
+            files = {
+                "package_json": (repo_path / "package.json").exists(),
+                "package_lock": (repo_path / "package-lock.json").exists(),
+                "pnpm_lock": (repo_path / "pnpm-lock.yaml").exists(),
+                "yarn_lock": (repo_path / "yarn.lock").exists(),
+                "pyproject": (repo_path / "pyproject.toml").exists(),
+                "uv_lock": (repo_path / "uv.lock").exists(),
+                "requirements": (repo_path / "requirements.txt").exists(),
+                "go_mod": (repo_path / "go.mod").exists(),
+                "dockerfile": (repo_path / "Dockerfile").exists(),
+            }
+        if files.get("package_json"):
+            detected.append("node")
+            package = self.load_json_file(repo_path / "package.json")
+            scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
+            package_manager = "pnpm" if files.get("pnpm_lock") else "yarn" if files.get("yarn_lock") else "npm"
+            install_command = [package_manager, "install"]
+            if package_manager == "npm" and files.get("package_lock"):
+                install_command = ["npm", "ci"]
+            dependency_commands.append({"id": f"{package_manager}_install", "command": install_command, "cwd": str(repo_path)})
+            if "build" in scripts:
+                build_commands.append({"id": f"{package_manager}_build", "command": [package_manager, "run", "build"], "cwd": str(repo_path)})
+            for script_name in ("start", "server", "api", "dev"):
+                if script_name in scripts:
+                    start_candidates.append({
+                        "id": f"{package_manager}_{script_name}",
+                        "command": [package_manager, "run", script_name],
+                        "cwd": str(repo_path),
+                        "env": {"HOST": host, "PORT": port, "BASE_URL": url},
+                        "reason": f"package.json contains scripts.{script_name}",
+                    })
+            main_file = str(package.get("main") or "").strip()
+            if main_file and (repo_path / main_file).exists():
+                start_candidates.append({
+                    "id": "node_main",
+                    "command": ["node", main_file],
+                    "cwd": str(repo_path),
+                    "env": {"HOST": host, "PORT": port, "BASE_URL": url},
+                    "reason": "package.json main exists",
+                })
+        if files.get("pyproject") or files.get("requirements") or files.get("uv_lock"):
+            detected.append("python")
+            if files.get("uv_lock"):
+                dependency_commands.append({"id": "uv_sync", "command": ["uv", "sync"], "cwd": str(repo_path)})
+                python_prefix = ["uv", "run", "python"]
+            else:
+                dependency_commands.append({"id": "pip_install_editable", "command": [sys.executable, "-m", "pip", "install", "-e", "."], "cwd": str(repo_path)})
+                python_prefix = [sys.executable]
+            if (repo_path / "main.py").exists():
+                start_candidates.append({
+                    "id": "python_main",
+                    "command": [*python_prefix, "main.py"],
+                    "cwd": str(repo_path),
+                    "env": {"HOST": host, "PORT": port, "BASE_URL": url},
+                    "reason": "main.py exists",
+                })
+            if (repo_path / "cli.py").exists():
+                start_candidates.append({
+                    "id": "python_cli",
+                    "command": [*python_prefix, "cli.py"],
+                    "cwd": str(repo_path),
+                    "env": {"HOST": host, "PORT": port, "BASE_URL": url},
+                    "reason": "cli.py exists",
+                })
+            for app_entry in ("app/main.py", "api/main.py", "src/main.py"):
+                if (repo_path / app_entry).exists():
+                    module = app_entry.replace("/", ".").removesuffix(".py")
+                    start_candidates.append({
+                        "id": f"uvicorn_{module.replace('.', '_')}",
+                        "command": [*python_prefix, "-m", "uvicorn", f"{module}:app", "--host", host, "--port", port],
+                        "cwd": str(repo_path),
+                        "env": {"HOST": host, "PORT": port, "BASE_URL": url},
+                        "reason": f"{app_entry} exists",
+                    })
+        if files.get("go_mod"):
+            detected.append("go")
+            build_output = self.root / provider_id / "source-build" / "runner"
+            build_commands.append({"id": "go_build", "command": ["go", "build", "-o", str(build_output), "."], "cwd": str(repo_path)})
+            start_candidates.append({
+                "id": "go_run",
+                "command": ["go", "run", "."],
+                "cwd": str(repo_path),
+                "env": {"HOST": host, "PORT": port, "BASE_URL": url},
+                "reason": "go.mod exists; build a fixed binary before production start when possible",
+            })
+        if files.get("dockerfile"):
+            detected.append("docker")
+            build_commands.append({"id": "docker_build_reference", "command": ["docker", "build", "-t", f"media2api-{provider_id}", "."], "cwd": str(repo_path), "reference_only": True})
+        preferred = start_candidates[0] if start_candidates else {}
+        return {
+            "object": "media2api.proxy_kernel.source_runtime_plan",
+            "provider_id": provider_id,
+            "selection_id": spec.selection_id,
+            "repo": spec.repo,
+            "repo_url": spec.repo_url,
+            "base_url": url,
+            "host": host,
+            "port": port,
+            "source_repo": source,
+            "source_available": bool(source.get("exists") and source.get("is_git_repo")),
+            "detected_project_types": sorted(set(detected)),
+            "files": files,
+            "dependency_commands": dependency_commands,
+            "build_commands": build_commands,
+            "start_command_candidates": start_candidates,
+            "preferred_start_command": preferred,
+            "launcher_payload_template": {
+                "dry_run": True,
+                "base_url": url,
+                "command": preferred.get("command") or [],
+                "cwd": preferred.get("cwd") or str(repo_path),
+                "env": preferred.get("env") or {"HOST": host, "PORT": port, "BASE_URL": url},
+                "version": f"source:{source.get('head') or source.get('current_ref') or 'unversioned'}",
+                "notes": "Generated from source-runtime-plan; install dependencies before starting.",
+            },
+            "policy": {
+                "read_only": True,
+                "release_binary_first": True,
+                "source_repo_only_when_needed": True,
+                "official_sdk_api": "forbidden",
+                "third_party_public_service": "forbidden",
+                "launcher_listener": "loopback_only",
+                "shell": "forbidden",
+            },
+        }
+
+    def prepare_source_runtime_launcher(
+        self,
+        provider_id: str,
+        base_url: str,
+        command: list[str] | None = None,
+        cwd: str = "",
+        env: dict[str, str] | None = None,
+        version: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        spec = self.require_spec(provider_id)
+        plan = self.source_runtime_plan(provider_id, base_url=base_url)
+        if not plan.get("source_available"):
+            raise ValueError("SOURCE_REPO_NOT_READY")
+        url = (base_url or plan.get("base_url") or "").strip().rstrip("/")
+        if not self.is_loopback_url(url):
+            raise ValueError("LOOPBACK_RUNTIME_REQUIRED")
+        selected_command = command or (plan.get("preferred_start_command") or {}).get("command") or []
+        if not selected_command or not all(isinstance(item, str) and item.strip() for item in selected_command):
+            raise ValueError("SOURCE_RUNTIME_COMMAND_REQUIRED")
+        repo_root = self.source_repo_path(spec).resolve()
+        workdir = Path(cwd or str((plan.get("preferred_start_command") or {}).get("cwd") or repo_root)).expanduser().resolve()
+        if not self.path_within(workdir, repo_root):
+            raise ValueError("SOURCE_RUNTIME_CWD_OUTSIDE_SOURCE_REPO")
+        launcher_env = {str(key): str(value) for key, value in (env or (plan.get("preferred_start_command") or {}).get("env") or {}).items() if str(key)}
+        launch_root = self.root / provider_id / "source-launchers"
+        launch_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        launcher_path = launch_root / f"{stamp}-launcher.py"
+        launcher_payload = {
+            "provider_id": provider_id,
+            "selection_id": spec.selection_id,
+            "repo": spec.repo,
+            "command": selected_command,
+            "cwd": str(workdir),
+            "env": launcher_env,
+            "base_url": url,
+            "notes": notes,
+        }
+        launcher_path.write_text(
+            "\n".join([
+                "#!/usr/bin/env python3",
+                "import json, os, signal, subprocess, sys",
+                f"PAYLOAD = json.loads({json.dumps(json.dumps(launcher_payload, ensure_ascii=False), ensure_ascii=True)})",
+                "child_env = os.environ.copy()",
+                "child_env.update({str(k): str(v) for k, v in PAYLOAD.get('env', {}).items()})",
+                "process = subprocess.Popen(PAYLOAD['command'], cwd=PAYLOAD['cwd'], env=child_env, stdin=subprocess.DEVNULL, shell=False)",
+                "def _stop(signum, frame):",
+                "    if process.poll() is None:",
+                "        process.terminate()",
+                "signal.signal(signal.SIGTERM, _stop)",
+                "signal.signal(signal.SIGINT, _stop)",
+                "sys.exit(process.wait())",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+        try:
+            launcher_path.chmod(0o755)
+        except OSError:
+            pass
+        sha256 = self.file_sha256(launcher_path)
+        state = self.load_state()
+        entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        entry["source_launcher"] = {
+            "path": str(launcher_path),
+            "sha256": sha256,
+            "command": selected_command,
+            "cwd": str(workdir),
+            "env_keys": sorted(launcher_env.keys()),
+            "base_url": url,
+            "version": version or f"source:{plan.get('source_repo', {}).get('head') or 'unversioned'}",
+            "notes": notes,
+            "created_at": self.utcnow(),
+        }
+        self.save_state(state)
+        return {
+            "object": "media2api.proxy_kernel.source_runtime_launcher",
+            "provider_id": provider_id,
+            "selection_id": spec.selection_id,
+            "launcher": entry["source_launcher"],
+            "source_runtime_plan": plan,
+            "start_payload_template": {
+                "command": [sys.executable, str(launcher_path)],
+                "base_url": url,
+                "artifact_path": str(launcher_path),
+                "expected_sha256": sha256,
+                "cwd": str(launcher_path.parent),
+                "env": {},
+                "version": entry["source_launcher"]["version"],
+                "notes": notes or "source-repo launcher; dependencies must be installed in source-repo",
+                "replace_existing": True,
+                "run_health_check": True,
+                "fail_on_health_check": False,
+            },
+            "policy": {
+                "release_binary_first": True,
+                "source_repo_only_when_needed": True,
+                "hash_required": True,
+                "launcher_artifact_under_proxy_kernel_dir": True,
+                "official_sdk_api": "forbidden",
+                "third_party_public_service": "forbidden",
+                "shell": "forbidden",
+                "managed_runtime_listener": "loopback_only",
+            },
+        }
+
+    def load_json_file(self, path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def host_port_from_base_url(self, value: str) -> tuple[str, str]:
+        parsed = urlparse(value)
+        host = parsed.hostname or "127.0.0.1"
+        port = str(parsed.port or (443 if parsed.scheme == "https" else 80))
+        return host, port
 
     def run_git(self, cwd: Path, args: list[str], timeout: int = 120) -> str:
         try:

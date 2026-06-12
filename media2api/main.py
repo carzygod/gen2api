@@ -1315,6 +1315,16 @@ class ProxyKernelBulkSourceRepoSyncRequest(ProxyKernelSourceRepoSyncRequest):
     continue_on_error: bool = True
 
 
+class ProxyKernelSourceRuntimeLauncherRequest(BaseModel):
+    dry_run: bool = True
+    base_url: str = ""
+    command: list[str] = Field(default_factory=list)
+    cwd: str = ""
+    env: dict[str, str] = Field(default_factory=dict)
+    version: str = ""
+    notes: str = ""
+
+
 class ProxyKernelRoutingApplyRequest(BaseModel):
     status: str = "active"
     enable_mappings: bool = True
@@ -7414,6 +7424,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/source-repo/sync"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher"),
     ("GET", "/v1/admin/account-guides"),
     ("GET", "/v1/admin/account-guides/{provider_id}"),
     ("POST", "/v1/admin/account-onboarding/plan"),
@@ -7675,6 +7687,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher"),
             ],
             proxy_kernel_service.list_kernels(db)["summary"],
             action_items=[{"check": "proxy_kernel_runtime", "detail": {"message": "Import real accounts and register verified loopback runtimes before marking providers production usable."}}],
@@ -14184,6 +14198,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-source-status">查看源码状态</button>
                   <button class="op" type="button" id="kernel-source-sync-needed-plan">source-repo 缺口计划</button>
                   <button class="primary" type="button" id="kernel-source-sync-needed">同步需要源码参考</button>
+                  <button class="op" type="button" id="kernel-source-runtime-plan">源码运行计划</button>
+                  <button class="op" type="button" id="kernel-source-runtime-launcher">生成启动器 dry-run</button>
                 </div>
               </div>
               <div class="kernel-rail">
@@ -14549,6 +14565,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const releaseProbe = hint.release_probe || {{}};
           const releaseChecksums = hint.release_checksums || {{}};
           const sourceSync = hint.source_repo_sync || {{}};
+          const sourceRuntimePlan = hint.source_runtime_plan || {{}};
+          const sourceRuntimeLauncher = hint.source_runtime_launcher || {{}};
           const runtimeContract = hint.runtime_contract || {{}};
           const productionReadiness = hint.production_readiness || {{}};
           const liveWorkspace = hint.live_workspace || {{}};
@@ -14584,6 +14602,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>材料清单</dt><dd>${{escapeHtml(materials.status || '未读取')}}${{materials.next_step?.label ? ' · 下一步：' + escapeHtml(materials.next_step.label) : ''}}</dd>
               <dt>source-repo</dt><dd class="kernel-path-note">${{source.exists ? escapeHtml(source.path || '已同步') : escapeHtml(source.path || '未同步')}}</dd>
               <dt>源码兜底</dt><dd>${{escapeHtml(sourceSync.status || '未计划')}}${{sourceSync.reason ? ' · ' + escapeHtml(sourceSync.reason) : ''}}</dd>
+              <dt>源码运行</dt><dd>${{escapeHtml((sourceRuntimePlan.detected_project_types || []).join(', ') || '未识别')}}${{sourceRuntimeLauncher.launcher?.path ? ' · 启动器已生成' : ''}}</dd>
             </dl>
             ${{blockerHtml}}
           `;
@@ -14735,6 +14754,39 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const output = document.getElementById('kernel-source-output') || result;
           if (output) output.textContent = JSON.stringify(response, null, 2);
           renderKernelSummary(selectedKernelProvider());
+          return response;
+        }}
+        async function loadKernelSourceRuntimePlan(providerId = null) {{
+          const provider = providerId || document.getElementById('kernel-source-provider')?.value || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const baseUrl = document.getElementById('kernel-base-url')?.value.trim() || '';
+          const suffix = baseUrl ? '?base_url=' + encodeURIComponent(baseUrl) : '';
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/source-runtime-plan' + suffix);
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{ source_runtime_plan: payload }});
+          const output = document.getElementById('kernel-source-output') || result;
+          if (output) output.textContent = JSON.stringify(payload, null, 2);
+          renderKernelSummary(provider);
+          return payload;
+        }}
+        async function prepareKernelSourceRuntimeLauncher(dryRun = true) {{
+          const provider = document.getElementById('kernel-source-provider')?.value || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const plan = kernelHint(provider).source_runtime_plan || await loadKernelSourceRuntimePlan(provider);
+          const template = plan.launcher_payload_template || {{}};
+          const payload = {{
+            dry_run: Boolean(dryRun),
+            base_url: document.getElementById('kernel-base-url')?.value.trim() || template.base_url || '',
+            command: template.command || [],
+            cwd: template.cwd || '',
+            env: template.env || {{}},
+            version: template.version || '',
+            notes: template.notes || 'source-repo launcher',
+          }};
+          const response = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/source-runtime-launcher', 'POST', payload);
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{ source_runtime_launcher: response }});
+          const output = document.getElementById('kernel-source-output') || result;
+          if (output) output.textContent = JSON.stringify(response, null, 2);
+          renderKernelSummary(provider);
           return response;
         }}
         async function loadKernelRoutingPlan(providerId = null) {{
@@ -15880,6 +15932,18 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-source-sync-needed')?.addEventListener('click', async () => {{
           try {{
             const payload = await syncNeededKernelSourceRepos(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-runtime-plan')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelSourceRuntimePlan();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-runtime-launcher')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await prepareKernelSourceRuntimeLauncher(true);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -23825,6 +23889,59 @@ def admin_proxy_kernel_source_repo_sync(
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc), "source_repo_policy": "only finalized kernel repositories may be cloned into source-repo"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan")
+def admin_proxy_kernel_source_runtime_plan(
+    provider_id: str,
+    base_url: str = "",
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.source_runtime_plan(provider_id, base_url=base_url)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher")
+def admin_proxy_kernel_source_runtime_launcher(
+    provider_id: str,
+    req: ProxyKernelSourceRuntimeLauncherRequest,
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        plan = proxy_kernel_service.source_runtime_plan(provider_id, base_url=req.base_url)
+        if req.dry_run:
+            return {
+                "object": "media2api.proxy_kernel.source_runtime_launcher",
+                "provider_id": provider_id,
+                "dry_run": True,
+                "source_runtime_plan": plan,
+                "launcher": {},
+                "start_payload_template": plan.get("launcher_payload_template") or {},
+                "policy": {
+                    "read_only": True,
+                    "release_binary_first": True,
+                    "source_repo_only_when_needed": True,
+                    "official_sdk_api": "forbidden",
+                    "third_party_public_service": "forbidden",
+                    "shell": "forbidden",
+                    "managed_runtime_listener": "loopback_only",
+                },
+            }
+        return proxy_kernel_service.prepare_source_runtime_launcher(
+            provider_id,
+            base_url=req.base_url,
+            command=req.command,
+            cwd=req.cwd,
+            env=req.env,
+            version=req.version,
+            notes=req.notes,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "source_runtime_policy": "source repo must be synced from the finalized allowlist, launcher artifacts are hash-verified under MEDIA2API_PROXY_KERNEL_DIR, and runtime base_url must be loopback"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/clear-runtime")

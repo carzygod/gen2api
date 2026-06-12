@@ -192,7 +192,10 @@ to hand-write JSON for routine runtime start/stop checks. Runtime onboarding
 prefers fixed release binaries with explicit SHA256 verification. Full source
 repositories are synced into `source-repo/` only when release assets are
 missing, protocol details must be inspected, local builds are unavoidable, or
-an adapter rewrite needs reference code.
+an adapter rewrite needs reference code. Synced source repositories can be
+inspected for Node/Go/Python/Docker runtime commands, then wrapped in a
+SHA256-recorded launcher artifact under `MEDIA2API_PROXY_KERNEL_DIR`; the
+launcher still runs through the same loopback-only `start-runtime` gate.
 
 In the proxy-kernel dashboard, "可直接用" is intentionally strict: route
 mappings, a loopback runtime, real account material, runtime health, and live
