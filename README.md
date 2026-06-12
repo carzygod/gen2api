@@ -13,8 +13,11 @@ authorized HTTP connectors, sidecars, or third-party aggregator adapters.
 
 ## Current Status
 
-The deployed platform is core-ready and stability-ready. Production readiness
-still requires at least one authorized non-mock mixed-media connector/account
+The deployed platform is core-ready after fake/demo data is cleared. Core-ready
+means the API gateway, route catalog, model mappings, runtime, asset storage,
+admin workbench, billing, governance, and proxy-kernel onboarding flow are
+available. Production readiness still requires at least one authorized non-mock
+mixed-media connector/account plus a loopback runtime and live sample evidence
 that covers all production operations:
 
 - `text_to_image`
