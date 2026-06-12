@@ -941,13 +941,50 @@ curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/inst
   -d '{"asset_name":"example-linux-amd64.tar.gz","expected_sha256":"64位十六进制sha256"}'
 ```
 
-启动已校验的执行器后，只能登记 loopback 地址：
+如果执行器已经由你手工启动，只能登记 loopback 地址：
 
 ```bash
 curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/register-runtime" \
   -H "Authorization: Bearer $MEDIA2API_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"base_url":"http://127.0.0.1:19081","version":"vX.Y.Z","sha256":"64位十六进制sha256"}'
+```
+
+如果希望由平台受控启动 release 资产，使用 `start-runtime`。`command` 必须是参数数组，`artifact_path` 必须位于 `MEDIA2API_PROXY_KERNEL_DIR` 下，并且必须出现在 `command` 中：
+
+```bash
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/start-runtime" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "command": [
+      "/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/example-linux-amd64",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "19081"
+    ],
+    "base_url": "http://127.0.0.1:19081",
+    "artifact_path": "/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/example-linux-amd64",
+    "expected_sha256": "64位十六进制sha256",
+    "version": "vX.Y.Z",
+    "replace_existing": true
+  }'
+```
+
+查看和停止平台受控的执行器：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/process" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/logs?stream=stderr&max_bytes=12000" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl -X POST "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/stop-runtime" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"grace_seconds":5}'
 ```
 
 ## 12. 生产可用性检查
@@ -1021,7 +1058,7 @@ curl "$MEDIA2API_BASE_URL/v1/admin/final-acceptance-matrix" \
 | Dashboard | `/v1/admin/dashboard`、`/v1/admin/analytics` |
 | Readiness | `/v1/admin/readiness`、`/v1/admin/final-acceptance-matrix`、`/v1/admin/delivery-package` |
 | Connector | `/v1/admin/connector-registry`、`/v1/admin/external-connector-manifest`、`/v1/admin/connector-conformance-report` |
-| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
+| Proxy Kernel | `/v1/admin/proxy-kernels`、`/v1/admin/proxy-kernels/{provider_id}/release-probe`、`/v1/admin/proxy-kernels/{provider_id}/start-runtime`、`/v1/admin/proxy-kernels/{provider_id}/process`、`/v1/admin/proxy-kernels/{provider_id}/logs`、`/v1/admin/proxy-kernels/{provider_id}/register-runtime` |
 | Account | `/v1/admin/account-onboarding`、`/v1/admin/account-setup-quickstart`、`/v1/admin/accounts/*` |
 | Provider | `/v1/admin/providers/*`、`/v1/admin/provider-templates/*`、`/v1/admin/provider-capabilities` |
 | Model | `/v1/admin/logical-models`、`/v1/admin/model-mappings` |

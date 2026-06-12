@@ -173,6 +173,11 @@ Detailed selection documents:
 - [Finalized reverse proxy kernel selection](docs/反代内核仓库选型定型文档.md)
 - [Reverse proxy kernel runtime guide](docs/反代内核运行时接入指南.md)
 
+The admin API exposes the runtime lifecycle through
+`/v1/admin/proxy-kernels`: release probing, SHA256-verified installation,
+loopback runtime registration, controlled subprocess start/stop, process
+status, and stdout/stderr log inspection.
+
 ## Local Development
 
 ```powershell

@@ -4,8 +4,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
+import subprocess
+import time
 from typing import Any
 import urllib.error
 import urllib.request
@@ -238,6 +242,8 @@ class ProxyKernelRuntimeService:
         runtime_registered = bool(base_url)
         installed = state.get("install", {})
         installed_verified = bool(installed.get("sha256") and installed.get("expected_sha256") == installed.get("sha256"))
+        process = self.process_status(provider_id)
+        managed_process_configured = bool(process.get("pid"))
         blockers: list[dict[str, Any]] = []
         if not provider:
             blockers.append({"code": "PROVIDER_NOT_INITIALIZED", "message": "Import a real account or register the provider template first."})
@@ -247,6 +253,8 @@ class ProxyKernelRuntimeService:
             blockers.append({"code": "NO_LOOPBACK_RUNTIME", "message": "Register a verified loopback runtime or complete a native adapter rewrite."})
         if installed and not installed_verified:
             blockers.append({"code": "KERNEL_HASH_NOT_VERIFIED", "message": "Installed artifact hash does not match the expected SHA256."})
+        if managed_process_configured and not process.get("running"):
+            blockers.append({"code": "KERNEL_PROCESS_STOPPED", "message": "Managed kernel process is not running."})
         return {
             "object": "media2api.proxy_kernel",
             "provider_id": provider_id,
@@ -260,8 +268,9 @@ class ProxyKernelRuntimeService:
             "runtime_loopback_only": self.is_loopback_url(base_url) if base_url else False,
             "installed": installed,
             "installed_verified": installed_verified,
+            "process": process,
             "state": state,
-            "usable": bool(provider and active_accounts and runtime_registered and (not installed or installed_verified)),
+            "usable": bool(provider and active_accounts and runtime_registered and (not installed or installed_verified) and (not managed_process_configured or process.get("running"))),
             "blockers": blockers,
         }
 
@@ -410,9 +419,236 @@ class ProxyKernelRuntimeService:
         self.require_spec(provider_id)
         state = self.load_state()
         entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        process = entry.get("process") if isinstance(entry.get("process"), dict) else {}
+        pid = int(process.get("pid") or 0)
+        if pid and self.pid_running(pid):
+            self.stop_runtime(provider_id, grace_seconds=5)
+            state = self.load_state()
+            entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
         entry.pop("runtime", None)
+        entry.pop("process", None)
         self.save_state(state)
         return {"object": "media2api.proxy_kernel.runtime", "provider_id": provider_id, "runtime": {}}
+
+    def start_runtime(
+        self,
+        provider_id: str,
+        command: list[str],
+        base_url: str,
+        artifact_path: str = "",
+        expected_sha256: str = "",
+        cwd: str = "",
+        env: dict[str, str] | None = None,
+        version: str = "",
+        notes: str = "",
+        replace_existing: bool = False,
+    ) -> dict[str, Any]:
+        self.require_spec(provider_id)
+        if not command or not all(isinstance(item, str) and item.strip() for item in command):
+            raise ValueError("COMMAND_REQUIRED")
+        url = (base_url or "").strip().rstrip("/")
+        if not self.is_loopback_url(url):
+            raise ValueError("LOOPBACK_RUNTIME_REQUIRED")
+        current = self.process_status(provider_id)
+        if current.get("running") and not replace_existing:
+            raise ValueError("KERNEL_PROCESS_ALREADY_RUNNING")
+        if current.get("running"):
+            self.stop_runtime(provider_id, grace_seconds=5)
+
+        artifact = self.resolve_start_artifact(provider_id, artifact_path, expected_sha256, command)
+        workdir = self.resolve_cwd(provider_id, cwd, artifact)
+        log_dir = self.root / provider_id / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        stdout_path = log_dir / f"{stamp}-stdout.log"
+        stderr_path = log_dir / f"{stamp}-stderr.log"
+        child_env = dict(os.environ)
+        for key, value in (env or {}).items():
+            if isinstance(key, str) and key:
+                child_env[key] = str(value)
+        with stdout_path.open("ab") as stdout_file, stderr_path.open("ab") as stderr_file:
+            popen_kwargs: dict[str, Any] = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            process = subprocess.Popen(
+                command,
+                cwd=str(workdir),
+                env=child_env,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                stdin=subprocess.DEVNULL,
+                shell=False,
+                **popen_kwargs,
+            )
+        time.sleep(0.2)
+        running = self.pid_running(process.pid)
+        state = self.load_state()
+        entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        entry["runtime"] = {
+            "base_url": url,
+            "version": version,
+            "binary_path": str(artifact["path"]),
+            "sha256": artifact["sha256"],
+            "notes": notes,
+            "registered_at": self.utcnow(),
+            "loopback_only": True,
+        }
+        entry["process"] = {
+            "pid": process.pid,
+            "command": command,
+            "cwd": str(workdir),
+            "artifact_path": str(artifact["path"]),
+            "artifact_sha256": artifact["sha256"],
+            "expected_sha256": artifact["expected_sha256"],
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
+            "env_keys": sorted((env or {}).keys()),
+            "started_at": self.utcnow(),
+            "running": running,
+        }
+        self.save_state(state)
+        return {
+            "object": "media2api.proxy_kernel.process",
+            "provider_id": provider_id,
+            "process": self.process_status(provider_id),
+            "runtime": entry["runtime"],
+        }
+
+    def stop_runtime(self, provider_id: str, grace_seconds: float = 5) -> dict[str, Any]:
+        self.require_spec(provider_id)
+        state = self.load_state()
+        entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        process = entry.get("process") if isinstance(entry.get("process"), dict) else {}
+        pid = int(process.get("pid") or 0)
+        stopped = False
+        if pid and self.pid_running(pid):
+            self.terminate_pid(pid, force=False)
+            deadline = time.time() + max(float(grace_seconds), 0)
+            while time.time() < deadline and self.pid_running(pid):
+                time.sleep(0.1)
+            if self.pid_running(pid):
+                self.terminate_pid(pid, force=True)
+            stopped = not self.pid_running(pid)
+        if process:
+            process["running"] = self.pid_running(pid) if pid else False
+            process["stopped_at"] = self.utcnow()
+            entry["process"] = process
+        self.save_state(state)
+        return {"object": "media2api.proxy_kernel.process", "provider_id": provider_id, "stopped": stopped, "process": self.process_status(provider_id)}
+
+    def process_status(self, provider_id: str) -> dict[str, Any]:
+        state = self.load_state()
+        process = state.get("kernels", {}).get(provider_id, {}).get("process", {})
+        if not isinstance(process, dict) or not process:
+            return {"pid": None, "running": False}
+        pid = int(process.get("pid") or 0)
+        result = dict(process)
+        result["running"] = self.pid_running(pid) if pid else False
+        return result
+
+    def tail_logs(self, provider_id: str, stream: str = "stderr", max_bytes: int = 12000) -> dict[str, Any]:
+        self.require_spec(provider_id)
+        process = self.process_status(provider_id)
+        key = "stdout_log" if stream == "stdout" else "stderr_log"
+        path_text = str(process.get(key) or "")
+        content = ""
+        path = Path(path_text) if path_text else None
+        if path and path.exists() and path.is_file():
+            size = path.stat().st_size
+            with path.open("rb") as fh:
+                fh.seek(max(size - max_bytes, 0))
+                content = fh.read(max_bytes).decode("utf-8", errors="replace")
+        return {"object": "media2api.proxy_kernel.logs", "provider_id": provider_id, "stream": stream, "path": str(path) if path else "", "content": content}
+
+    def resolve_start_artifact(self, provider_id: str, artifact_path: str, expected_sha256: str, command: list[str]) -> dict[str, Any]:
+        state = self.load_state()
+        installed = state.get("kernels", {}).get(provider_id, {}).get("install", {})
+        path_text = artifact_path or str(installed.get("path") or "")
+        if not path_text:
+            raise ValueError("ARTIFACT_PATH_REQUIRED")
+        path = Path(path_text).expanduser().resolve()
+        root = self.root.resolve()
+        if not self.path_within(path, root):
+            raise ValueError("ARTIFACT_OUTSIDE_PROXY_KERNEL_DIR")
+        if not path.exists() or not path.is_file():
+            raise ValueError("ARTIFACT_NOT_FOUND")
+        expected = self.normalize_sha256(expected_sha256) or self.normalize_sha256(str(installed.get("expected_sha256") or ""))
+        if not expected:
+            raise ValueError("EXPECTED_SHA256_REQUIRED")
+        actual = self.file_sha256(path)
+        if actual != expected:
+            raise ValueError("SHA256_MISMATCH")
+        if not self.command_references_path(command, path):
+            raise ValueError("ARTIFACT_PATH_NOT_IN_COMMAND")
+        return {"path": path, "expected_sha256": expected, "sha256": actual}
+
+    def resolve_cwd(self, provider_id: str, cwd: str, artifact: dict[str, Any]) -> Path:
+        if not cwd:
+            return Path(artifact["path"]).parent
+        path = Path(cwd).expanduser().resolve()
+        if not self.path_within(path, self.root.resolve() / provider_id):
+            raise ValueError("CWD_OUTSIDE_PROVIDER_KERNEL_DIR")
+        if not path.exists() or not path.is_dir():
+            raise ValueError("CWD_NOT_FOUND")
+        return path
+
+    def command_references_path(self, command: list[str], path: Path) -> bool:
+        target = path.resolve()
+        for item in command:
+            try:
+                candidate = Path(item).expanduser().resolve()
+            except Exception:
+                continue
+            if candidate == target:
+                return True
+        return False
+
+    def path_within(self, path: Path, root: Path) -> bool:
+        try:
+            path.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    def pid_running(self, pid: int) -> bool:
+        if not pid:
+            return False
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                )
+                return f'"{pid}"' in result.stdout or f",{pid}," in result.stdout
+            except Exception:
+                return False
+        try:
+            os.kill(pid, 0)
+            if os.name == "posix":
+                stat_path = Path(f"/proc/{pid}/stat")
+                if stat_path.exists():
+                    text = stat_path.read_text(encoding="utf-8", errors="ignore")
+                    state = text.rsplit(")", 1)[1].strip().split()[0] if ")" in text else ""
+                    if state == "Z":
+                        return False
+            return True
+        except OSError:
+            return False
+
+    def terminate_pid(self, pid: int, force: bool = False) -> None:
+        if not pid:
+            return
+        try:
+            if os.name == "nt":
+                command = ["taskkill", "/PID", str(pid), "/F"]
+                subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                return
+            os.kill(pid, signal.SIGKILL if force and hasattr(signal, "SIGKILL") else signal.SIGTERM)
+        except Exception:
+            return
 
     def record_install(
         self,

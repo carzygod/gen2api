@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 import os
+import shutil
 import time
 import sys
 import threading
@@ -18,11 +20,16 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "var" / "smoke_test.db"
 ASSET_DIR = ROOT / "var" / "smoke-test-assets"
+PROXY_KERNEL_DIR = ROOT / "var" / "smoke-test-proxy-kernels"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 if DB_PATH.exists():
     DB_PATH.unlink()
+if PROXY_KERNEL_DIR.exists():
+    shutil.rmtree(PROXY_KERNEL_DIR)
+PROXY_KERNEL_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["DATABASE_URL"] = f"sqlite:///{DB_PATH.as_posix()}"
 os.environ["ASSET_DIR"] = ASSET_DIR.as_posix()
+os.environ["MEDIA2API_PROXY_KERNEL_DIR"] = PROXY_KERNEL_DIR.as_posix()
 
 sys.path.insert(0, str(ROOT))
 
@@ -92,6 +99,36 @@ def main() -> None:
         assert {"openai_web_session", "gemini_cli_oauth", "doubao_web_session", "qwen_ai_web_session"}.issubset({item["provider_id"] for item in proxy_kernels["data"]}), proxy_kernels
         openai_web_kernel = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session", headers=headers))
         assert openai_web_kernel["selection_id"] == "OAI-WEB-01" and openai_web_kernel["spec"]["install_policy"]["hash_required"] is True, openai_web_kernel
+        runtime_dir = settings.proxy_kernel_dir / "openai_web_session" / "smoke"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        runtime_script = runtime_dir / "sleep_runtime.py"
+        runtime_script.write_text("import time\nprint('media2api smoke runtime ready', flush=True)\ntime.sleep(60)\n", encoding="utf-8")
+        runtime_sha256 = hashlib.sha256(runtime_script.read_bytes()).hexdigest()
+        try:
+            runtime_start = assert_ok(
+                client.post(
+                    "/v1/admin/proxy-kernels/openai_web_session/start-runtime",
+                    headers=headers,
+                    json={
+                        "command": [sys.executable, str(runtime_script)],
+                        "base_url": "http://127.0.0.1:19081",
+                        "artifact_path": str(runtime_script),
+                        "expected_sha256": runtime_sha256,
+                        "version": "smoke",
+                        "notes": "smoke controlled runtime",
+                        "replace_existing": True,
+                        "update_provider_base_url": False,
+                    },
+                )
+            )
+            assert runtime_start["process"]["running"] is True and runtime_start["runtime"]["sha256"] == runtime_sha256, runtime_start
+            runtime_process = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/process", headers=headers))
+            assert runtime_process["process"]["running"] is True, runtime_process
+            runtime_logs = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/logs?stream=stdout", headers=headers))
+            assert runtime_logs["object"] == "media2api.proxy_kernel.logs" and runtime_logs["path"], runtime_logs
+        finally:
+            runtime_stop = assert_ok(client.post("/v1/admin/proxy-kernels/openai_web_session/stop-runtime", headers=headers, json={"grace_seconds": 1}))
+            assert runtime_stop["process"]["running"] is False, runtime_stop
         dashboard = assert_ok(client.get("/v1/admin/dashboard", headers=headers))
         assert dashboard["object"] == "admin.dashboard" and "success_rate" in dashboard["jobs"] and "usage_today" in dashboard["billing"], dashboard
         assert "worker_concurrency" in dashboard["runtime"] and "active_leases" in dashboard["accounts"], dashboard

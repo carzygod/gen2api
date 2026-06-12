@@ -1219,6 +1219,23 @@ class ProxyKernelRuntimeRegisterRequest(BaseModel):
     update_provider_base_url: bool = True
 
 
+class ProxyKernelRuntimeStartRequest(BaseModel):
+    command: list[str] = Field(default_factory=list)
+    base_url: str
+    artifact_path: str = ""
+    expected_sha256: str = ""
+    cwd: str = ""
+    env: dict[str, str] = Field(default_factory=dict)
+    version: str = ""
+    notes: str = ""
+    replace_existing: bool = False
+    update_provider_base_url: bool = True
+
+
+class ProxyKernelRuntimeStopRequest(BaseModel):
+    grace_seconds: float = 5
+
+
 class TemplateInstallRequest(BaseModel):
     base_url: str | None = None
     credential_ref: str = "agent://providers/template/acct_01"
@@ -7246,6 +7263,10 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
     ("GET", "/v1/admin/account-guides"),
     ("GET", "/v1/admin/account-guides/{provider_id}"),
@@ -7474,6 +7495,10 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/register-runtime"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/logs"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/clear-runtime"),
             ],
             proxy_kernel_service.list_kernels(db)["summary"],
@@ -13195,6 +13220,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("反代内核清单", "GET", "/v1/admin/proxy-kernels"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
+        ("OpenAI Web 进程", "GET", "/v1/admin/proxy-kernels/openai_web_session/process"),
+        ("OpenAI Web 日志", "GET", "/v1/admin/proxy-kernels/openai_web_session/logs"),
+        ("停止 OpenAI Web Runtime", "POST", "/v1/admin/proxy-kernels/openai_web_session/stop-runtime"),
         ("账号添加指南", "GET", "/v1/admin/account-guides"),
         ("平台输入要求", "GET", "/v1/admin/platform-input-requirements"),
         ("生成接入计划", "POST", "/v1/admin/account-onboarding/plan"),
@@ -13247,6 +13275,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/connector-registry/refresh",
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
+        "/v1/admin/proxy-kernels/openai_web_session/process",
+        "/v1/admin/proxy-kernels/openai_web_session/logs",
         "/v1/admin/account-guides",
         "/v1/admin/platform-input-requirements",
         "/v1/admin/account-onboarding/plan",
@@ -13271,6 +13301,9 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
+        "/v1/admin/proxy-kernels/openai_web_session/process",
+        "/v1/admin/proxy-kernels/openai_web_session/logs",
+        "/v1/admin/proxy-kernels/openai_web_session/stop-runtime",
         "/v1/admin/provider-contract-suite",
         "/v1/admin/account-acceptance-suite",
     ])
@@ -18327,6 +18360,17 @@ def admin_proxy_kernel_install_release(
         raise HTTPException(status_code=400, detail={"error": str(exc), "hash_policy": "expected_sha256 is mandatory for managed release artifacts"}) from exc
 
 
+def sync_proxy_kernel_provider_base_url(db: Session, provider_id: str, base_url: str) -> models.Provider:
+    provider = db.get(models.Provider, provider_id) or ensure_provider_from_template(db, provider_id, status="disabled")
+    if not provider:
+        raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
+    config = provider_runtime_config(provider_id, loads(provider.base_config_json, {}))
+    config["base_url"] = validate_provider_base_url_input(provider_id, base_url)
+    provider.base_config_json = dumps(config)
+    db.commit()
+    return provider
+
+
 @app.post("/v1/admin/proxy-kernels/{provider_id}/register-runtime")
 def admin_proxy_kernel_register_runtime(
     provider_id: str,
@@ -18349,15 +18393,74 @@ def admin_proxy_kernel_register_runtime(
         raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "managed runtime endpoints must be http(s) loopback only"}) from exc
 
     if req.update_provider_base_url:
-        provider = db.get(models.Provider, provider_id) or ensure_provider_from_template(db, provider_id, status="disabled")
-        if not provider:
-            raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
-        config = provider_runtime_config(provider_id, loads(provider.base_config_json, {}))
-        config["base_url"] = validate_provider_base_url_input(provider_id, req.base_url)
-        provider.base_config_json = dumps(config)
-        db.commit()
+        provider = sync_proxy_kernel_provider_base_url(db, provider_id, req.base_url)
         result["provider"] = serialize_provider(provider)
     return result
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/start-runtime")
+def admin_proxy_kernel_start_runtime(
+    provider_id: str,
+    req: ProxyKernelRuntimeStartRequest,
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = proxy_kernel_service.start_runtime(
+            provider_id=provider_id,
+            command=req.command,
+            base_url=req.base_url,
+            artifact_path=req.artifact_path,
+            expected_sha256=req.expected_sha256,
+            cwd=req.cwd,
+            env=req.env,
+            version=req.version,
+            notes=req.notes,
+            replace_existing=req.replace_existing,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "command must reference a verified artifact under MEDIA2API_PROXY_KERNEL_DIR and base_url must be loopback"}) from exc
+
+    if req.update_provider_base_url:
+        provider = sync_proxy_kernel_provider_base_url(db, provider_id, req.base_url)
+        result["provider"] = serialize_provider(provider)
+    return result
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/stop-runtime")
+def admin_proxy_kernel_stop_runtime(
+    provider_id: str,
+    req: ProxyKernelRuntimeStopRequest = ProxyKernelRuntimeStopRequest(),
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.stop_runtime(provider_id, grace_seconds=req.grace_seconds)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/process")
+def admin_proxy_kernel_process(provider_id: str, ctx: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    try:
+        proxy_kernel_service.require_spec(provider_id)
+        return {"object": "media2api.proxy_kernel.process", "provider_id": provider_id, "process": proxy_kernel_service.process_status(provider_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/logs")
+def admin_proxy_kernel_logs(
+    provider_id: str,
+    stream: str = "stderr",
+    max_bytes: int = 12000,
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.tail_logs(provider_id, stream=stream, max_bytes=max(1, min(max_bytes, 65536)))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/clear-runtime")
