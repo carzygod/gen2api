@@ -7407,6 +7407,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
     ("POST", "/v1/admin/proxy-kernels/live-workspace"),
+    ("GET", "/v1/admin/proxy-kernels/activation-workflow"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -7671,6 +7673,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
                 ("POST", "/v1/admin/proxy-kernels/live-workspace"),
+                ("GET", "/v1/admin/proxy-kernels/activation-workflow"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -14078,6 +14082,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 </div>
                 <div class="ops" style="min-width:360px">
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
+                  <button class="primary" type="button" id="kernel-activation-workflow-all">上线执行向导</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
                   <button class="op" type="button" id="kernel-live-workspace-plan">上线工作台预检</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
@@ -14119,6 +14124,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-production-readiness">生产就绪</button>
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
+                  <button class="primary" type="button" id="kernel-activation-workflow">上线执行向导</button>
                   <button class="op" type="button" id="kernel-live-acceptance">真实样本验收</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
@@ -14588,6 +14594,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const productionReadiness = hint.production_readiness || {{}};
           const liveWorkspace = hint.live_workspace || {{}};
           const handoff = hint.operator_handoff || {{}};
+          const activation = hint.activation_workflow || {{}};
           const runtimeHealth = hint.runtime_health_check || {{}};
           const liveAcceptance = hint.live_acceptance || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
@@ -14609,6 +14616,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>生产就绪</dt><dd>${{escapeHtml(productionReadiness.status || '未读取')}}${{productionReadiness.next_step?.label ? ' · 下一步：' + escapeHtml(productionReadiness.next_step.label) : ''}}</dd>
               <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
               <dt>交付包</dt><dd>${{escapeHtml(handoff.status || '未读取')}}${{handoff.operator_questions?.length ? ' · 待填 ' + escapeHtml(handoff.operator_questions.length) + ' 项' : ''}}</dd>
+              <dt>执行向导</dt><dd>${{escapeHtml(activation.status || '未读取')}}${{activation.next_stage?.label ? ' · 下一步：' + escapeHtml(activation.next_stage.label) : ''}}</dd>
               <dt>Runtime 健康</dt><dd>${{runtimeHealth.health_check ? escapeHtml(runtimeHealth.health_check.status || (runtimeHealth.ok ? 'ok' : 'failed')) : '未检查'}}${{runtimeHealth.health_check?.message ? ' · ' + escapeHtml(runtimeHealth.health_check.message) : ''}}</dd>
               <dt>真实验收</dt><dd>${{escapeHtml(liveAcceptance.status || '未运行')}}${{liveAcceptance.next_step?.label ? ' · 下一步：' + escapeHtml(liveAcceptance.next_step.label) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
@@ -15149,6 +15157,30 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         async function loadAllKernelOperatorHandoffs() {{
           const payload = await callAdmin('/v1/admin/proxy-kernels/operator-handoff');
           mergeKernelOperatorHandoffs(payload);
+          return payload;
+        }}
+        function mergeKernelActivationWorkflows(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            const hint = kernelHint(item.provider_id);
+            proxyKernelHints[item.provider_id] = Object.assign(hint, {{
+              activation_workflow: item,
+              materials_request: item.evidence?.materials || hint.materials_request || {{}},
+              production_readiness: item.evidence?.production_readiness || hint.production_readiness || {{}},
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelActivationWorkflow(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/activation-workflow');
+          mergeKernelActivationWorkflows(payload);
+          return payload;
+        }}
+        async function loadAllKernelActivationWorkflows() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/activation-workflow');
+          mergeKernelActivationWorkflows(payload);
           return payload;
         }}
         async function runKernelOperatorHandoff(providerId = null) {{
@@ -15827,6 +15859,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-activation-workflow')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelActivationWorkflow();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-run-live-acceptance')?.addEventListener('click', async () => {{
           try {{
             const payload = await runKernelLiveAcceptance();
@@ -15844,6 +15882,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('kernel-routing-plan-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelRoutingPlan(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-activation-workflow-all')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelActivationWorkflows();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
         }});
         document.getElementById('kernel-runtime-delivery-all')?.addEventListener('click', async () => {{
           try {{ await loadAllKernelRuntimeDeliveryPlans(); }} catch (error) {{ result.textContent = String(error); }}
@@ -19918,6 +19962,17 @@ def admin_proxy_kernels_operator_handoff(provider_ids: str = "", ctx: AuthContex
         raise HTTPException(status_code=400, detail={"error": str(exc), "handoff_policy": "only finalized proxy kernel provider ids may be packaged for operator handoff"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/activation-workflow")
+def admin_proxy_kernels_activation_workflow(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_activation_workflows(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "activation_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/runtime-delivery-plan")
 def admin_proxy_kernels_runtime_delivery_plan(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -20055,6 +20110,14 @@ def admin_proxy_kernel_materials_request(provider_id: str, ctx: AuthContext = De
 def admin_proxy_kernel_operator_handoff(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_operator_handoff(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/activation-workflow")
+def admin_proxy_kernel_activation_workflow(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_activation_workflow(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -21235,6 +21298,213 @@ def build_proxy_kernel_operator_handoffs(db: Session, provider_ids: list[str] | 
             "ready_for_live_acceptance": sum(1 for row in rows if row.get("status") == "ready_for_live_acceptance"),
             "materials_required": sum(1 for row in rows if row.get("status") == "materials_required"),
             "operator_question_count": sum(len(row.get("operator_questions") or []) for row in rows),
+        },
+        "data": rows,
+    }
+
+
+def proxy_kernel_activation_stage(
+    stage_id: str,
+    label: str,
+    status: str,
+    *,
+    ui_tab: str = "",
+    primary_api: str = "",
+    payload_template: dict[str, Any] | None = None,
+    command: str = "",
+    operator_required: bool = False,
+    platform_can_run: bool = False,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": stage_id,
+        "label": label,
+        "status": status,
+        "ui_tab": ui_tab,
+        "primary_api": primary_api,
+        "payload_template": payload_template or {},
+        "command": command,
+        "operator_required": operator_required,
+        "platform_can_run": platform_can_run,
+        "detail": detail or {},
+    }
+
+
+def build_proxy_kernel_activation_workflow(db: Session, provider_id: str) -> dict[str, Any]:
+    if provider_id not in PROVIDER_TEMPLATES:
+        raise KeyError(provider_id)
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    routing = proxy_kernel_routing_plan(db, provider_id)
+    materials = build_proxy_kernel_materials_request(db, provider_id)
+    handoff = build_proxy_kernel_operator_handoff(db, provider_id)
+    readiness = build_proxy_kernel_production_readiness(db, provider_id)
+    runtime_contract = build_proxy_kernel_runtime_contract(db, provider_id)
+    active_user_count = db.query(models.User).filter(models.User.status == "active").count()
+    active_api_key_count = db.query(models.ApiKey).filter(models.ApiKey.status == "active").count()
+    template = PROVIDER_TEMPLATES[provider_id]
+    base = settings.public_base_url
+    admin_key = "$MEDIA2API_API_KEY"
+    user_key_payload = {
+        "user_id": "usr_admin",
+        "name": f"{provider_id}-client-key",
+    }
+    user_create_payload = {
+        "id": f"usr_{provider_id}_client",
+        "email": f"{provider_id}.client@example.com",
+        "tier": "default",
+        "wallet_balance": 100000,
+    }
+    handoff_templates = handoff.get("submission_templates") or {}
+    operator_questions = handoff.get("operator_questions") or []
+    account_questions = [item for item in operator_questions if item.get("section") == "account"]
+    runtime_questions = [item for item in operator_questions if str(item.get("section") or "").startswith("runtime")]
+    routing_ready = bool(routing.get("route_config_ready"))
+    account_ready = bool(routing.get("active_account_count", 0) > 0)
+    runtime_ready = bool(kernel.get("runtime_registered") and kernel.get("runtime_loopback_only"))
+    health_ready = bool((readiness.get("state") or {}).get("runtime_health_ok") or kernel.get("health_ok"))
+    ready_for_acceptance = bool(readiness.get("ready_for_live_acceptance") or kernel.get("ready_for_live_acceptance"))
+    production_ready = bool(readiness.get("production_ready") or kernel.get("usable"))
+    source_plan = handoff_templates.get("source_runtime_plan") or {}
+    source_available = bool(source_plan.get("source_available"))
+    source_setup_ready = bool((handoff_templates.get("source_runtime_setup") or {}).get("command_id"))
+    source_launcher_ready = bool((handoff_templates.get("source_runtime_launcher") or {}).get("command"))
+    stages = [
+        proxy_kernel_activation_stage(
+            "route",
+            "补齐模型路由",
+            "done" if routing_ready else "action_required",
+            ui_tab="kernels",
+            primary_api="/v1/admin/proxy-kernels/{provider_id}/apply-routing",
+            payload_template=(materials.get("routing_materials") or {}).get("apply_payload") or {},
+            command=(materials.get("commands") or {}).get("apply_routing") or "",
+            platform_can_run=True,
+            detail={"enabled_mapping_count": routing.get("enabled_mapping_count", 0), "template_mapping_count": routing.get("template_mapping_count", 0)},
+        ),
+        proxy_kernel_activation_stage(
+            "account",
+            "导入真实上游账号",
+            "done" if account_ready else "needs_input",
+            ui_tab="oauth",
+            primary_api="/v1/admin/account-onboarding",
+            payload_template=handoff_templates.get("account_onboarding_inline_secret") or {},
+            command=(handoff.get("steps") or [{}, {}])[1].get("command") if len(handoff.get("steps") or []) > 1 else "",
+            operator_required=not account_ready,
+            platform_can_run=False,
+            detail={"active_account_count": routing.get("active_account_count", 0), "questions": account_questions, "credential_boundary": kernel.get("credential_boundary") or ""},
+        ),
+        proxy_kernel_activation_stage(
+            "runtime",
+            "准备并启动 loopback 内核",
+            "done" if runtime_ready else "action_required",
+            ui_tab="kernels",
+            primary_api="/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run",
+            payload_template=handoff_templates.get("operator_handoff_run") or {},
+            command=((handoff.get("steps") or [{}])[-1].get("command") if handoff.get("steps") else ""),
+            operator_required=not runtime_ready and bool(runtime_questions),
+            platform_can_run=True,
+            detail={
+                "runtime_registered": bool(kernel.get("runtime_registered")),
+                "runtime_base_url": kernel.get("runtime_base_url") or "",
+                "release_install_payload": handoff_templates.get("install_release") or {},
+                "source_available": source_available,
+                "source_setup_ready": source_setup_ready,
+                "source_launcher_ready": source_launcher_ready,
+                "source_setup_payload": handoff_templates.get("source_runtime_setup") or {},
+                "source_launcher_payload": handoff_templates.get("source_runtime_launcher") or {},
+                "questions": runtime_questions,
+            },
+        ),
+        proxy_kernel_activation_stage(
+            "health",
+            "检查 runtime 健康",
+            "done" if health_ready else "waiting" if runtime_ready else "blocked",
+            ui_tab="kernels",
+            primary_api="/v1/admin/proxy-kernels/{provider_id}/runtime-health-check",
+            payload_template={"sync_provider_base_url": True, "require_running_process": False, "fail_on_health_check": False},
+            command=(runtime_contract.get("commands") or {}).get("runtime_health_check") or "",
+            platform_can_run=runtime_ready,
+            detail={"runtime_contract_status": runtime_contract.get("status"), "latest_health": kernel.get("latest_health") or {}},
+        ),
+        proxy_kernel_activation_stage(
+            "live_acceptance",
+            "运行真实样本验收",
+            "done" if production_ready else "waiting" if ready_for_acceptance else "blocked",
+            ui_tab="kernels",
+            primary_api="/v1/admin/proxy-kernels/{provider_id}/live-acceptance",
+            payload_template=handoff_templates.get("live_acceptance_dry_run") or {"dry_run": True, "operations": list(template.operations), "max_samples": 1},
+            command=(materials.get("commands") or {}).get("live_acceptance") or "",
+            platform_can_run=ready_for_acceptance,
+            detail={"ready_for_live_acceptance": ready_for_acceptance, "operations": list(template.operations), "live_mode_consumes_real_quota": True},
+        ),
+        proxy_kernel_activation_stage(
+            "user_api_key",
+            "准备下游调用 API Key",
+            "done" if active_api_key_count > 0 else "action_required",
+            ui_tab="users",
+            primary_api="/v1/admin/api-keys",
+            payload_template=user_key_payload,
+            command=f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/api-keys -d '{json.dumps(user_key_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            operator_required=False,
+            platform_can_run=active_user_count > 0,
+            detail={"active_user_count": active_user_count, "active_api_key_count": active_api_key_count, "create_user_payload": user_create_payload},
+        ),
+    ]
+    next_stage = next((stage for stage in stages if stage["status"] not in {"done"}), stages[-1] if stages else {})
+    return {
+        "object": "media2api.proxy_kernel.activation_workflow",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "status": "production_ready" if production_ready else "ready_for_live_acceptance" if ready_for_acceptance else "action_required",
+        "usable": bool(kernel.get("usable")),
+        "ready_for_live_acceptance": ready_for_acceptance,
+        "next_stage": next_stage,
+        "stages": stages,
+        "required_user_inputs": [item for item in operator_questions if item.get("required") is not False],
+        "sample_requests": {
+            "image_generation": {
+                "method": "POST",
+                "url": f"{base}/v1/images/generations",
+                "headers": {"Authorization": "Bearer $MEDIA2API_USER_API_KEY"},
+                "body": {"model": "t2i-fast", "prompt": "one small verification image"},
+            },
+            "video_generation": {
+                "method": "POST",
+                "url": f"{base}/v1/videos/generations",
+                "headers": {"Authorization": "Bearer $MEDIA2API_USER_API_KEY"},
+                "body": {"model": "i2v-fast", "prompt": "one short verification video"},
+            },
+        },
+        "evidence": {
+            "kernel": kernel,
+            "routing": {"route_config_ready": routing_ready, "active_account_count": routing.get("active_account_count", 0), "blockers": routing.get("blockers", [])},
+            "materials": {"status": materials.get("status"), "next_step": materials.get("next_step")},
+            "handoff": {"status": handoff.get("status"), "operator_question_count": len(operator_questions)},
+            "production_readiness": {"status": readiness.get("status"), "next_step": readiness.get("next_step")},
+        },
+        "policy": {
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "dry_run_first": True,
+        },
+    }
+
+
+def build_proxy_kernel_activation_workflows(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_activation_workflow(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.activation_workflow.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": {
+            "total": len(rows),
+            "production_ready": sum(1 for row in rows if row.get("status") == "production_ready"),
+            "ready_for_live_acceptance": sum(1 for row in rows if row.get("ready_for_live_acceptance")),
+            "action_required": sum(1 for row in rows if row.get("status") == "action_required"),
+            "needs_user_input": sum(1 for row in rows if row.get("required_user_inputs")),
         },
         "data": rows,
     }

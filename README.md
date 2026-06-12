@@ -184,11 +184,14 @@ bulk source-repo fallback planning/sync for repositories without installable
 release assets,
 live workspace dry-run preflight, self-recording runtime health checks,
 provider-level live acceptance dry-runs, operator handoff packages, safe
-operator handoff dry-run runners, loopback
+operator handoff dry-run runners, activation workflow guides, loopback
 runtime contract matrices, production readiness matrices, loopback contract
 self-tests, go-live checklists, process status, and stdout/stderr log inspection. The `/admin` dashboard has a
 dedicated "反代内核" workspace for the same workflow, so operators do not need
-to hand-write JSON for routine runtime start/stop checks. Runtime onboarding
+to hand-write JSON for routine runtime start/stop checks. The first user-facing
+entry is the activation workflow: route, real account material, release/source
+runtime, health check, live sample acceptance, then downstream user API Key.
+Runtime onboarding
 prefers fixed release binaries with explicit SHA256 verification. Full source
 repositories are synced into `source-repo/` only when release assets are
 missing, protocol details must be inspected, local builds are unavoidable, or
