@@ -1294,6 +1294,23 @@ class ProxyKernelOperatorHandoffRunRequest(BaseModel):
     live_acceptance: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProxyKernelActivationRunRequest(BaseModel):
+    dry_run: bool = True
+    steps: list[str] = Field(default_factory=list)
+    continue_on_error: bool = True
+    account_onboarding: dict[str, Any] = Field(default_factory=dict)
+    apply_routing: dict[str, Any] = Field(default_factory=dict)
+    install_release: dict[str, Any] = Field(default_factory=dict)
+    source_runtime_setup: dict[str, Any] = Field(default_factory=dict)
+    source_runtime_launcher: dict[str, Any] = Field(default_factory=dict)
+    start_runtime: dict[str, Any] = Field(default_factory=dict)
+    runtime_health_check: dict[str, Any] = Field(default_factory=dict)
+    live_acceptance: dict[str, Any] = Field(default_factory=dict)
+    create_user_api_key: bool = False
+    force_user_api_key: bool = False
+    user_api_key: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProxyKernelRuntimeStopRequest(BaseModel):
     grace_seconds: float = 5
 
@@ -7411,6 +7428,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
     ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -7679,6 +7697,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/activation-workflow"),
                 ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/materials-request"),
@@ -14166,6 +14185,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
                   <button class="primary" type="button" id="kernel-activation-workflow">上线执行向导</button>
                   <button class="op" type="button" id="kernel-production-gap-report">生产缺口报告</button>
+                  <button class="primary" type="button" id="kernel-activation-run">启用预演</button>
                   <button class="op" type="button" id="kernel-live-acceptance">真实样本验收</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
@@ -15469,6 +15489,24 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           renderProductionGapReportOverview(payload);
           return payload;
         }}
+        async function runKernelActivationRun(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/activation-run', 'POST', {{
+            dry_run: true,
+            continue_on_error: true,
+            steps: ['apply_routing', 'submit_account_material', 'install_release', 'source_runtime_setup', 'source_runtime_launcher', 'start_runtime', 'runtime_health_check', 'live_acceptance_dry_run', 'user_api_key']
+          }});
+          const gapReport = payload.after_gap_report || payload.before_gap_report || payload;
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{
+            activation_run: payload,
+            activation_workflow: gapReport,
+            production_gap_report: gapReport,
+          }});
+          renderKernelSummary(provider);
+          renderActivationWorkflowPanel(provider, gapReport);
+          return payload;
+        }}
         async function runKernelOperatorHandoff(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
           syncKernelSelects(provider);
@@ -16200,6 +16238,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-production-gap-report')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelProductionGapReport();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-activation-run')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await runKernelActivationRun();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -20485,6 +20529,21 @@ def admin_proxy_kernel_production_gap_report(provider_id: str, ctx: AuthContext 
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
 
+@app.post("/v1/admin/proxy-kernels/{provider_id}/activation-run")
+def admin_proxy_kernel_activation_run(
+    provider_id: str,
+    req: ProxyKernelActivationRunRequest = ProxyKernelActivationRunRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return run_proxy_kernel_activation_run(db, provider_id, req, ctx)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "activation_policy": "only finalized proxy kernel providers and known activation steps may be executed"}) from exc
+
+
 @app.post("/v1/admin/proxy-kernels/{provider_id}/operator-handoff/run")
 def admin_proxy_kernel_operator_handoff_run(
     provider_id: str,
@@ -21994,6 +22053,8 @@ PROXY_KERNEL_HANDOFF_DEFAULT_STEPS = [
     "live_acceptance_dry_run",
 ]
 
+PROXY_KERNEL_ACTIVATION_RUN_DEFAULT_STEPS = [*PROXY_KERNEL_HANDOFF_DEFAULT_STEPS, "user_api_key"]
+
 
 def proxy_kernel_payload_has_placeholder(value: Any) -> bool:
     if value is None:
@@ -22212,6 +22273,164 @@ def run_proxy_kernel_operator_handoff(
             "official_sdk_api": "forbidden",
             "third_party_public_service": "forbidden",
             "managed_runtime_listener": "loopback_only",
+        },
+    }
+
+
+def run_proxy_kernel_activation_user_api_key_step(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelActivationRunRequest,
+) -> dict[str, Any]:
+    active_keys = db.query(models.ApiKey).filter(models.ApiKey.status == "active").order_by(models.ApiKey.created_at.desc()).all()
+    payload = {
+        "user_id": "usr_admin",
+        "name": f"{provider_id}-client-key",
+        **(req.user_api_key or {}),
+    }
+    if active_keys and not req.force_user_api_key:
+        return proxy_kernel_handoff_step_result(
+            "user_api_key",
+            "skipped_existing",
+            detail={
+                "active_api_key_count": len(active_keys),
+                "latest_key": serialize_api_key(active_keys[0]),
+                "payload": payload,
+            },
+            message="An active downstream API key already exists.",
+        )
+    if req.dry_run:
+        return proxy_kernel_handoff_step_result(
+            "user_api_key",
+            "planned",
+            detail={"payload": payload, "requires_create_user_api_key": True},
+            message="Dry-run only; no API key was created.",
+        )
+    if not req.create_user_api_key:
+        return proxy_kernel_handoff_step_result(
+            "user_api_key",
+            "needs_confirmation",
+            detail={"payload": payload},
+            message="Set create_user_api_key=true to create and return a new downstream API key.",
+        )
+    user_id = str(payload.get("user_id") or "usr_admin")
+    if not db.get(models.User, user_id):
+        return proxy_kernel_handoff_step_result(
+            "user_api_key",
+            "blocked",
+            detail={"payload": payload, "missing_user_id": user_id},
+            message="Create or activate the target user before creating a downstream API key.",
+        )
+    raw_key = str(payload.get("key") or f"mk_{new_id('key')}")
+    item = models.ApiKey(
+        id=new_id("key"),
+        user_id=user_id,
+        name=str(payload.get("name") or f"{provider_id}-client-key"),
+        key_hash=hash_api_key(raw_key),
+        status="active",
+    )
+    db.add(item)
+    db.commit()
+    result = serialize_api_key(item)
+    result["api_key"] = raw_key
+    return proxy_kernel_handoff_step_result(
+        "user_api_key",
+        "executed",
+        executed=True,
+        detail=result,
+        message="A new downstream API key was created. This plaintext key is only returned in this response.",
+    )
+
+
+def run_proxy_kernel_activation_run(
+    db: Session,
+    provider_id: str,
+    req: ProxyKernelActivationRunRequest,
+    ctx: AuthContext,
+) -> dict[str, Any]:
+    if provider_id not in PROVIDER_TEMPLATES:
+        raise KeyError(provider_id)
+    proxy_kernel_service.require_spec(provider_id)
+    requested_steps = [str(step).strip() for step in req.steps if str(step).strip()] or list(PROXY_KERNEL_ACTIVATION_RUN_DEFAULT_STEPS)
+    allowed_steps = set(PROXY_KERNEL_ACTIVATION_RUN_DEFAULT_STEPS + ["live_acceptance"])
+    unknown_steps = [step for step in requested_steps if step not in allowed_steps]
+    if unknown_steps:
+        raise ValueError("UNKNOWN_ACTIVATION_STEPS:" + ",".join(unknown_steps))
+
+    before_gap = build_proxy_kernel_production_gap_report(db, provider_id)
+    handoff_steps = [step for step in requested_steps if step in set(PROXY_KERNEL_HANDOFF_DEFAULT_STEPS + ["live_acceptance"])]
+    results: list[dict[str, Any]] = []
+    if handoff_steps:
+        handoff_req = ProxyKernelOperatorHandoffRunRequest(
+            dry_run=req.dry_run,
+            steps=handoff_steps,
+            continue_on_error=req.continue_on_error,
+            account_onboarding=req.account_onboarding,
+            apply_routing=req.apply_routing,
+            install_release=req.install_release,
+            source_runtime_setup=req.source_runtime_setup,
+            source_runtime_launcher=req.source_runtime_launcher,
+            start_runtime=req.start_runtime,
+            runtime_health_check=req.runtime_health_check,
+            live_acceptance=req.live_acceptance,
+        )
+        handoff_run = run_proxy_kernel_operator_handoff(db, provider_id, handoff_req, ctx)
+        results.extend(handoff_run.get("results") or [])
+    else:
+        handoff_run = {
+            "object": "media2api.proxy_kernel.operator_handoff_run",
+            "provider_id": provider_id,
+            "dry_run": req.dry_run,
+            "requested_steps": [],
+            "results": [],
+            "ok": True,
+        }
+
+    if "user_api_key" in requested_steps:
+        results.append(run_proxy_kernel_activation_user_api_key_step(db, provider_id, req))
+
+    after_gap = build_proxy_kernel_production_gap_report(db, provider_id)
+    failures = [item for item in results if item.get("status") in {"failed", "blocked"}]
+    needs_confirmation = [item for item in results if item.get("status") in {"needs_confirmation", "skipped_placeholder", "skipped_missing_material"}]
+    next_gap = after_gap.get("next_gap") if isinstance(after_gap.get("next_gap"), dict) else {}
+    if after_gap.get("ready_to_use"):
+        status = "ready_to_use"
+    elif failures:
+        status = "failed"
+    elif req.dry_run:
+        status = "planned"
+    else:
+        status = "action_required"
+    return {
+        "object": "media2api.proxy_kernel.activation_run",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "dry_run": req.dry_run,
+        "status": status,
+        "ok": not failures,
+        "ready_to_use": bool(after_gap.get("ready_to_use")),
+        "requested_steps": requested_steps,
+        "results": results,
+        "needs_confirmation": needs_confirmation,
+        "next_required_action": next_gap,
+        "before_gap_report": before_gap,
+        "handoff_run": {
+            "object": handoff_run.get("object"),
+            "ok": handoff_run.get("ok"),
+            "requested_steps": handoff_run.get("requested_steps"),
+            "handoff_before": handoff_run.get("handoff_before"),
+            "handoff_after": handoff_run.get("handoff_after"),
+        },
+        "after_gap_report": after_gap,
+        "policy": {
+            "default_mode": "dry_run",
+            "dry_run_mutates_state": False,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "live_mode_requires_real_materials": True,
+            "user_api_key_creation_requires_create_user_api_key": True,
         },
     }
 

@@ -199,6 +199,9 @@ The production gap report is the stricter "can users actually use this now?"
 view: real account material, loopback runtime, health evidence, live sample
 acceptance, and a downstream user API key must all be present before a provider
 is marked ready to use.
+For a single provider, `POST /v1/admin/proxy-kernels/{provider_id}/activation-run`
+turns the same checklist into a dry-run-first activation session, then returns
+the refreshed production gap report and the next required material.
 Runtime onboarding
 prefers fixed release binaries with explicit SHA256 verification. Full source
 repositories are synced into `source-repo/` only when release assets are
