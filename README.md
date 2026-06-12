@@ -190,11 +190,16 @@ loopback contract self-tests, go-live checklists, process status, and
 stdout/stderr log inspection. The `/admin` dashboard has a
 dedicated "反代内核" workspace for the same workflow, so operators do not need
 to hand-write JSON for routine runtime start/stop checks. The first user-facing
-entry is the activation workflow: route, real account material, release/source
-runtime, health check, live sample acceptance, then downstream user API Key.
-The dashboard renders that workflow as stage cards instead of requiring
-operators to read raw JSON first, and those cards can jump to the matching
-account, runtime, or user-key workspace or run safe platform-side checks.
+entry is the go-live package:
+`GET /v1/admin/proxy-kernels/{provider_id}/go-live-package`. It compresses
+account material, release/source runtime, health evidence, live sample
+acceptance, downstream user API Key, and `/v1/images/*` / `/v1/videos/*`
+samples into one operator-readable page. The activation workflow remains the
+detailed stage view: route, real account material, release/source runtime,
+health check, live sample acceptance, then downstream user API Key. The
+dashboard renders both paths as stage cards instead of requiring operators to
+read raw JSON first, and those cards can jump to the matching account, runtime,
+or user-key workspace or run safe platform-side checks.
 The production gap report is the stricter "can users actually use this now?"
 view: real account material, loopback runtime, health evidence, live sample
 acceptance, and a downstream user API key must all be present before a provider

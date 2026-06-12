@@ -7468,6 +7468,8 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
+    ("GET", "/v1/admin/proxy-kernels/go-live-package"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-package"),
     ("GET", "/v1/admin/proxy-kernels/downstream-call-package"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
@@ -7742,6 +7744,8 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/production-gap-report"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/production-gap-report"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/activation-run"),
+                ("GET", "/v1/admin/proxy-kernels/go-live-package"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-package"),
                 ("GET", "/v1/admin/proxy-kernels/downstream-call-package"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/downstream-call-package"),
@@ -13553,6 +13557,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
         ("全量生产就绪矩阵", "GET", "/v1/admin/proxy-kernels/production-readiness-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
+        ("全量上线包", "GET", "/v1/admin/proxy-kernels/go-live-package"),
+        ("OpenAI Web 上线包", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-package"),
         ("全量下游调用包", "GET", "/v1/admin/proxy-kernels/downstream-call-package"),
         ("OpenAI Web 下游调用包", "GET", "/v1/admin/proxy-kernels/openai_web_session/downstream-call-package"),
         ("OpenAI Web 创建调用 Key", "POST", "/v1/admin/proxy-kernels/openai_web_session/downstream-call-package"),
@@ -13871,6 +13877,29 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .downstream-sample {{ border:1px solid var(--line); border-radius:var(--radius); background:#090d13; padding:10px; }}
         .downstream-sample b {{ display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--soft); font-size:12px; margin-bottom:6px; }}
         .downstream-sample pre {{ max-height:118px; overflow:auto; margin:0; font-family:var(--font-data); font-size:11px; white-space:pre-wrap; }}
+        .go-live-layout {{ display:grid; grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr); gap:14px; align-items:start; }}
+        .go-live-board {{ border:1px solid var(--line); border-radius:var(--radius); padding:16px; background:linear-gradient(145deg,#151c26,#0c1219); box-shadow:var(--shadow-soft); }}
+        .go-live-hero {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px; }}
+        .go-live-hero h3 {{ margin:0; font-family:var(--font-display); font-size:17px; letter-spacing:0; }}
+        .go-live-hero p {{ margin:5px 0 0; color:var(--muted); line-height:1.5; font-size:12px; }}
+        .go-live-step-list {{ display:grid; gap:9px; }}
+        .go-live-step {{ display:grid; grid-template-columns:34px minmax(0,1fr); gap:10px; padding:11px; border:1px solid var(--line); border-radius:var(--radius); background:#0b1017; }}
+        .go-live-step.done {{ border-color:rgba(112,217,139,.28); background:rgba(112,217,139,.055); }}
+        .go-live-step.needs-input,.go-live-step.action-required {{ border-color:rgba(224,177,90,.32); background:rgba(224,177,90,.065); }}
+        .go-live-step.waiting {{ opacity:.82; }}
+        .go-live-step-index {{ width:28px; height:28px; display:grid; place-items:center; border:1px solid var(--line); border-radius:8px; color:var(--soft); background:#121923; font-family:var(--font-data); font-size:12px; font-weight:900; }}
+        .go-live-step b {{ display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--text); font-size:13px; }}
+        .go-live-step p {{ margin:5px 0 0; color:var(--muted); line-height:1.45; font-size:12px; }}
+        .go-live-panel-grid {{ display:grid; gap:12px; }}
+        .go-live-section {{ border:1px solid var(--line); border-radius:var(--radius); background:#0b1017; padding:12px; }}
+        .go-live-section h4 {{ margin:0 0 8px; font-size:13px; color:var(--soft); }}
+        .go-live-section p {{ margin:0; color:var(--muted); line-height:1.5; font-size:12px; }}
+        .go-live-question-list {{ display:grid; gap:8px; }}
+        .go-live-question {{ border:1px solid rgba(224,177,90,.28); border-radius:var(--radius); background:rgba(224,177,90,.06); padding:10px; color:var(--soft); font-size:12px; line-height:1.5; }}
+        .go-live-question b {{ display:block; color:var(--text); margin-bottom:4px; }}
+        .go-live-command-list {{ display:grid; gap:8px; margin-top:8px; }}
+        .go-live-command-list code {{ display:block; overflow-wrap:anywhere; }}
+        .go-live-sample-grid {{ display:grid; gap:8px; margin-top:8px; }}
         .activation-panel {{ border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0d131b); box-shadow:var(--shadow-soft); }}
         .activation-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }}
         .activation-head h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
@@ -13971,7 +14000,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions,.go-live-layout {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -14210,6 +14239,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           <section id="tab-kernels" class="tab">
             <div class="section-tabs">
               <button class="subnav-item active" type="button" data-subtab="kernels-status-pane">运行状态</button>
+              <button class="subnav-item" type="button" data-subtab="kernels-go-live-pane">上线包</button>
               <button class="subnav-item" type="button" data-subtab="kernels-start-pane">启动执行器</button>
               <button class="subnav-item" type="button" data-subtab="kernels-logs-pane">日志与停止</button>
               <button class="subnav-item" type="button" data-subtab="kernels-source-pane">源码参考</button>
@@ -14224,6 +14254,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:360px">
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="primary" type="button" id="kernel-activation-workflow-all">上线执行向导</button>
+                  <button class="op" type="button" id="kernel-go-live-package-all-status">全量上线包</button>
                   <button class="op" type="button" id="kernel-production-gap-report-all">生产缺口报告</button>
                   <button class="op" type="button" id="kernel-downstream-package-all">下游调用包</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
@@ -14255,6 +14286,47 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               </div>
               <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>操作</th><th>选型</th><th>Provider</th><th>仓库</th><th>能力</th><th>状态</th><th>Runtime</th><th>进程</th><th>阻塞项</th></tr></thead><tbody>{proxy_kernel_rows}</tbody></table></div>
             </div>
+            <div class="panel subtab" id="kernels-go-live-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>Provider 上线包</h2>
+                  <p class="note">这里把账号材料、release/runtime、健康检查、真实样本验收和下游 API Key 收成一条可执行路径。先看下一步，再进入对应页面处理细节。</p>
+                </div>
+                <div class="ops" style="min-width:300px">
+                  <button class="primary" type="button" id="kernel-go-live-package">读取上线包</button>
+                  <button class="op" type="button" id="kernel-go-live-package-all">全量上线包</button>
+                </div>
+              </div>
+              <div class="formline">
+                <div><label>Provider</label><select id="kernel-package-provider">{proxy_kernel_options}</select></div>
+                <div><label>工作路径</label><input readonly value="release 二进制优先；source-repo 只在必要时兜底" /></div>
+                <div><label>公开调用面</label><input readonly value="/v1/images/* /v1/videos/*" /></div>
+              </div>
+              <div class="go-live-layout" style="margin-top:14px">
+                <div class="go-live-board" id="kernel-go-live-package-panel">
+                  <div class="activation-empty">选择 provider 后点击“读取上线包”。这里会显示当前是否可直接调用、第一阻塞项、需要你提供的材料和可复制的调用样例。</div>
+                </div>
+                <div class="go-live-panel-grid">
+                  <div class="go-live-section">
+                    <h4>固定验收口径</h4>
+                    <p>必须同时具备真实账号、受控 loopback runtime、健康检查、Live 样本资产和普通用户 API Key，才算可以直接给下游使用。</p>
+                  </div>
+                  <div class="go-live-section">
+                    <h4>操作入口</h4>
+                    <div class="shortcut-grid">
+                      <button class="op" type="button" data-jump-tab="oauth">导入授权资源</button>
+                      <button class="op" type="button" data-activation-action="open-runtime">打开启动器</button>
+                      <button class="op" type="button" data-jump-tab="users">发放用户 Key</button>
+                      <button class="op" type="button" data-jump-tab="models">查看模型路由</button>
+                    </div>
+                  </div>
+                  <div class="go-live-section">
+                    <h4>为什么要单独看上线包</h4>
+                    <p>启动器负责 runtime 细节；账号池负责凭据；用户与鉴权负责下游 Key。上线包只回答普通操作者最关心的一件事：下一步该做什么。</p>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div class="panel subtab" id="kernels-start-pane">
               <div class="page-intro">
                 <div>
@@ -14271,6 +14343,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-runtime-health">Runtime 健康检查</button>
                   <button class="primary" type="button" id="kernel-activation-workflow">上线执行向导</button>
+                  <button class="op" type="button" id="kernel-go-live-package-open">上线包</button>
                   <button class="op" type="button" id="kernel-production-gap-report">生产缺口报告</button>
                   <button class="op" type="button" id="kernel-downstream-package">下游调用包</button>
                   <button class="primary" type="button" id="kernel-activation-run">启用预演</button>
@@ -14795,12 +14868,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }}
         function selectedKernelProvider() {{
           return document.getElementById('kernel-provider')?.value
+            || document.getElementById('kernel-package-provider')?.value
             || document.getElementById('kernel-log-provider')?.value
             || document.getElementById('kernel-source-provider')?.value
             || 'openai_web_session';
         }}
         function syncKernelSelects(providerId) {{
-          ['kernel-provider', 'kernel-log-provider', 'kernel-source-provider'].forEach(id => {{
+          ['kernel-provider', 'kernel-package-provider', 'kernel-log-provider', 'kernel-source-provider'].forEach(id => {{
             const select = document.getElementById(id);
             if (select && providerId) select.value = providerId;
           }});
@@ -15107,6 +15181,144 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             <div class="activation-provider-grid">${{cards}}</div>
           `;
         }}
+        function goLiveStatusLabel(status) {{
+          const labels = {{
+            ready_to_call: '可以调用',
+            ready_for_live_acceptance: '可跑真实验收',
+            materials_required: '需要材料',
+            action_required: '需要操作',
+            production_ready: '生产就绪',
+          }};
+          return labels[status] || activationStatusLabel(status);
+        }}
+        function goLiveStepHtml(step, index) {{
+          const statusClass = activationStatusClass(step.status);
+          return `
+            <div class="go-live-step ${{statusClass}}">
+              <div class="go-live-step-index">${{String(index + 1).padStart(2, '0')}}</div>
+              <div>
+                <b>
+                  <span>${{escapeHtml(step.label || step.id)}}</span>
+                  <span class="activation-badge ${{statusClass}}">${{escapeHtml(activationStatusLabel(step.status))}}</span>
+                </b>
+                <p>${{escapeHtml(step.action || '等待读取。')}}</p>
+                <div class="activation-meta" style="margin-top:8px">
+                  <b>位置</b><span>${{escapeHtml(step.ui_tab || '-')}}</span>
+                  <b>接口</b><span>${{escapeHtml(step.primary_api || '-')}}</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }}
+        function goLiveQuestionsHtml(questions) {{
+          if (!questions.length) return '<div class="go-live-question"><b>暂无待填材料</b>当前没有额外外部材料要求；继续刷新 runtime、健康检查和验收结果。</div>';
+          return questions.map(item => `
+            <div class="go-live-question">
+              <b>${{escapeHtml(item.label || item.name || item.section || '待填材料')}}</b>
+              <span>${{escapeHtml(item.message || item.where_to_put || item.input || '按模板替换成真实材料。')}}</span>
+            </div>
+          `).join('');
+        }}
+        function goLiveSampleHtml(samples) {{
+          const items = [
+            ['生图', samples.image_generation],
+            ['改图', samples.image_edit],
+            ['生视频', samples.video_generation],
+          ].filter(item => item[1]);
+          if (!items.length) return '<p>当前内核还没有可展示的下游调用样例。</p>';
+          return '<div class="go-live-sample-grid">' + items.map(([label, sample]) => `
+            <div class="downstream-sample">
+              <b><span>${{escapeHtml(label)}}</span><span class="activation-badge ${{sample.supported ? 'done' : 'blocked'}}">${{sample.supported ? '支持' : '未声明'}}</span></b>
+              <pre>${{escapeHtml(sample.curl || JSON.stringify(sample, null, 2))}}</pre>
+            </div>
+          `).join('') + '</div>';
+        }}
+        function renderGoLivePackagePanel(providerId, payload) {{
+          const panel = document.getElementById('kernel-go-live-package-panel');
+          if (!panel) return;
+          if (!payload || !payload.object) {{
+            panel.innerHTML = '<div class="activation-empty">选择 provider 后点击“读取上线包”。这里会显示当前是否可直接调用、第一阻塞项、需要你提供的材料和可复制的调用样例。</div>';
+            return;
+          }}
+          const steps = Array.isArray(payload.steps) ? payload.steps : [];
+          const questions = Array.isArray(payload.missing_external_inputs) ? payload.missing_external_inputs : [];
+          const next = payload.next_action || {{}};
+          const account = payload.account_connection || {{}};
+          const runtime = payload.runtime_connection || {{}};
+          const downstream = payload.downstream_call || {{}};
+          const samples = downstream.sample_requests || {{}};
+          const key = downstream.downstream_api_key || {{}};
+          panel.innerHTML = `
+            <div class="go-live-hero">
+              <div>
+                <h3>${{escapeHtml(providerId)}} 上线包</h3>
+                <p>下一步：${{escapeHtml(next.label || '等待读取')}}。${{escapeHtml(next.action || '')}}</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge ${{payload.ready_to_call ? 'done' : 'action-required'}}">${{escapeHtml(goLiveStatusLabel(payload.status))}}</span>
+                <span class="activation-badge ${{key.ready ? 'done' : 'needs-input'}}">${{key.ready ? '下游 Key 已就绪' : '缺下游 Key'}}</span>
+              </div>
+            </div>
+            <div class="activation-meta" style="margin-bottom:12px">
+              <b>账号</b><span>${{account.ready ? '已连接真实账号' : escapeHtml(account.status || '等待账号材料')}}</span>
+              <b>Runtime</b><span>${{runtime.ready ? 'loopback 已准备' : escapeHtml(runtime.next_step?.label || runtime.status || '等待 release/runtime')}}</span>
+              <b>验收</b><span>${{payload.ready_for_live_acceptance ? '可跑真实样本' : '等待前置条件'}}</span>
+              <b>仓库</b><span>${{payload.repo_url ? `<a href="${{escapeHtml(payload.repo_url)}}" target="_blank" rel="noreferrer">${{escapeHtml(payload.repo || payload.repo_url)}}</a>` : escapeHtml(payload.repo || '-')}}</span>
+            </div>
+            <div class="go-live-step-list">${{steps.map((step, index) => goLiveStepHtml(step, index)).join('')}}</div>
+            <div class="go-live-panel-grid" style="margin-top:12px">
+              <div class="go-live-section">
+                <h4>需要你提供的材料</h4>
+                <div class="go-live-question-list">${{goLiveQuestionsHtml(questions)}}</div>
+              </div>
+              <div class="go-live-section">
+                <h4>账号材料模板</h4>
+                <pre class="activation-json">${{escapeHtml(JSON.stringify(account.credential_value_json_template || account.payload_template || {{}}, null, 2))}}</pre>
+              </div>
+              <div class="go-live-section">
+                <h4>下游调用样例</h4>
+                ${{goLiveSampleHtml(samples)}}
+              </div>
+            </div>
+          `;
+        }}
+        function renderGoLivePackageOverview(payload) {{
+          const panel = document.getElementById('kernel-activation-overview');
+          if (!panel) return;
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          if (!rows.length) {{
+            panel.innerHTML = '<div class="activation-empty">上线包暂无数据。</div>';
+            return;
+          }}
+          const summary = payload.summary || {{}};
+          const cards = rows.map(row => {{
+            const next = row.next_action || {{}};
+            return `
+              <div class="activation-provider-card">
+                <b>${{escapeHtml(row.provider_id || '-')}}</b>
+                <span class="activation-badge ${{row.ready_to_call ? 'done' : 'action-required'}}">${{escapeHtml(goLiveStatusLabel(row.status))}}</span>
+                <p>${{escapeHtml('下一步：' + (next.label || '等待读取'))}}</p>
+                <p>待填：${{escapeHtml(String((row.missing_external_inputs || []).length))}} 项 · 验收：${{row.ready_for_live_acceptance ? '可运行' : '未就绪'}}</p>
+                <div class="activation-action-row"><button class="op" type="button" data-activation-action="inspect-go-live-package" data-provider-id="${{escapeHtml(row.provider_id || '')}}">查看上线包</button></div>
+              </div>
+            `;
+          }}).join('');
+          panel.innerHTML = `
+            <div class="activation-head">
+              <div>
+                <h3>全量上线包</h3>
+                <p>用同一个口径检查所有 provider：账号、runtime、健康、真实样本和下游 Key。</p>
+              </div>
+              <div class="activation-badges">
+                <span class="activation-badge">总数 ${{escapeHtml(summary.total || rows.length)}}</span>
+                <span class="activation-badge done">可调用 ${{escapeHtml(summary.ready_to_call || 0)}}</span>
+                <span class="activation-badge needs-input">需材料 ${{escapeHtml(summary.materials_required || 0)}}</span>
+                <span class="activation-badge action-required">需操作 ${{escapeHtml(summary.action_required || 0)}}</span>
+              </div>
+            </div>
+            <div class="activation-provider-grid">${{cards}}</div>
+          `;
+        }}
         function renderKernelSummary(providerId) {{
           const provider = providerId || selectedKernelProvider();
           const hint = kernelHint(provider);
@@ -15130,6 +15342,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const liveWorkspace = hint.live_workspace || {{}};
           const handoff = hint.operator_handoff || {{}};
           const activation = hint.activation_workflow || {{}};
+          const goLivePackage = hint.go_live_package || {{}};
           const downstream = hint.downstream_call_package || {{}};
           const runtimeHealth = hint.runtime_health_check || {{}};
           const liveAcceptance = hint.live_acceptance || {{}};
@@ -15153,6 +15366,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>上线工作台</dt><dd>${{escapeHtml(liveWorkspace.status || '未预检')}}${{liveWorkspace.next_step?.label ? ' · 下一步：' + escapeHtml(liveWorkspace.next_step.label) : ''}}</dd>
               <dt>交付包</dt><dd>${{escapeHtml(handoff.status || '未读取')}}${{handoff.operator_questions?.length ? ' · 待填 ' + escapeHtml(handoff.operator_questions.length) + ' 项' : ''}}</dd>
               <dt>执行向导</dt><dd>${{escapeHtml(activation.status || '未读取')}}${{activation.next_stage?.label ? ' · 下一步：' + escapeHtml(activation.next_stage.label) : ''}}</dd>
+              <dt>上线包</dt><dd>${{escapeHtml(goLivePackage.status || '未读取')}}${{goLivePackage.next_action?.label ? ' · 下一步：' + escapeHtml(goLivePackage.next_action.label) : ''}}</dd>
               <dt>下游调用</dt><dd>${{escapeHtml(downstream.status || '未读取')}}${{downstream.next_action?.label ? ' · 下一步：' + escapeHtml(downstream.next_action.label) : ''}}</dd>
               <dt>Runtime 健康</dt><dd>${{runtimeHealth.health_check ? escapeHtml(runtimeHealth.health_check.status || (runtimeHealth.ok ? 'ok' : 'failed')) : '未检查'}}${{runtimeHealth.health_check?.message ? ' · ' + escapeHtml(runtimeHealth.health_check.message) : ''}}</dd>
               <dt>真实验收</dt><dd>${{escapeHtml(liveAcceptance.status || '未运行')}}${{liveAcceptance.next_step?.label ? ' · 下一步：' + escapeHtml(liveAcceptance.next_step.label) : ''}}</dd>
@@ -15888,6 +16102,34 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           renderProductionGapReportOverview(payload);
           return payload;
         }}
+        function mergeKernelGoLivePackages(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            const hint = kernelHint(item.provider_id);
+            proxyKernelHints[item.provider_id] = Object.assign(hint, {{
+              go_live_package: item,
+              go_live_account_connection: item.account_connection || {{}},
+              runtime_delivery_plan: item.runtime_connection || hint.runtime_delivery_plan || {{}},
+              production_readiness: item.verification?.production_readiness || hint.production_readiness || {{}},
+              downstream_call_package: item.downstream_call || hint.downstream_call_package || {{}},
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+          if (Array.isArray(payload?.data)) renderGoLivePackageOverview(payload);
+          else if (payload?.provider_id) renderGoLivePackagePanel(payload.provider_id, payload);
+        }}
+        async function loadKernelGoLivePackage(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/go-live-package');
+          mergeKernelGoLivePackages(payload);
+          return payload;
+        }}
+        async function loadAllKernelGoLivePackages() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/go-live-package');
+          mergeKernelGoLivePackages(payload);
+          return payload;
+        }}
         async function loadKernelDownstreamCallPackage(providerId = null) {{
           const provider = providerId || selectedKernelProvider();
           syncKernelSelects(provider);
@@ -15978,6 +16220,13 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             activateMainTab('kernels');
             activateSubtab('kernels-start-pane');
             await loadKernelActivationWorkflow(provider);
+            return;
+          }}
+          if (action === 'inspect-go-live-package') {{
+            activateMainTab('kernels');
+            activateSubtab('kernels-go-live-pane');
+            await loadKernelGoLivePackage(provider);
+            document.getElementById('kernel-go-live-package-panel')?.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
             return;
           }}
           if (action === 'inspect-downstream') {{
@@ -16620,6 +16869,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           syncKernelSelects(event.target.value);
           renderKernelSummary(event.target.value);
         }});
+        document.getElementById('kernel-package-provider')?.addEventListener('change', event => {{
+          syncKernelSelects(event.target.value);
+          renderKernelSummary(event.target.value);
+          renderGoLivePackagePanel(event.target.value, kernelHint(event.target.value).go_live_package);
+        }});
         document.getElementById('kernel-log-provider')?.addEventListener('change', event => {{
           syncKernelSelects(event.target.value);
           renderKernelSummary(event.target.value);
@@ -16689,6 +16943,19 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-go-live-package-open')?.addEventListener('click', async () => {{
+          try {{
+            activateSubtab('kernels-go-live-pane');
+            const payload = await loadKernelGoLivePackage();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-go-live-package')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelGoLivePackage();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-production-gap-report')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelProductionGapReport();
@@ -16722,6 +16989,18 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-activation-workflow-all')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelActivationWorkflows();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-go-live-package-all')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelGoLivePackages();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-go-live-package-all-status')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelGoLivePackages();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -20895,6 +21174,17 @@ def admin_proxy_kernels_production_gap_report(provider_ids: str = "", ctx: AuthC
         raise HTTPException(status_code=400, detail={"error": str(exc), "production_gap_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/go-live-package")
+def admin_proxy_kernels_go_live_package(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_go_live_packages(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "go_live_package_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.get("/v1/admin/proxy-kernels/downstream-call-package")
 def admin_proxy_kernels_downstream_call_package(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
@@ -21059,6 +21349,14 @@ def admin_proxy_kernel_activation_workflow(provider_id: str, ctx: AuthContext = 
 def admin_proxy_kernel_production_gap_report(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_production_gap_report(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/go-live-package")
+def admin_proxy_kernel_go_live_package(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_go_live_package(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -23468,6 +23766,362 @@ def build_proxy_kernel_downstream_call_packages(db: Session, provider_ids: list[
             "admin_bootstrap_key_is_not_downstream_key": True,
             "official_sdk_api": "forbidden",
             "release_binary_preferred": True,
+        },
+    }
+
+
+def proxy_kernel_go_live_operator_questions(
+    provider_id: str,
+    account_materials: dict[str, Any],
+    handoff: dict[str, Any],
+    runtime_delivery: dict[str, Any],
+) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    required_fields = account_materials.get("required_fields") or []
+    if required_fields:
+        field_labels = ", ".join(str(field.get("label") or field.get("name")) for field in required_fields)
+        questions.append(
+            {
+                "section": "account",
+                "label": f"提供 {provider_id} 的真实账号材料",
+                "input": "credential_value / credential_ref",
+                "required": True,
+                "message": f"请把 {field_labels} 替换成真实 Web session、CLI OAuth 或 Agent profile；不要保留 <...> 占位符。",
+                "fields": required_fields,
+            }
+        )
+    for group in account_materials.get("any_of_groups") or []:
+        questions.append(
+            {
+                "section": "account",
+                "label": "任选一种账号凭据输入",
+                "input": group.get("group"),
+                "required": bool(group.get("required")),
+                "message": "该 provider 接受多种凭据形态，请任选一种真实材料填写。",
+                "fields": group.get("fields") or [],
+            }
+        )
+
+    runtime_state = runtime_delivery.get("state") or {}
+    if not runtime_state.get("release_or_runtime_ready"):
+        questions.append(
+            {
+                "section": "runtime",
+                "label": "提供 release 资产和 SHA256，或确认 source-repo 兜底",
+                "input": "tag_name / asset_name / expected_sha256",
+                "required": True,
+                "message": "优先使用目标仓库 release 中的 Linux 二进制或压缩包；没有可安装 release 时才同步 source-repo 做协议参考、构建或重写 adapter。",
+            }
+        )
+    if not runtime_state.get("runtime_registered"):
+        questions.append(
+            {
+                "section": "runtime",
+                "label": "提供 loopback runtime 启动参数",
+                "input": "base_url / command / artifact_path",
+                "required": True,
+                "message": "runtime 只能监听 127.0.0.1、localhost 或 ::1；公开 API 仍由 media2api 对外提供。",
+            }
+        )
+
+    seen = {(item.get("section"), item.get("label")) for item in questions}
+    for item in handoff.get("operator_questions") or []:
+        key = (item.get("section"), item.get("label"))
+        if key not in seen:
+            questions.append(item)
+            seen.add(key)
+    return questions
+
+
+def proxy_kernel_go_live_step(
+    step_id: str,
+    label: str,
+    ok: bool,
+    *,
+    status: str | None = None,
+    action: str = "",
+    ui_tab: str = "",
+    primary_api: str = "",
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": step_id,
+        "label": label,
+        "status": status or ("done" if ok else "action_required"),
+        "ok": bool(ok),
+        "action": action,
+        "ui_tab": ui_tab,
+        "primary_api": primary_api,
+        "detail": detail or {},
+    }
+
+
+def proxy_kernel_go_live_next_action(steps: list[dict[str, Any]], downstream: dict[str, Any]) -> dict[str, Any]:
+    if downstream.get("ready_to_call"):
+        return {
+            "id": "call_downstream_api",
+            "label": "复制下游调用样例",
+            "action": "使用普通用户 API Key 调用 /v1/images/* 或 /v1/videos/*。",
+            "ui_tab": "上线包",
+        }
+    for step in steps:
+        if not step.get("ok"):
+            return {
+                "id": step.get("id"),
+                "label": step.get("label"),
+                "action": step.get("action"),
+                "ui_tab": step.get("ui_tab"),
+                "primary_api": step.get("primary_api"),
+                "detail": step.get("detail") or {},
+            }
+    next_action = downstream.get("next_action") or {}
+    return {
+        "id": str(next_action.get("stage") or "inspect_downstream"),
+        "label": str(next_action.get("label") or "检查下游调用包"),
+        "action": "刷新下游调用包，确认普通用户 API Key 和调用样例。",
+        "ui_tab": "上线包",
+        "detail": next_action,
+    }
+
+
+def build_proxy_kernel_go_live_package(db: Session, provider_id: str) -> dict[str, Any]:
+    if provider_id not in PROVIDER_TEMPLATES:
+        raise KeyError(provider_id)
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    account_materials = build_proxy_kernel_account_materials(db, provider_id)
+    runtime_delivery = build_proxy_kernel_runtime_delivery_plan(db, provider_id)
+    readiness = build_proxy_kernel_production_readiness(db, provider_id)
+    activation = build_proxy_kernel_activation_workflow(db, provider_id)
+    handoff = build_proxy_kernel_operator_handoff(db, provider_id)
+    downstream = build_proxy_kernel_downstream_call_package(db, provider_id)
+    contract = build_proxy_kernel_runtime_contract(db, provider_id)
+    production_state = readiness.get("state") or {}
+    downstream_key = downstream.get("downstream_api_key") or {}
+    runtime_state = runtime_delivery.get("state") or {}
+    account_ready = bool(production_state.get("account_ready"))
+    runtime_ready = bool(production_state.get("runtime_ready"))
+    health_ok = bool(production_state.get("health_ok"))
+    live_ok = bool(production_state.get("live_acceptance_ok"))
+    downstream_key_ready = bool(downstream_key.get("ready"))
+    route_ready = bool(production_state.get("route_ready"))
+    contract_ready = bool(production_state.get("contract_ready"))
+    ready_to_call = bool(downstream.get("ready_to_call"))
+    steps = [
+        proxy_kernel_go_live_step(
+            "routing",
+            "确认模型路由",
+            route_ready and contract_ready,
+            action="点击“补齐路由映射”，让逻辑模型指向这个 provider 声明的图片/视频能力。",
+            ui_tab="启动执行器",
+            primary_api=f"/v1/admin/proxy-kernels/{provider_id}/apply-routing",
+            detail={"route_ready": route_ready, "contract_ready": contract_ready, "contract_status": contract.get("status")},
+        ),
+        proxy_kernel_go_live_step(
+            "account",
+            "连接真实上游账号",
+            account_ready,
+            status="done" if account_ready else "needs_input",
+            action="按账号材料模板提交真实 Web session、CLI OAuth 或 Agent profile；预检通过后导入账号池。",
+            ui_tab="上线包 / 授权资源",
+            primary_api=f"/v1/admin/proxy-kernels/{provider_id}/account-materials",
+            detail={
+                "status": account_materials.get("status"),
+                "required_fields": account_materials.get("required_fields") or [],
+                "any_of_groups": account_materials.get("any_of_groups") or [],
+            },
+        ),
+        proxy_kernel_go_live_step(
+            "runtime",
+            "准备并启动反代内核",
+            runtime_ready,
+            action="优先安装 release 二进制并校验 SHA256；没有可用 release 时同步 source-repo 做参考或构建，再启动 loopback runtime。",
+            ui_tab="启动执行器",
+            primary_api=f"/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan",
+            detail={
+                "status": runtime_delivery.get("status"),
+                "next_step": runtime_delivery.get("next_step"),
+                "release_or_runtime_ready": runtime_state.get("release_or_runtime_ready"),
+                "runtime_registered": runtime_state.get("runtime_registered"),
+                "process": kernel.get("process") or {},
+            },
+        ),
+        proxy_kernel_go_live_step(
+            "health",
+            "运行 runtime 健康检查",
+            health_ok,
+            action="启动或登记 loopback runtime 后运行健康检查，确认 media2api 可以访问执行器。",
+            ui_tab="启动执行器",
+            primary_api=f"/v1/admin/proxy-kernels/{provider_id}/runtime-health-check",
+            detail={"latest_health": (readiness.get("evidence") or {}).get("latest_health")},
+        ),
+        proxy_kernel_go_live_step(
+            "live_acceptance",
+            "跑 1 条真实样本验收",
+            live_ok,
+            status="done" if live_ok else ("waiting" if not (route_ready and account_ready and runtime_ready and health_ok) else "action_required"),
+            action="先 dry-run，再切到 Live 模式运行 1 条真实样本，确认有可下载图片或视频资产。",
+            ui_tab="启动执行器",
+            primary_api=f"/v1/admin/proxy-kernels/{provider_id}/live-acceptance",
+            detail={"ready_for_live_acceptance": readiness.get("ready_for_live_acceptance")},
+        ),
+        proxy_kernel_go_live_step(
+            "downstream_key",
+            "发放普通用户 API Key",
+            downstream_key_ready,
+            action="创建或复用普通用户 API Key。不要把管理员 bootstrap key 当成客户调用 key。",
+            ui_tab="用户与鉴权",
+            primary_api=f"/v1/admin/proxy-kernels/{provider_id}/downstream-call-package",
+            detail=downstream_key,
+        ),
+        proxy_kernel_go_live_step(
+            "call_downstream_api",
+            "复制调用样例验证",
+            ready_to_call,
+            status="done" if ready_to_call else "waiting",
+            action="使用下游 Key 调用 /v1/images/generations、/v1/images/edits 或 /v1/videos/generations。",
+            ui_tab="上线包",
+            primary_api="/v1/images/* /v1/videos/*",
+            detail={"sample_requests": downstream.get("sample_requests") or {}},
+        ),
+    ]
+    questions = proxy_kernel_go_live_operator_questions(provider_id, account_materials, handoff, runtime_delivery)
+    next_action = proxy_kernel_go_live_next_action(steps, downstream)
+    base = settings.public_base_url.rstrip("/")
+    admin_key = "$MEDIA2API_API_KEY"
+    status = (
+        "ready_to_call"
+        if ready_to_call
+        else "ready_for_live_acceptance"
+        if readiness.get("ready_for_live_acceptance")
+        else "materials_required"
+        if any(step.get("status") == "needs_input" for step in steps)
+        else "action_required"
+    )
+    return {
+        "object": "media2api.proxy_kernel.go_live_package",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "repo": (kernel.get("spec") or {}).get("repo"),
+        "repo_url": (kernel.get("spec") or {}).get("repo_url"),
+        "status": status,
+        "ready_to_call": ready_to_call,
+        "production_ready": bool(readiness.get("production_ready")),
+        "ready_for_live_acceptance": bool(readiness.get("ready_for_live_acceptance")),
+        "next_action": next_action,
+        "steps": steps,
+        "missing_external_inputs": questions,
+        "account_connection": {
+            "ready": account_ready,
+            "status": account_materials.get("status"),
+            "auth_method": (account_materials.get("payload_template") or {}).get("auth_method"),
+            "resource_type": (account_materials.get("payload_template") or {}).get("resource_type"),
+            "required_fields": account_materials.get("required_fields") or [],
+            "any_of_groups": account_materials.get("any_of_groups") or [],
+            "credential_value_json_template": account_materials.get("credential_value_json_template"),
+            "payload_template": account_materials.get("payload_template"),
+            "payload_preview": account_materials.get("payload_preview"),
+            "preflight": account_materials.get("preflight"),
+            "guide": account_materials.get("guide"),
+            "commands": account_materials.get("commands"),
+        },
+        "runtime_connection": {
+            "ready": runtime_ready,
+            "status": runtime_delivery.get("status"),
+            "next_step": runtime_delivery.get("next_step"),
+            "state": runtime_delivery.get("state"),
+            "release_binary_preferred": True,
+            "source_repo_only_when_needed": True,
+            "runtime": runtime_delivery.get("runtime"),
+            "source_repo": kernel.get("source_repo") or proxy_kernel_service.source_repo_status(provider_id),
+            "process": kernel.get("process") or {},
+            "commands": runtime_delivery.get("commands"),
+        },
+        "verification": {
+            "health_ok": health_ok,
+            "live_acceptance_ok": live_ok,
+            "production_readiness": {
+                "status": readiness.get("status"),
+                "state": readiness.get("state"),
+                "next_step": readiness.get("next_step"),
+            },
+            "activation_workflow": {
+                "status": activation.get("status"),
+                "next_stage": activation.get("next_stage"),
+                "required_user_inputs": activation.get("required_user_inputs") or [],
+            },
+        },
+        "downstream_call": {
+            "ready": ready_to_call,
+            "status": downstream.get("status"),
+            "downstream_api_key": downstream_key,
+            "environment": downstream.get("environment"),
+            "sample_requests": downstream.get("sample_requests"),
+            "commands": downstream.get("commands"),
+            "blockers": downstream.get("blockers") or [],
+        },
+        "commands": {
+            "inspect": f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/go-live-package",
+            "apply_routing": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/apply-routing -d '{{\"status\":\"active\",\"enable_mappings\":true,\"priority_offset\":0,\"update_provider_base_url\":true}}'",
+            "account_materials": (account_materials.get("commands") or {}).get("inspect"),
+            "account_preflight": (account_materials.get("commands") or {}).get("preflight"),
+            "runtime_delivery_plan": (runtime_delivery.get("commands") or {}).get("inspect") or f"curl -H \"Authorization: Bearer {admin_key}\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan",
+            "release_probe": (runtime_delivery.get("commands") or {}).get("release_probe"),
+            "install_release": (runtime_delivery.get("commands") or {}).get("install_release"),
+            "source_repo_sync": (runtime_delivery.get("commands") or {}).get("source_repo_sync"),
+            "start_runtime": (runtime_delivery.get("commands") or {}).get("start_runtime"),
+            "runtime_health_check": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/runtime-health-check -d '{{\"sync_provider_base_url\":true,\"require_running_process\":false,\"fail_on_health_check\":false}}'",
+            "live_acceptance_dry_run": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{{\"dry_run\":true,\"run_runtime_health\":true,\"require_runtime_health\":true,\"run_samples\":true,\"max_samples\":1}}'",
+            "live_acceptance": f"curl -X POST -H \"Authorization: Bearer {admin_key}\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/{provider_id}/live-acceptance -d '{{\"dry_run\":false,\"run_runtime_health\":true,\"require_runtime_health\":true,\"run_samples\":true,\"max_samples\":1}}'",
+            "downstream_call_package": (downstream.get("commands") or {}).get("inspect"),
+            "create_downstream_key": (downstream.get("commands") or {}).get("create_key"),
+        },
+        "ui_navigation": [
+            {"label": "先看上线包", "tab": "反代内核", "pane": "上线包"},
+            {"label": "填账号材料", "tab": "反代内核", "pane": "上线包 / 授权资源"},
+            {"label": "安装并启动 runtime", "tab": "反代内核", "pane": "启动执行器"},
+            {"label": "发放下游 Key", "tab": "用户与鉴权", "pane": "API Key / 创建与发放"},
+        ],
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "release_binary_first": True,
+            "source_repo_only_when": "release missing, asset unusable, protocol inspection, local build input, or adapter rewrite reference",
+            "managed_runtime_listener": "loopback_only",
+            "admin_bootstrap_key_is_not_downstream_key": True,
+            "ready_to_call_requires_real_account_runtime_health_live_acceptance_and_user_api_key": True,
+        },
+    }
+
+
+def build_proxy_kernel_go_live_packages(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_go_live_package(db, provider_id) for provider_id in selected]
+    next_action_counts: dict[str, int] = {}
+    for row in rows:
+        action_id = str((row.get("next_action") or {}).get("id") or "unknown")
+        next_action_counts[action_id] = next_action_counts.get(action_id, 0) + 1
+    return {
+        "object": "media2api.proxy_kernel.go_live_package.list",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": {
+            "total": len(rows),
+            "ready_to_call": sum(1 for row in rows if row.get("ready_to_call")),
+            "ready_for_live_acceptance": sum(1 for row in rows if row.get("ready_for_live_acceptance")),
+            "production_ready": sum(1 for row in rows if row.get("production_ready")),
+            "materials_required": sum(1 for row in rows if row.get("status") == "materials_required"),
+            "action_required": sum(1 for row in rows if row.get("status") == "action_required"),
+            "missing_external_input_count": sum(len(row.get("missing_external_inputs") or []) for row in rows),
+            "next_action_counts": next_action_counts,
+        },
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "ready_to_call_requires_real_acceptance": True,
         },
     }
 
