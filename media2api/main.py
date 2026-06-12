@@ -6979,7 +6979,7 @@ def cleanup_stability_acceptance_artifacts(db: Session, started_at: datetime, re
     stability_user_ids = {
         user_id
         for user_id, in db.query(models.User.id)
-        .filter(models.User.tier.in_(["stability_self_test", "stability_acceptance_suite"]), models.User.created_at >= started_at - timedelta(seconds=5))
+        .filter(models.User.tier.in_(["stability_self_test", "stability_acceptance_suite"]))
         .all()
     }
     if stability_user_ids:
@@ -7052,6 +7052,8 @@ def cleanup_stability_acceptance_artifacts(db: Session, started_at: datetime, re
     for asset in list(db.query(models.MediaAsset).filter(models.MediaAsset.id.in_(asset_ids)).all()) if asset_ids else []:
         asset_service.delete(db, asset)
         deleted["assets"] += 1
+    if asset_ids:
+        db.flush()
     if job_ids:
         deleted["events"] += db.query(models.MediaJobEvent).filter(models.MediaJobEvent.job_id.in_(job_ids)).delete(synchronize_session=False)
         deleted["leases"] += db.query(models.AccountLease).filter(models.AccountLease.job_id.in_(job_ids)).delete(synchronize_session=False)
