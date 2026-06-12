@@ -196,7 +196,9 @@ an adapter rewrite needs reference code. Synced source repositories can be
 inspected for Node/Go/Python/Docker runtime commands, then wrapped in a
 SHA256-recorded launcher artifact under the persistent
 `MEDIA2API_PROXY_KERNEL_DIR` runtime directory; the launcher still runs through
-the same loopback-only `start-runtime` gate.
+the same loopback-only `start-runtime` gate. Source dependency/build setup is
+also exposed as a planned command runner and only executes commands discovered
+by `source-runtime-plan` with `shell=false`.
 
 In the proxy-kernel dashboard, "可直接用" is intentionally strict: route
 mappings, a loopback runtime, real account material, runtime health, and live

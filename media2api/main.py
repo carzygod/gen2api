@@ -1325,6 +1325,17 @@ class ProxyKernelSourceRuntimeLauncherRequest(BaseModel):
     notes: str = ""
 
 
+class ProxyKernelSourceRuntimeSetupRequest(BaseModel):
+    dry_run: bool = True
+    command_id: str = ""
+    command: list[str] = Field(default_factory=list)
+    cwd: str = ""
+    env: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = 900
+    notes: str = ""
+    allow_reference_commands: bool = False
+
+
 class ProxyKernelRoutingApplyRequest(BaseModel):
     status: str = "active"
     enable_mappings: bool = True
@@ -7425,6 +7436,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan"),
+    ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher"),
     ("GET", "/v1/admin/account-guides"),
     ("GET", "/v1/admin/account-guides/{provider_id}"),
@@ -7688,6 +7700,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-repo"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-repo/sync"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-plan"),
+                ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher"),
             ],
             proxy_kernel_service.list_kernels(db)["summary"],
@@ -14199,6 +14212,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-source-sync-needed-plan">source-repo 缺口计划</button>
                   <button class="primary" type="button" id="kernel-source-sync-needed">同步需要源码参考</button>
                   <button class="op" type="button" id="kernel-source-runtime-plan">源码运行计划</button>
+                  <button class="op" type="button" id="kernel-source-runtime-setup">源码准备 dry-run</button>
                   <button class="op" type="button" id="kernel-source-runtime-launcher">生成启动器 dry-run</button>
                 </div>
               </div>
@@ -14566,6 +14580,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const releaseChecksums = hint.release_checksums || {{}};
           const sourceSync = hint.source_repo_sync || {{}};
           const sourceRuntimePlan = hint.source_runtime_plan || {{}};
+          const sourceRuntimeSetup = hint.source_runtime_setup || {{}};
           const sourceRuntimeLauncher = hint.source_runtime_launcher || {{}};
           const runtimeContract = hint.runtime_contract || {{}};
           const productionReadiness = hint.production_readiness || {{}};
@@ -14602,7 +14617,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>材料清单</dt><dd>${{escapeHtml(materials.status || '未读取')}}${{materials.next_step?.label ? ' · 下一步：' + escapeHtml(materials.next_step.label) : ''}}</dd>
               <dt>source-repo</dt><dd class="kernel-path-note">${{source.exists ? escapeHtml(source.path || '已同步') : escapeHtml(source.path || '未同步')}}</dd>
               <dt>源码兜底</dt><dd>${{escapeHtml(sourceSync.status || '未计划')}}${{sourceSync.reason ? ' · ' + escapeHtml(sourceSync.reason) : ''}}</dd>
-              <dt>源码运行</dt><dd>${{escapeHtml((sourceRuntimePlan.detected_project_types || []).join(', ') || '未识别')}}${{sourceRuntimeLauncher.launcher?.path ? ' · 启动器已生成' : ''}}</dd>
+              <dt>源码运行</dt><dd>${{escapeHtml((sourceRuntimePlan.detected_project_types || []).join(', ') || '未识别')}}${{sourceRuntimeSetup.status ? ' · 准备：' + escapeHtml(sourceRuntimeSetup.status) : ''}}${{sourceRuntimeLauncher.launcher?.path ? ' · 启动器已生成' : ''}}</dd>
             </dl>
             ${{blockerHtml}}
           `;
@@ -14767,6 +14782,28 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           if (output) output.textContent = JSON.stringify(payload, null, 2);
           renderKernelSummary(provider);
           return payload;
+        }}
+        async function prepareKernelSourceRuntimeSetup(dryRun = true) {{
+          const provider = document.getElementById('kernel-source-provider')?.value || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const plan = kernelHint(provider).source_runtime_plan || await loadKernelSourceRuntimePlan(provider);
+          const commands = [...(plan.dependency_commands || []), ...(plan.build_commands || [])].filter(item => !item.reference_only);
+          const selected = commands[0] || {{}};
+          const payload = {{
+            dry_run: Boolean(dryRun),
+            command_id: selected.id || '',
+            command: selected.command || [],
+            cwd: selected.cwd || '',
+            env: {{}},
+            timeout_seconds: 900,
+            notes: 'source-repo dependency/build setup',
+          }};
+          const response = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/source-runtime-setup', 'POST', payload);
+          proxyKernelHints[provider] = Object.assign(kernelHint(provider), {{ source_runtime_setup: response }});
+          const output = document.getElementById('kernel-source-output') || result;
+          if (output) output.textContent = JSON.stringify(response, null, 2);
+          renderKernelSummary(provider);
+          return response;
         }}
         async function prepareKernelSourceRuntimeLauncher(dryRun = true) {{
           const provider = document.getElementById('kernel-source-provider')?.value || selectedKernelProvider();
@@ -15938,6 +15975,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-source-runtime-plan')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadKernelSourceRuntimePlan();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-source-runtime-setup')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await prepareKernelSourceRuntimeSetup(true);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -23901,6 +23944,30 @@ def admin_proxy_kernel_source_runtime_plan(
         return proxy_kernel_service.source_runtime_plan(provider_id, base_url=base_url)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/{provider_id}/source-runtime-setup")
+def admin_proxy_kernel_source_runtime_setup(
+    provider_id: str,
+    req: ProxyKernelSourceRuntimeSetupRequest,
+    ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    try:
+        return proxy_kernel_service.prepare_source_runtime_setup(
+            provider_id,
+            dry_run=req.dry_run,
+            command_id=req.command_id,
+            command=req.command,
+            cwd=req.cwd,
+            env=req.env,
+            timeout_seconds=req.timeout_seconds,
+            notes=req.notes,
+            allow_reference_commands=req.allow_reference_commands,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "source_runtime_setup_policy": "source setup commands must come from source-runtime-plan, run with shell=false, and stay within the finalized source-repo checkout"}) from exc
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/source-runtime-launcher")

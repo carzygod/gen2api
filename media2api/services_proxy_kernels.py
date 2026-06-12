@@ -747,12 +747,17 @@ class ProxyKernelRuntimeService:
         path_text = str(process.get(key) or "")
         content = ""
         path = Path(path_text) if path_text else None
-        if path and path.exists() and path.is_file():
-            size = path.stat().st_size
-            with path.open("rb") as fh:
-                fh.seek(max(size - max_bytes, 0))
-                content = fh.read(max_bytes).decode("utf-8", errors="replace")
+        if path:
+            content = self.tail_file(path, max_bytes)
         return {"object": "media2api.proxy_kernel.logs", "provider_id": provider_id, "stream": stream, "path": str(path) if path else "", "content": content}
+
+    def tail_file(self, path: Path, max_bytes: int = 12000) -> str:
+        if not path.exists() or not path.is_file():
+            return ""
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            fh.seek(max(size - max_bytes, 0))
+            return fh.read(max_bytes).decode("utf-8", errors="replace")
 
     def resolve_start_artifact(self, provider_id: str, artifact_path: str, expected_sha256: str, command: list[str]) -> dict[str, Any]:
         state = self.load_state()
@@ -913,6 +918,9 @@ class ProxyKernelRuntimeService:
             if files.get("uv_lock"):
                 dependency_commands.append({"id": "uv_sync", "command": ["uv", "sync"], "cwd": str(repo_path)})
                 python_prefix = ["uv", "run", "python"]
+            elif files.get("requirements"):
+                dependency_commands.append({"id": "pip_install_requirements", "command": [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], "cwd": str(repo_path)})
+                python_prefix = [sys.executable]
             else:
                 dependency_commands.append({"id": "pip_install_editable", "command": [sys.executable, "-m", "pip", "install", "-e", "."], "cwd": str(repo_path)})
                 python_prefix = [sys.executable]
@@ -983,6 +991,7 @@ class ProxyKernelRuntimeService:
                 "version": f"source:{source.get('head') or source.get('current_ref') or 'unversioned'}",
                 "notes": "Generated from source-runtime-plan; install dependencies before starting.",
             },
+            "source_setup": (self.load_state().get("kernels", {}).get(provider_id, {}) or {}).get("source_setup") or {},
             "policy": {
                 "read_only": True,
                 "release_binary_first": True,
@@ -993,6 +1002,180 @@ class ProxyKernelRuntimeService:
                 "shell": "forbidden",
             },
         }
+
+    def source_runtime_setup_catalog(self, plan: dict[str, Any]) -> list[dict[str, Any]]:
+        catalog: list[dict[str, Any]] = []
+        for kind, key in (("dependency", "dependency_commands"), ("build", "build_commands")):
+            for item in plan.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                command = item.get("command") if isinstance(item.get("command"), list) else []
+                cwd = str(item.get("cwd") or "")
+                if not command or not all(isinstance(part, str) and part.strip() for part in command):
+                    continue
+                catalog.append({
+                    **item,
+                    "kind": kind,
+                    "id": str(item.get("id") or f"{kind}_{len(catalog) + 1}"),
+                    "command": command,
+                    "cwd": cwd,
+                    "reference_only": bool(item.get("reference_only")),
+                })
+        return catalog
+
+    def select_source_runtime_setup_command(
+        self,
+        provider_id: str,
+        plan: dict[str, Any],
+        command_id: str = "",
+        command: list[str] | None = None,
+        cwd: str = "",
+        allow_reference_commands: bool = False,
+    ) -> dict[str, Any]:
+        spec = self.require_spec(provider_id)
+        repo_root = self.source_repo_path(spec).resolve()
+        catalog = self.source_runtime_setup_catalog(plan)
+        selected: dict[str, Any] | None = None
+        if command_id:
+            selected = next((item for item in catalog if item.get("id") == command_id), None)
+            if not selected:
+                raise ValueError("SOURCE_RUNTIME_SETUP_COMMAND_NOT_FOUND")
+        elif command:
+            selected = next((item for item in catalog if item.get("command") == command), None)
+            if not selected:
+                raise ValueError("SOURCE_RUNTIME_SETUP_COMMAND_NOT_IN_PLAN")
+        elif catalog:
+            selected = next((item for item in catalog if not item.get("reference_only")), catalog[0])
+        if not selected:
+            raise ValueError("SOURCE_RUNTIME_SETUP_COMMAND_REQUIRED")
+        if selected.get("reference_only") and not allow_reference_commands:
+            raise ValueError("SOURCE_RUNTIME_SETUP_REFERENCE_COMMAND")
+        selected_command = selected.get("command") or []
+        if not selected_command or not all(isinstance(part, str) and part.strip() for part in selected_command):
+            raise ValueError("SOURCE_RUNTIME_SETUP_COMMAND_REQUIRED")
+        workdir = Path(cwd or selected.get("cwd") or str(repo_root)).expanduser().resolve()
+        if not self.path_within(workdir, repo_root):
+            raise ValueError("SOURCE_RUNTIME_SETUP_CWD_OUTSIDE_SOURCE_REPO")
+        if not workdir.exists() or not workdir.is_dir():
+            raise ValueError("SOURCE_RUNTIME_SETUP_CWD_NOT_FOUND")
+        return {**selected, "command": selected_command, "cwd": str(workdir)}
+
+    def prepare_source_runtime_setup(
+        self,
+        provider_id: str,
+        dry_run: bool = True,
+        command_id: str = "",
+        command: list[str] | None = None,
+        cwd: str = "",
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 900,
+        notes: str = "",
+        allow_reference_commands: bool = False,
+    ) -> dict[str, Any]:
+        spec = self.require_spec(provider_id)
+        plan = self.source_runtime_plan(provider_id)
+        if not plan.get("source_available"):
+            raise ValueError("SOURCE_REPO_NOT_READY")
+        selected = self.select_source_runtime_setup_command(
+            provider_id,
+            plan,
+            command_id=command_id,
+            command=command,
+            cwd=cwd,
+            allow_reference_commands=allow_reference_commands,
+        )
+        setup_env = {str(key): str(value) for key, value in (env or {}).items() if str(key)}
+        payload = {
+            "object": "media2api.proxy_kernel.source_runtime_setup",
+            "provider_id": provider_id,
+            "selection_id": spec.selection_id,
+            "dry_run": bool(dry_run),
+            "status": "planned" if dry_run else "running",
+            "command": selected["command"],
+            "command_id": selected.get("id") or "",
+            "kind": selected.get("kind") or "",
+            "cwd": selected["cwd"],
+            "env_keys": sorted(setup_env.keys()),
+            "timeout_seconds": max(1, min(int(timeout_seconds or 900), 3600)),
+            "notes": notes,
+            "catalog": self.source_runtime_setup_catalog(plan),
+            "policy": {
+                "release_binary_first": True,
+                "source_repo_only_when_needed": True,
+                "official_sdk_api": "forbidden",
+                "third_party_public_service": "forbidden",
+                "shell": "forbidden",
+                "cwd_scope": "source_repo_only",
+                "reference_commands": "dry_run_only_by_default",
+            },
+        }
+        if dry_run:
+            return payload
+
+        log_dir = self.root / provider_id / "source-setup"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        safe_id = self.safe_filename(str(selected.get("id") or "setup"))
+        stdout_path = log_dir / f"{stamp}-{safe_id}-stdout.log"
+        stderr_path = log_dir / f"{stamp}-{safe_id}-stderr.log"
+        child_env = dict(os.environ)
+        child_env.update(setup_env)
+        started_at = self.utcnow()
+        status = "completed"
+        exit_code: int | None = None
+        timed_out = False
+        error = ""
+        try:
+            with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+                result = subprocess.run(
+                    selected["command"],
+                    cwd=selected["cwd"],
+                    env=child_env,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    stdin=subprocess.DEVNULL,
+                    shell=False,
+                    timeout=payload["timeout_seconds"],
+                    check=False,
+                )
+            exit_code = result.returncode
+            if exit_code != 0:
+                status = "failed"
+        except subprocess.TimeoutExpired:
+            status = "timeout"
+            timed_out = True
+        except FileNotFoundError as exc:
+            status = "failed"
+            error = f"COMMAND_NOT_FOUND: {exc.filename}"
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)
+
+        result_payload = {
+            **payload,
+            "dry_run": False,
+            "status": status,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "error": error,
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
+            "started_at": started_at,
+            "finished_at": self.utcnow(),
+            "stdout_tail": self.tail_file(stdout_path, 4000),
+            "stderr_tail": self.tail_file(stderr_path, 4000),
+        }
+        state = self.load_state()
+        entry = state.setdefault("kernels", {}).setdefault(provider_id, {})
+        history = entry.setdefault("source_setup_history", [])
+        if not isinstance(history, list):
+            history = []
+        recorded = {key: value for key, value in result_payload.items() if key not in {"catalog", "stdout_tail", "stderr_tail"}}
+        history.append(recorded)
+        entry["source_setup_history"] = history[-20:]
+        entry["source_setup"] = recorded
+        self.save_state(state)
+        return result_payload
 
     def prepare_source_runtime_launcher(
         self,
