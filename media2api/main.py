@@ -7284,6 +7284,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/routing-plan"),
     ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
     ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
+    ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
     ("POST", "/v1/admin/proxy-kernels/apply-routing"),
     ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
@@ -7292,6 +7293,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
+    ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
@@ -7530,6 +7532,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/routing-plan"),
                 ("GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
                 ("GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
+                ("GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
                 ("POST", "/v1/admin/proxy-kernels/apply-routing"),
                 ("GET", "/v1/admin/proxy-kernels/go-live-checklist"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/go-live-checklist"),
@@ -7538,6 +7541,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-delivery-plan"),
+                ("GET", "/v1/admin/proxy-kernels/{provider_id}/runtime-contract"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/release-probe"),
                 ("POST", "/v1/admin/proxy-kernels/{provider_id}/install-release"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/routing-plan"),
@@ -13315,6 +13319,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("全量路由计划", "GET", "/v1/admin/proxy-kernels/routing-plan"),
         ("全量运行时交付计划", "GET", "/v1/admin/proxy-kernels/runtime-delivery-plan"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
+        ("全量运行合同矩阵", "GET", "/v1/admin/proxy-kernels/runtime-contract-matrix"),
         ("应用全部定型路由", "POST", "/v1/admin/proxy-kernels/apply-routing"),
         ("全量上线清单", "GET", "/v1/admin/proxy-kernels/go-live-checklist"),
         ("OpenAI Web 上线清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist"),
@@ -13322,6 +13327,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("OpenAI Web 材料清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/materials-request"),
         ("Loopback 合同自检", "POST", "/v1/admin/proxy-kernels/loopback-contract-test"),
         ("OpenAI Web 运行时交付计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan"),
+        ("OpenAI Web 运行合同", "GET", "/v1/admin/proxy-kernels/openai_web_session/runtime-contract"),
         ("探测 OpenAI Web Release", "POST", "/v1/admin/proxy-kernels/openai_web_session/release-probe"),
         ("探测 Gemini CLI Release", "POST", "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe"),
         ("OpenAI Web 路由计划", "GET", "/v1/admin/proxy-kernels/openai_web_session/routing-plan"),
@@ -13383,6 +13389,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
+        "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
@@ -13390,6 +13397,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/materials-request",
         "/v1/admin/proxy-kernels/loopback-contract-test",
         "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan",
+        "/v1/admin/proxy-kernels/openai_web_session/runtime-contract",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
         "/v1/admin/proxy-kernels/openai_web_session/apply-routing",
@@ -13420,6 +13428,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/routing-plan",
         "/v1/admin/proxy-kernels/runtime-delivery-plan",
         "/v1/admin/proxy-kernels/release-probe-matrix",
+        "/v1/admin/proxy-kernels/runtime-contract-matrix",
         "/v1/admin/proxy-kernels/apply-routing",
         "/v1/admin/proxy-kernels/go-live-checklist",
         "/v1/admin/proxy-kernels/openai_web_session/go-live-checklist",
@@ -13427,6 +13436,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/openai_web_session/materials-request",
         "/v1/admin/proxy-kernels/loopback-contract-test",
         "/v1/admin/proxy-kernels/openai_web_session/runtime-delivery-plan",
+        "/v1/admin/proxy-kernels/openai_web_session/runtime-contract",
         "/v1/admin/proxy-kernels/openai_web_session/release-probe",
         "/v1/admin/proxy-kernels/gemini_cli_oauth/release-probe",
         "/v1/admin/proxy-kernels/openai_web_session/routing-plan",
@@ -13894,6 +13904,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                   <button class="op" type="button" id="kernel-routing-plan-all">查看全部路由计划</button>
                   <button class="op" type="button" id="kernel-runtime-delivery-all">查看运行时交付计划</button>
                   <button class="op" type="button" id="kernel-release-probe-matrix">全量 Release 探测</button>
+                  <button class="op" type="button" id="kernel-runtime-contract-matrix">运行合同矩阵</button>
                   <button class="primary" type="button" id="kernel-apply-routing-all">补齐全部定型路由</button>
                   <button class="op" type="button" id="kernel-go-live-all">查看全部上线清单</button>
                   <button class="op" type="button" id="kernel-materials-all">查看全部材料清单</button>
@@ -13918,6 +13929,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div class="ops" style="min-width:260px">
                   <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
                   <button class="op" type="button" id="kernel-runtime-delivery">运行时交付计划</button>
+                  <button class="op" type="button" id="kernel-runtime-contract">运行合同</button>
                   <button class="op" type="button" id="kernel-load-process">查看进程</button>
                   <button class="op" type="button" id="kernel-routing-plan">查看路由计划</button>
                   <button class="op" type="button" id="kernel-go-live">查看上线清单</button>
@@ -14358,6 +14370,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const materials = hint.materials_request || {{}};
           const runtimePlan = hint.runtime_delivery_plan || {{}};
           const releaseProbe = hint.release_probe || {{}};
+          const runtimeContract = hint.runtime_contract || {{}};
           const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
           const blockerHtml = blockers.length
             ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
@@ -14372,6 +14385,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
               <dt>资产</dt><dd class="kernel-path-note">${{escapeHtml(installed.path || '尚未安装 release 资产')}}</dd>
               <dt>Hash</dt><dd>${{installed.sha256 ? '已记录' : '未记录'}}${{hint.installed_verified ? ' · 已校验' : ''}}</dd>
               <dt>Release 探测</dt><dd>${{escapeHtml(releaseProbe.status || '未探测')}}${{releaseProbe.next_step?.label ? ' · 下一步：' + escapeHtml(releaseProbe.next_step.label) : ''}}</dd>
+              <dt>运行合同</dt><dd>${{escapeHtml(runtimeContract.status || '未读取')}}${{runtimeContract.next_action ? ' · 下一步：' + escapeHtml(runtimeContract.next_action) : ''}}</dd>
               <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
               <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
               <dt>交付计划</dt><dd>${{escapeHtml(runtimePlan.status || '未读取')}}${{runtimePlan.next_step?.label ? ' · 下一步：' + escapeHtml(runtimePlan.next_step.label) : ''}}</dd>
@@ -14443,6 +14457,11 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             const response = await fetch('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-delivery-plan', {{ credentials: 'same-origin' }});
             runtimePlanPayload = await response.json();
           }} catch (_) {{}}
+          let runtimeContractPayload = kernelHint(provider).runtime_contract || {{}};
+          try {{
+            const response = await fetch('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-contract', {{ credentials: 'same-origin' }});
+            runtimeContractPayload = await response.json();
+          }} catch (_) {{}}
           proxyKernelHints[provider] = {{
             selection_id: payload.selection_id,
             provider_id: payload.provider_id,
@@ -14463,6 +14482,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             routing_plan: routingPayload,
             runtime_delivery_plan: runtimePlanPayload,
             release_probe: existingHint.release_probe || {{}},
+            runtime_contract: runtimeContractPayload,
             go_live: existingHint.go_live || {{}},
             materials_request: existingHint.materials_request || {{}},
           }};
@@ -14582,6 +14602,31 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           const suffix = dryRun ? '?dry_run=true' : '';
           const payload = await callAdmin('/v1/admin/proxy-kernels/release-probe-matrix' + suffix);
           mergeKernelReleaseProbeMatrix(payload);
+          return payload;
+        }}
+        function mergeKernelRuntimeContractMatrix(payload) {{
+          const rows = Array.isArray(payload?.data) ? payload.data : [payload];
+          rows.filter(item => item?.provider_id).forEach(item => {{
+            proxyKernelHints[item.provider_id] = Object.assign(kernelHint(item.provider_id), {{
+              runtime_contract: item,
+              routing_plan: item.routing || kernelHint(item.provider_id).routing_plan || {{}},
+              runtime_base_url: item.state?.runtime_base_url || kernelHint(item.provider_id).runtime_base_url || '',
+              runtime_registered: Boolean(item.state?.runtime_registered),
+              blockers: item.routing?.blockers || kernelHint(item.provider_id).blockers || [],
+            }});
+          }});
+          renderKernelSummary(selectedKernelProvider());
+        }}
+        async function loadKernelRuntimeContract(providerId = null) {{
+          const provider = providerId || selectedKernelProvider();
+          syncKernelSelects(provider);
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/runtime-contract');
+          mergeKernelRuntimeContractMatrix(payload);
+          return payload;
+        }}
+        async function loadAllKernelRuntimeContractMatrix() {{
+          const payload = await callAdmin('/v1/admin/proxy-kernels/runtime-contract-matrix');
+          mergeKernelRuntimeContractMatrix(payload);
           return payload;
         }}
         async function applyAllKernelRouting() {{
@@ -15176,6 +15221,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-probe-release')?.addEventListener('click', async () => {{
           try {{ await probeKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
         }});
+        document.getElementById('kernel-runtime-contract')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelRuntimeContract();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('kernel-install-release')?.addEventListener('click', async () => {{
           try {{ await installKernelRelease(); }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -15188,6 +15239,12 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-release-probe-matrix')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadAllKernelReleaseProbeMatrix(false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-runtime-contract-matrix')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadAllKernelRuntimeContractMatrix();
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
@@ -19193,6 +19250,17 @@ def admin_proxy_kernels_release_probe_matrix(
         raise HTTPException(status_code=400, detail={"error": str(exc), "release_probe_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/runtime-contract-matrix")
+def admin_proxy_kernels_runtime_contract_matrix(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_runtime_contract_matrix(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_contract_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.post("/v1/admin/proxy-kernels/loopback-contract-test")
 def admin_proxy_kernels_loopback_contract_test(
     req: ProxyKernelLoopbackContractTestRequest,
@@ -19222,6 +19290,14 @@ def admin_proxy_kernel_materials_request(provider_id: str, ctx: AuthContext = De
 def admin_proxy_kernel_runtime_delivery_plan(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         return build_proxy_kernel_runtime_delivery_plan(db, provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+
+
+@app.get("/v1/admin/proxy-kernels/{provider_id}/runtime-contract")
+def admin_proxy_kernel_runtime_contract(provider_id: str, ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return build_proxy_kernel_runtime_contract(db, provider_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
 
@@ -20377,6 +20453,169 @@ def build_proxy_kernel_release_probe_matrix(db: Session, provider_ids: list[str]
             "official_sdk_api": "forbidden",
             "third_party_public_service": "forbidden",
             "managed_runtime_listener": "loopback_only",
+        },
+    }
+
+
+PROXY_KERNEL_IMAGE_OPERATIONS = {"text_to_image", "image_to_image", "image_edit"}
+PROXY_KERNEL_VIDEO_OPERATIONS = {"text_to_video", "image_to_video", "video_extend"}
+
+
+def proxy_kernel_runtime_contract_check(check_id: str, ok: bool, label: str, detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"id": check_id, "ok": bool(ok), "label": label, "detail": detail or {}}
+
+
+def build_proxy_kernel_runtime_contract(db: Session, provider_id: str) -> dict[str, Any]:
+    template = PROVIDER_TEMPLATES.get(provider_id)
+    if not template:
+        raise KeyError(provider_id)
+    proxy_kernel_service.require_spec(provider_id)
+    kernel = proxy_kernel_service.kernel_summary(db, provider_id)
+    routing = proxy_kernel_routing_plan(db, provider_id)
+    provider = db.get(models.Provider, provider_id)
+    template_config = provider_template_default_config(template.id, template.default_config)
+    provider_config = provider_runtime_config(provider_id, loads(provider.base_config_json, {})) if provider else {}
+    config = {**template_config, **provider_config}
+    runtime_base_url = str(kernel.get("runtime_base_url") or config.get("base_url") or "").rstrip("/")
+    if runtime_base_url:
+        config["base_url"] = runtime_base_url
+    operations, provider_models = provider_default_operations_and_models(provider_id)
+    endpoint_operations = [operation for operation in operations if operation in PROXY_KERNEL_IMAGE_OPERATIONS | PROXY_KERNEL_VIDEO_OPERATIONS]
+    endpoints = {
+        operation: connector_runtime_endpoint_for(operation, config)
+        for operation in endpoint_operations
+        if connector_runtime_endpoint_for(operation, config)
+    }
+    image_operations = [operation for operation in endpoint_operations if operation in PROXY_KERNEL_IMAGE_OPERATIONS]
+    video_operations = [operation for operation in endpoint_operations if operation in PROXY_KERNEL_VIDEO_OPERATIONS]
+    image_endpoint_ready = all(str(endpoints.get(operation) or "").startswith("/v1/images/") for operation in image_operations)
+    video_endpoint_ready = all(str(endpoints.get(operation) or "").startswith("/v1/videos/") for operation in video_operations)
+    endpoint_complete = bool(endpoints) and all(operation in endpoints for operation in endpoint_operations)
+    account_rows = db.query(models.AccountResource).filter(models.AccountResource.provider_id == provider_id).all()
+    active_accounts = [account for account in account_rows if account.status == "active"]
+    header_prefix = str(config.get("account_header_prefix") or "X-Media2API").strip() or "X-Media2API"
+    credential_ref_headers_enabled = config.get("forward_credential_ref_headers", True) is not False
+    base_url_loopback_ok = not runtime_base_url or proxy_kernel_service.is_loopback_url(runtime_base_url)
+    checks = [
+        proxy_kernel_runtime_contract_check("provider_template", True, "Finalized provider template is present"),
+        proxy_kernel_runtime_contract_check("adapter_http", template.adapter_type == "http_adapter", "Provider uses the generic HTTP loopback adapter", {"adapter_type": template.adapter_type}),
+        proxy_kernel_runtime_contract_check("endpoint_mapping", endpoint_complete, "Every declared media operation has a submit endpoint", {"operations": endpoint_operations, "endpoints": endpoints}),
+        proxy_kernel_runtime_contract_check("image_endpoint_priority", image_endpoint_ready, "Image operations map to /v1/images/*", {"image_operations": image_operations}),
+        proxy_kernel_runtime_contract_check("video_endpoint_priority", video_endpoint_ready, "Video operations map to /v1/videos/* or provider has no video operation", {"video_operations": video_operations}),
+        proxy_kernel_runtime_contract_check("credential_ref_forwarding", credential_ref_headers_enabled, "Account credential references are forwarded to the loopback runner"),
+        proxy_kernel_runtime_contract_check("loopback_only", base_url_loopback_ok, "Runtime base_url is empty or loopback-only", {"runtime_base_url": runtime_base_url}),
+        proxy_kernel_runtime_contract_check("mappings_defined", bool(template.mappings), "Finalized provider/model mappings are defined"),
+        proxy_kernel_runtime_contract_check("official_sdk_api_forbidden", True, "Official SDK/API key paths are excluded by policy"),
+    ]
+    contract_ready = all(check["ok"] for check in checks)
+    next_action = "register_runtime" if not kernel.get("runtime_registered") else "import_account" if not active_accounts else "live_acceptance"
+    if not contract_ready:
+        next_action = "fix_contract_config"
+    elif not routing.get("route_config_ready"):
+        next_action = "apply_routing"
+    return {
+        "object": "media2api.proxy_kernel.runtime_contract",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider_id": provider_id,
+        "selection_id": kernel.get("selection_id"),
+        "repo": (kernel.get("spec") or {}).get("repo"),
+        "repo_url": (kernel.get("spec") or {}).get("repo_url"),
+        "status": "contract_ready" if contract_ready else "action_required",
+        "contract_ready": contract_ready,
+        "next_action": next_action,
+        "state": {
+            "provider_initialized": bool(provider),
+            "provider_status": provider.status if provider else "missing",
+            "route_config_ready": bool(routing.get("route_config_ready")),
+            "runtime_registered": bool(kernel.get("runtime_registered")),
+            "runtime_loopback_only": bool(kernel.get("runtime_loopback_only")),
+            "runtime_base_url": runtime_base_url,
+            "active_account_count": len(active_accounts),
+            "account_count": len(account_rows),
+            "installed_verified": bool(kernel.get("installed_verified")),
+        },
+        "adapter_contract": {
+            "adapter_type": template.adapter_type,
+            "contract_kind": "media2api_openai_compatible_loopback",
+            "submit_method": "POST",
+            "health_endpoint": str(config.get("health_endpoint") or "/health"),
+            "endpoints": endpoints,
+            "image_operations": image_operations,
+            "video_operations": video_operations,
+            "poll_endpoint": str(config.get("poll_endpoint") or "{submit_endpoint}/{task_id}"),
+            "poll_method": str(config.get("poll_method") or "GET").upper(),
+            "poll_timeout_seconds": int(float(config.get("poll_timeout_seconds") or 180)),
+            "task_id_paths": config.get("task_id_paths") or config.get("task_id_fields") or DEFAULT_TASK_ID_PATHS,
+            "status_paths": config.get("status_paths") or config.get("status_fields") or DEFAULT_STATUS_PATHS,
+            "output_paths": config.get("output_paths") or config.get("result_paths") or DEFAULT_OUTPUT_PATHS,
+            "asset_payload_fields": ASSET_PAYLOAD_FIELDS,
+            "request_templates_configured": bool(config.get("request_templates") or config.get("payload_templates") or config.get("request_template") or config.get("payload_template")),
+            "request_template_operations": sorted((config.get("request_templates") or config.get("payload_templates") or {}).keys()) if isinstance(config.get("request_templates") or config.get("payload_templates"), dict) else [],
+            "standard_payload_fields": ["operation", "provider_id", "model", "prompt", "account", "image", "assets"],
+        },
+        "auth_contract": {
+            "credential_ref_headers_enabled": credential_ref_headers_enabled,
+            "supported_reference_prefixes": list(CONNECTOR_REFERENCE_PREFIXES),
+            "header_names": {
+                "provider_id": str(config.get("provider_id_header") or f"{header_prefix}-Provider-ID"),
+                "account_id": str(config.get("account_id_header") or f"{header_prefix}-Account-ID"),
+                "account_label": str(config.get("account_label_header") or f"{header_prefix}-Account-Label"),
+                "credential_ref": str(config.get("credential_ref_header") or f"{header_prefix}-Credential-Ref"),
+                "credential_type": str(config.get("credential_type_header") or f"{header_prefix}-Credential-Type"),
+                "credential_reference_only": str(config.get("credential_reference_only_header") or f"{header_prefix}-Credential-Reference-Only"),
+            },
+            "payload_account_fields": ["id", "label", "credential_ref", "credential_ref_type", "credential_reference_only", "supported_operations", "supported_provider_models", "region", "plan"],
+        },
+        "media_contract": {
+            "provider_models": provider_models,
+            "logical_mappings": [proxy_kernel_mapping_template_payload(provider_id, item) for item in template.mappings],
+            "priority": "/v1/images/* and /v1/videos/* are the public platform API and the preferred loopback contract.",
+        },
+        "checks": checks,
+        "routing": routing,
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "managed_runtime_listener": "loopback_only",
+            "no_fake_account_created": True,
+        },
+    }
+
+
+def proxy_kernel_runtime_contract_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    next_action_counts: dict[str, int] = {}
+    for row in rows:
+        action = str(row.get("next_action") or "unknown")
+        next_action_counts[action] = next_action_counts.get(action, 0) + 1
+    return {
+        "total": len(rows),
+        "contract_ready": sum(1 for row in rows if row.get("contract_ready")),
+        "image_capable": sum(1 for row in rows if (row.get("adapter_contract") or {}).get("image_operations")),
+        "video_capable": sum(1 for row in rows if (row.get("adapter_contract") or {}).get("video_operations")),
+        "endpoint_complete": sum(1 for row in rows if any(check.get("id") == "endpoint_mapping" and check.get("ok") for check in row.get("checks", []))),
+        "route_ready": sum(1 for row in rows if (row.get("state") or {}).get("route_config_ready")),
+        "runtime_registered": sum(1 for row in rows if (row.get("state") or {}).get("runtime_registered")),
+        "runtime_loopback": sum(1 for row in rows if (row.get("state") or {}).get("runtime_loopback_only")),
+        "active_account": sum(1 for row in rows if int((row.get("state") or {}).get("active_account_count") or 0) > 0),
+        "next_action_counts": next_action_counts,
+    }
+
+
+def build_proxy_kernel_runtime_contract_matrix(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = proxy_kernel_routing_provider_ids(db, provider_ids)
+    rows = [build_proxy_kernel_runtime_contract(db, provider_id) for provider_id in selected]
+    return {
+        "object": "media2api.proxy_kernel.runtime_contract_matrix",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "summary": proxy_kernel_runtime_contract_summary(rows),
+        "data": rows,
+        "policy": {
+            "read_only": True,
+            "official_sdk_api": "forbidden",
+            "release_binary_first": True,
+            "loopback_contract_first": True,
+            "public_api_priority": ["/v1/images/*", "/v1/videos/*"],
         },
     }
 
