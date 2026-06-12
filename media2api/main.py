@@ -12875,6 +12875,32 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }
         for provider_id in provider_option_ids
     }
+    proxy_kernel_snapshot = proxy_kernel_service.list_kernels(db)
+    proxy_kernel_items = proxy_kernel_snapshot.get("data", [])
+    proxy_kernel_options = "".join(
+        f'<option value="{admin_escape(item.get("provider_id"))}">{admin_escape(item.get("selection_id"))} · {admin_escape(item.get("provider_id"))}</option>'
+        for item in proxy_kernel_items
+    )
+    proxy_kernel_hint_payload = {
+        item.get("provider_id"): {
+            "selection_id": item.get("selection_id"),
+            "provider_id": item.get("provider_id"),
+            "repo": (item.get("spec") or {}).get("repo"),
+            "repo_url": (item.get("spec") or {}).get("repo_url"),
+            "operations": (item.get("spec") or {}).get("operations", []),
+            "media_scope": (item.get("spec") or {}).get("media_scope", ""),
+            "credential_boundary": (item.get("spec") or {}).get("credential_boundary", ""),
+            "runtime_kind": (item.get("spec") or {}).get("runtime_kind", ""),
+            "runtime_base_url": item.get("runtime_base_url", ""),
+            "runtime_registered": item.get("runtime_registered", False),
+            "installed": item.get("installed", {}),
+            "installed_verified": item.get("installed_verified", False),
+            "process": item.get("process", {}),
+            "blockers": item.get("blockers", []),
+            "usable": item.get("usable", False),
+        }
+        for item in proxy_kernel_items
+    }
     provider_oauth_guides = {
         "gemini": {
             "title": "Gemini / Veo / Nano Banana Agent Provider",
@@ -13206,6 +13232,23 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         connector_project_rows = '<tr><td colspan="7">尚未扫描 res-repo。点击“刷新开源连接器清单”后会显示已拉取仓库的分类结果。</td></tr>'
     visible_checks = [item for item in readiness.get("checks", []) if "mock" not in dumps(item).lower()]
     check_rows = "".join(f"<tr><td>{admin_escape(item.get('name'))}</td><td>{pill('ready' if item.get('ok') else 'blocked')}</td><td>{admin_escape(item.get('detail'))}</td></tr>" for item in visible_checks)
+    proxy_kernel_rows = "".join(
+        "<tr>"
+        f"<td><button class=\"op kernel-row-select\" type=\"button\" data-provider-id=\"{admin_escape(item.get('provider_id'))}\">选择</button></td>"
+        f"<td>{admin_escape(item.get('selection_id'))}</td>"
+        f"<td>{admin_escape(item.get('provider_id'))}</td>"
+        f"<td>{admin_escape((item.get('spec') or {}).get('repo'))}</td>"
+        f"<td>{admin_escape(', '.join((item.get('spec') or {}).get('operations', [])))}</td>"
+        f"<td>{pill('可用' if item.get('usable') else '待配置')}</td>"
+        f"<td>{admin_escape(item.get('runtime_base_url') or '-')}</td>"
+        f"<td>{pill('运行中' if (item.get('process') or {}).get('running') else '未运行')}</td>"
+        f"<td>{admin_escape(', '.join(blocker.get('code', '') for blocker in item.get('blockers', [])) or '-')}</td>"
+        "</tr>"
+        for item in proxy_kernel_items
+    )
+    if not proxy_kernel_rows:
+        proxy_kernel_rows = '<tr><td colspan="9">暂无定型反代内核。请先查看反代内核仓库选型定型文档。</td></tr>'
+    proxy_kernel_summary = proxy_kernel_snapshot.get("summary", {})
 
     operation_buttons = [
         ("就绪检查", "GET", "/v1/admin/readiness"),
@@ -13335,6 +13378,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("users", "用户与 API Key", "users", "运营"),
         ("oauth", "授权资源", "shield", "接入"),
         ("connectors", "开源连接器", "connect", "接入"),
+        ("kernels", "反代内核", "server", "接入"),
         ("providers", "平台", "server", "接入"),
         ("accounts", "账号池", "database", "接入"),
         ("models", "模型路由", "model", "路由"),
@@ -13432,6 +13476,17 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .disabled-surface {{ opacity:.58; }}
         .disabled-surface input, .disabled-surface textarea, .disabled-surface button {{ cursor:not-allowed; }}
         .guide-grid.compact {{ grid-template-columns:180px 1fr; margin-top:6px; }}
+        .kernel-rail {{ display:grid; grid-template-columns:1.08fr .92fr; gap:14px; align-items:start; }}
+        .kernel-summary {{ min-height:180px; border:1px solid var(--line); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0e141c); box-shadow:var(--shadow-soft); }}
+        .kernel-summary h3 {{ margin:0 0 10px; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
+        .kernel-summary dl {{ display:grid; grid-template-columns:140px 1fr; gap:8px 12px; margin:0; color:var(--soft); }}
+        .kernel-summary dt {{ color:var(--muted); font-weight:900; }}
+        .kernel-summary dd {{ margin:0; overflow-wrap:anywhere; }}
+        .kernel-blockers {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }}
+        .kernel-blockers span {{ border:1px solid rgba(224,177,90,.3); border-radius:999px; padding:5px 8px; color:#ffe1a3; background:rgba(224,177,90,.08); font-size:12px; font-weight:900; }}
+        .kernel-command-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
+        .kernel-command-grid textarea {{ min-height:154px; }}
+        .kernel-path-note {{ font-family:var(--font-data); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }}
         .grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
         .metric,.panel {{ border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,rgba(17,21,28,.96),rgba(12,17,24,.96)); box-shadow:var(--shadow); }}
         .metric {{ min-height:124px; padding:16px; position:relative; overflow:hidden; }}
@@ -13498,7 +13553,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -13734,6 +13789,105 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             </div>
           </section>
 
+          <section id="tab-kernels" class="tab">
+            <div class="section-tabs">
+              <button class="subnav-item active" type="button" data-subtab="kernels-status-pane">运行状态</button>
+              <button class="subnav-item" type="button" data-subtab="kernels-start-pane">启动执行器</button>
+              <button class="subnav-item" type="button" data-subtab="kernels-logs-pane">日志与停止</button>
+              <button class="subnav-item" type="button" data-subtab="kernels-guide-pane">操作说明</button>
+            </div>
+            <div class="panel subtab active" id="kernels-status-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>反代内核运行时</h2>
+                  <p class="note">这里管理的是“执行上游调用的内核”：release 资产、hash、loopback runtime、进程和日志。账号材料仍在“授权资源/账号池”里导入，两者不要混在一起。</p>
+                </div>
+                <button class="primary" type="button" data-jump-tab="oauth">去导入账号</button>
+              </div>
+              <div class="status-strip">
+                <div><span class="eyebrow">定型内核</span><b>{admin_escape(proxy_kernel_summary.get("total", 0))}</b></div>
+                <div><span class="eyebrow">可直接用</span><b>{admin_escape(proxy_kernel_summary.get("usable", 0))}</b></div>
+                <div><span class="eyebrow">缺账号</span><b>{admin_escape(proxy_kernel_summary.get("needs_account", 0))}</b></div>
+                <div><span class="eyebrow">缺运行时</span><b>{admin_escape(proxy_kernel_summary.get("needs_runtime", 0))}</b></div>
+              </div>
+              <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>操作</th><th>选型</th><th>Provider</th><th>仓库</th><th>能力</th><th>状态</th><th>Runtime</th><th>进程</th><th>阻塞项</th></tr></thead><tbody>{proxy_kernel_rows}</tbody></table></div>
+            </div>
+            <div class="panel subtab" id="kernels-start-pane">
+              <div class="page-intro">
+                <div>
+                  <h2>启动受控执行器</h2>
+                  <p class="note">release 资产必须先放在 `MEDIA2API_PROXY_KERNEL_DIR` 下，并提供 SHA256。启动命令按“每行一个参数”填写，平台不会通过 shell 执行。</p>
+                </div>
+                <div class="ops" style="min-width:260px">
+                  <button class="op" type="button" id="kernel-probe-release">探测 Release</button>
+                  <button class="op" type="button" id="kernel-load-process">查看进程</button>
+                </div>
+              </div>
+              <div class="kernel-rail">
+                <div>
+                  <div class="formline">
+                    <div><label>Provider</label><select id="kernel-provider">{proxy_kernel_options}</select></div>
+                    <div><label>Loopback Base URL</label><input id="kernel-base-url" value="http://127.0.0.1:19081" /></div>
+                    <div><label>版本</label><input id="kernel-version" placeholder="vX.Y.Z / release tag" /></div>
+                  </div>
+                  <div class="formline" style="margin-top:10px">
+                    <div><label>已校验资产路径</label><input id="kernel-artifact-path" placeholder="/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/runner" /></div>
+                    <div><label>SHA256</label><input id="kernel-expected-sha256" placeholder="64 位十六进制 sha256" /></div>
+                    <button class="op" type="button" id="kernel-fill-command">按路径填充命令</button>
+                  </div>
+                  <div class="kernel-command-grid" style="margin-top:10px">
+                    <div>
+                      <label>启动命令（每行一个参数）</label>
+                      <textarea id="kernel-command" placeholder="/opt/media2api/var/proxy-kernels/openai_web_session/vX.Y.Z/runner&#10;--host&#10;127.0.0.1&#10;--port&#10;19081"></textarea>
+                    </div>
+                    <div>
+                      <label>环境变量 JSON（可选）</label>
+                      <textarea id="kernel-env-json" placeholder='{{"NO_COLOR":"1"}}'></textarea>
+                    </div>
+                  </div>
+                  <div class="formline" style="margin-top:10px">
+                    <div><label>替换运行中进程</label><select id="kernel-replace-existing"><option value="true">是，先停后启</option><option value="false">否，已运行则报错</option></select></div>
+                    <div><label>同步 provider base_url</label><select id="kernel-update-provider"><option value="true">同步</option><option value="false">只启动进程</option></select></div>
+                    <div><label>备注</label><input id="kernel-notes" placeholder="OAI-WEB-01 verified release" /></div>
+                    <button class="primary" type="button" id="kernel-start-runtime">启动 Runtime</button>
+                  </div>
+                </div>
+                <div class="kernel-summary" id="kernel-provider-summary">
+                  <h3>选择一个内核</h3>
+                  <p class="note">选择左侧 Provider 后，这里会显示仓库、媒体能力、账号边界、runtime 和阻塞项。</p>
+                </div>
+              </div>
+            </div>
+            <div class="panel subtab" id="kernels-logs-pane">
+              <h2>日志与停止</h2>
+              <p class="note">只操作平台登记的受控进程。停止不会删除 provider 配置；如果要彻底清除 runtime 登记，使用“清除 Runtime”。</p>
+              <div class="formline">
+                <div><label>Provider</label><select id="kernel-log-provider">{proxy_kernel_options}</select></div>
+                <div><label>日志流</label><select id="kernel-log-stream"><option value="stderr">stderr</option><option value="stdout">stdout</option></select></div>
+                <div><label>读取字节数</label><input id="kernel-log-bytes" value="12000" /></div>
+                <button class="op" type="button" id="kernel-load-logs">读取日志</button>
+                <button class="op" type="button" id="kernel-stop-runtime">停止 Runtime</button>
+                <button class="op" type="button" id="kernel-clear-runtime">清除 Runtime</button>
+              </div>
+              <pre id="kernel-log-output" style="margin-top:14px;white-space:pre-wrap">尚未读取日志。</pre>
+            </div>
+            <div class="panel subtab" id="kernels-guide-pane">
+              <h2>从 release 到可调用</h2>
+              <div class="product-flow">
+                <div class="step-card"><b><span>1</span>选内核</b><p>按定型文档选择 OAI-WEB-01、OAI-CODEX-04、GEM-CLI-02、豆包、Qwen.ai 等 provider，注意账号边界不能混用。</p></div>
+                <div class="step-card"><b><span>2</span>校验资产</b><p>优先使用 GitHub release 二进制；没有 release 时才拉源码到 `source-repo/` 参考或构建。资产必须记录 SHA256。</p></div>
+                <div class="step-card"><b><span>3</span>启动 loopback</b><p>用本页启动执行器，只允许 `127.0.0.1`、`localhost` 或 `::1`。平台公开 API 仍由 media2api 提供。</p></div>
+                <div class="step-card"><b><span>4</span>导入账号并验收</b><p>到“授权资源”导入真实 Web session 或 Agent profile，再运行账号验收和模型路由验收。</p></div>
+              </div>
+              <div class="shortcut-grid">
+                <button class="op" type="button" data-jump-tab="oauth">导入账号材料</button>
+                <button class="op" type="button" data-jump-tab="accounts">查看账号池</button>
+                <button class="op" type="button" data-jump-tab="models">查看模型路由</button>
+                <button class="op" type="button" data-jump-tab="delivery">查看验收矩阵</button>
+              </div>
+            </div>
+          </section>
+
           <section id="tab-models" class="tab">
             <div class="section-tabs"><button class="subnav-item active" type="button" data-subtab="models-list-pane">逻辑模型</button><button class="subnav-item" type="button" data-subtab="models-mapping-pane">模型映射</button></div>
             <div class="panel subtab active" id="models-list-pane"><h2>逻辑模型</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>操作</th><th>计费类</th><th>启用</th></tr></thead><tbody>{model_rows}</tbody></table></div></div>
@@ -13934,6 +14088,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
       </div>
       <script>
         const providerHints = {json.dumps(provider_hint_payload, ensure_ascii=False)};
+        const proxyKernelHints = {json.dumps(proxy_kernel_hint_payload, ensure_ascii=False)};
         const result = document.getElementById('result');
         function escapeHtml(value) {{
           return String(value || '').replace(/[&<>"']/g, char => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
@@ -14027,6 +14182,126 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           result.textContent = JSON.stringify(payload, null, 2);
           if (!response.ok) throw new Error(text);
           return payload;
+        }}
+        function selectedKernelProvider() {{
+          return document.getElementById('kernel-provider')?.value
+            || document.getElementById('kernel-log-provider')?.value
+            || 'openai_web_session';
+        }}
+        function syncKernelSelects(providerId) {{
+          ['kernel-provider', 'kernel-log-provider'].forEach(id => {{
+            const select = document.getElementById(id);
+            if (select && providerId) select.value = providerId;
+          }});
+        }}
+        function kernelHint(providerId) {{
+          return proxyKernelHints[providerId] || {{}};
+        }}
+        function renderKernelSummary(providerId) {{
+          const provider = providerId || selectedKernelProvider();
+          const hint = kernelHint(provider);
+          const box = document.getElementById('kernel-provider-summary');
+          if (!box) return;
+          const process = hint.process || {{}};
+          const installed = hint.installed || {{}};
+          const blockers = Array.isArray(hint.blockers) ? hint.blockers : [];
+          const blockerHtml = blockers.length
+            ? `<div class="kernel-blockers">${{blockers.map(item => `<span>${{escapeHtml(item.code || item.message || 'blocked')}}</span>`).join('')}}</div>`
+            : '<div class="kernel-blockers"><span>等待真实样本验收</span></div>';
+          box.innerHTML = `
+            <h3>${{escapeHtml(hint.selection_id || provider)}} · ${{escapeHtml(provider)}}</h3>
+            <dl>
+              <dt>仓库</dt><dd>${{hint.repo_url ? `<a href="${{escapeHtml(hint.repo_url)}}" target="_blank" rel="noreferrer">${{escapeHtml(hint.repo || hint.repo_url)}}</a>` : escapeHtml(hint.repo || '-')}}</dd>
+              <dt>媒体范围</dt><dd>${{escapeHtml(hint.media_scope || '-')}}</dd>
+              <dt>账号边界</dt><dd>${{escapeHtml(hint.credential_boundary || '-')}}</dd>
+              <dt>能力</dt><dd>${{escapeHtml((hint.operations || []).join(', ') || '-')}}</dd>
+              <dt>资产</dt><dd class="kernel-path-note">${{escapeHtml(installed.path || '尚未安装 release 资产')}}</dd>
+              <dt>Hash</dt><dd>${{installed.sha256 ? '已记录' : '未记录'}}${{hint.installed_verified ? ' · 已校验' : ''}}</dd>
+              <dt>Runtime</dt><dd>${{escapeHtml(hint.runtime_base_url || '未登记')}}</dd>
+              <dt>进程</dt><dd>${{process.running ? '运行中 PID ' + escapeHtml(process.pid) : '未运行'}}</dd>
+            </dl>
+            ${{blockerHtml}}
+          `;
+          const artifact = document.getElementById('kernel-artifact-path');
+          const sha = document.getElementById('kernel-expected-sha256');
+          const base = document.getElementById('kernel-base-url');
+          if (artifact && !artifact.value && installed.path) artifact.value = installed.path;
+          if (sha && !sha.value && (installed.expected_sha256 || installed.sha256)) sha.value = installed.expected_sha256 || installed.sha256;
+          if (base && hint.runtime_base_url) base.value = hint.runtime_base_url;
+        }}
+        function kernelCommandParts() {{
+          const raw = document.getElementById('kernel-command')?.value.trim() || '';
+          if (!raw) return [];
+          if (raw.startsWith('[')) {{
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed) || parsed.some(item => typeof item !== 'string' || !item.trim())) throw new Error('启动命令 JSON 必须是字符串数组');
+            return parsed.map(item => item.trim());
+          }}
+          return raw.split(/\\r?\\n/).map(item => item.trim()).filter(Boolean);
+        }}
+        function kernelEnv() {{
+          const raw = document.getElementById('kernel-env-json')?.value.trim() || '';
+          return raw ? JSON.parse(raw) : {{}};
+        }}
+        function fillKernelCommandFromArtifact() {{
+          const artifact = document.getElementById('kernel-artifact-path')?.value.trim() || '';
+          const baseUrl = document.getElementById('kernel-base-url')?.value.trim() || 'http://127.0.0.1:19081';
+          if (!artifact) throw new Error('请先填写已校验资产路径');
+          let host = '127.0.0.1';
+          let port = '19081';
+          try {{
+            const parsed = new URL(baseUrl);
+            host = parsed.hostname || host;
+            port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+          }} catch (_) {{}}
+          document.getElementById('kernel-command').value = [artifact, '--host', host, '--port', port].join('\\n');
+        }}
+        async function refreshKernel(providerId) {{
+          const provider = providerId || selectedKernelProvider();
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider));
+          proxyKernelHints[provider] = {{
+            selection_id: payload.selection_id,
+            provider_id: payload.provider_id,
+            repo: payload.spec?.repo,
+            repo_url: payload.spec?.repo_url,
+            operations: payload.spec?.operations || [],
+            media_scope: payload.spec?.media_scope || '',
+            credential_boundary: payload.spec?.credential_boundary || '',
+            runtime_kind: payload.spec?.runtime_kind || '',
+            runtime_base_url: payload.runtime_base_url || '',
+            runtime_registered: payload.runtime_registered || false,
+            installed: payload.installed || {{}},
+            installed_verified: payload.installed_verified || false,
+            process: payload.process || {{}},
+            blockers: payload.blockers || [],
+            usable: payload.usable || false,
+          }};
+          renderKernelSummary(provider);
+          return payload;
+        }}
+        async function startKernelRuntime() {{
+          const provider = selectedKernelProvider();
+          const body = {{
+            command: kernelCommandParts(),
+            base_url: document.getElementById('kernel-base-url')?.value.trim() || '',
+            artifact_path: document.getElementById('kernel-artifact-path')?.value.trim() || '',
+            expected_sha256: document.getElementById('kernel-expected-sha256')?.value.trim() || '',
+            version: document.getElementById('kernel-version')?.value.trim() || '',
+            notes: document.getElementById('kernel-notes')?.value.trim() || '',
+            env: kernelEnv(),
+            replace_existing: document.getElementById('kernel-replace-existing')?.value === 'true',
+            update_provider_base_url: document.getElementById('kernel-update-provider')?.value !== 'false',
+          }};
+          await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/start-runtime', 'POST', body);
+          await refreshKernel(provider);
+        }}
+        async function loadKernelLogs() {{
+          const provider = document.getElementById('kernel-log-provider')?.value || selectedKernelProvider();
+          const stream = document.getElementById('kernel-log-stream')?.value || 'stderr';
+          const maxBytes = document.getElementById('kernel-log-bytes')?.value || '12000';
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/logs?stream=' + encodeURIComponent(stream) + '&max_bytes=' + encodeURIComponent(maxBytes));
+          const output = document.getElementById('kernel-log-output');
+          if (output) output.textContent = payload.content || '(日志为空)';
         }}
         function enhanceManagedTables() {{
           document.querySelectorAll('.table-wrap').forEach((wrap, index) => {{
@@ -14464,6 +14739,58 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           result.textContent = '正在执行：' + label + '...';
           try {{ await callAdmin(path, method, body); }} catch (error) {{ result.textContent = String(error); }}
         }}));
+        document.getElementById('kernel-provider')?.addEventListener('change', event => {{
+          syncKernelSelects(event.target.value);
+          renderKernelSummary(event.target.value);
+        }});
+        document.getElementById('kernel-log-provider')?.addEventListener('change', event => {{
+          syncKernelSelects(event.target.value);
+          renderKernelSummary(event.target.value);
+        }});
+        document.querySelectorAll('.kernel-row-select').forEach(button => button.addEventListener('click', () => {{
+          const provider = button.dataset.providerId;
+          syncKernelSelects(provider);
+          activateMainTab('kernels');
+          document.querySelectorAll('#tab-kernels .subnav-item').forEach(item => item.classList.remove('active'));
+          document.querySelectorAll('#tab-kernels .subtab').forEach(item => item.classList.remove('active'));
+          document.querySelector('[data-subtab="kernels-start-pane"]')?.classList.add('active');
+          document.getElementById('kernels-start-pane')?.classList.add('active');
+          renderKernelSummary(provider);
+        }}));
+        document.getElementById('kernel-fill-command')?.addEventListener('click', () => {{
+          try {{ fillKernelCommandFromArtifact(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-probe-release')?.addEventListener('click', async () => {{
+          const provider = selectedKernelProvider();
+          try {{ await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/release-probe', 'POST', {{}}); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-load-process')?.addEventListener('click', async () => {{
+          const provider = selectedKernelProvider();
+          try {{
+            await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/process');
+            await refreshKernel(provider);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-start-runtime')?.addEventListener('click', async () => {{
+          try {{ await startKernelRuntime(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-load-logs')?.addEventListener('click', async () => {{
+          try {{ await loadKernelLogs(); }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-stop-runtime')?.addEventListener('click', async () => {{
+          const provider = document.getElementById('kernel-log-provider')?.value || selectedKernelProvider();
+          try {{
+            await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/stop-runtime', 'POST', {{ grace_seconds: 5 }});
+            await refreshKernel(provider);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-clear-runtime')?.addEventListener('click', async () => {{
+          const provider = document.getElementById('kernel-log-provider')?.value || selectedKernelProvider();
+          try {{
+            await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(provider) + '/clear-runtime', 'POST', {{}});
+            await refreshKernel(provider);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
         document.getElementById('open-oauth-guide')?.addEventListener('click', () => {{
           document.getElementById('oauth-guide')?.classList.add('open');
         }});
@@ -14794,6 +15121,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         }});
         document.getElementById('wizard-provider')?.addEventListener('change', fillProviderHints);
         renderOAuthGuide();
+        renderKernelSummary(selectedKernelProvider());
         fillProviderHints();
         document.getElementById('wizard-submit')?.addEventListener('click', async () => {{
           try {{

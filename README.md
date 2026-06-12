@@ -176,7 +176,9 @@ Detailed selection documents:
 The admin API exposes the runtime lifecycle through
 `/v1/admin/proxy-kernels`: release probing, SHA256-verified installation,
 loopback runtime registration, controlled subprocess start/stop, process
-status, and stdout/stderr log inspection.
+status, and stdout/stderr log inspection. The `/admin` dashboard has a
+dedicated "反代内核" workspace for the same workflow, so operators do not need
+to hand-write JSON for routine runtime start/stop checks.
 
 ## Local Development
 
