@@ -1105,6 +1105,8 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/openai_web_session/runtime-cont
 - `auth_contract.header_names`: 平台转发给 runner 的账号引用头。
 - `checks`: http adapter、图片/视频端点、账号引用、loopback-only 和禁止官方 SDK/API 的合同检查。
 
+所有定型反代 provider 模板都显式声明媒体端点，不再只依赖运行时推断：图片类 operation 映射到 `/v1/images/generations` 或 `/v1/images/edits`，视频类 operation 包含 `video_extend` 均映射到 `/v1/videos/generations`。
+
 查看生产就绪矩阵，确认每个定型反代内核是否已经具备路由、运行合同、runtime、账号、健康检查和真实样本验收证据：
 
 ```bash

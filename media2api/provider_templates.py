@@ -37,6 +37,20 @@ OPS = {
     "extend": "video_extend",
 }
 
+IMAGE_ENDPOINTS = {
+    OPS["t2i"]: "/v1/images/generations",
+    OPS["edit"]: "/v1/images/edits",
+    OPS["i2i"]: "/v1/images/edits",
+}
+
+VIDEO_ENDPOINTS = {
+    OPS["t2v"]: "/v1/videos/generations",
+    OPS["i2v"]: "/v1/videos/generations",
+    OPS["extend"]: "/v1/videos/generations",
+}
+
+IMAGE_VIDEO_ENDPOINTS = {**IMAGE_ENDPOINTS, **VIDEO_ENDPOINTS}
+
 
 PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
     "openai_image": ProviderTemplate(
@@ -184,7 +198,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["antigravity-agent"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 900, "kernel_selection": "AG-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 900,
+            "endpoints": IMAGE_VIDEO_ENDPOINTS,
+            "kernel_selection": "AG-01",
+        },
         mappings=[
             MappingTemplate("t2i-pro", "antigravity-agent", [OPS["t2i"]], priority=45, quality_score=0.7, reliability_score=0.5),
             MappingTemplate("image-edit", "antigravity-agent", [OPS["edit"], OPS["i2i"]], priority=45, quality_score=0.7, reliability_score=0.5),
@@ -241,7 +260,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["qwen-image", "qwen-image-edit", "qwen-video"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 900, "kernel_selection": "QWEN-AI-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 900,
+            "endpoints": IMAGE_VIDEO_ENDPOINTS,
+            "kernel_selection": "QWEN-AI-01",
+        },
         mappings=[
             MappingTemplate("t2i-fast", "qwen-image", [OPS["t2i"]], priority=18, speed_score=0.8, cost_score=0.75),
             MappingTemplate("image-edit", "qwen-image-edit", [OPS["edit"], OPS["i2i"]], priority=25, speed_score=0.75),
@@ -256,7 +280,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["qianwen-image", "qianwen-video"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 900, "kernel_selection": "QIANWEN-WEB-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 900,
+            "endpoints": IMAGE_VIDEO_ENDPOINTS,
+            "kernel_selection": "QIANWEN-WEB-01",
+        },
         mappings=[
             MappingTemplate("t2i-fast", "qianwen-image", [OPS["t2i"]], priority=45, speed_score=0.65, cost_score=0.65),
             MappingTemplate("image-edit", "qianwen-image", [OPS["edit"], OPS["i2i"]], priority=50, speed_score=0.6),
@@ -290,7 +319,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["jimeng-image", "dreamina-image"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 600, "kernel_selection": "JM-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 600,
+            "endpoints": IMAGE_ENDPOINTS,
+            "kernel_selection": "JM-01",
+        },
         mappings=[
             MappingTemplate("t2i-fast", "jimeng-image", [OPS["t2i"]], priority=10, speed_score=0.85, cost_score=0.8),
             MappingTemplate("image-edit", "jimeng-image", [OPS["edit"], OPS["i2i"]], priority=30, speed_score=0.75),
@@ -303,7 +337,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["doubao-image", "doubao-video"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 900, "kernel_selection": "DOUBAO-WEB-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 900,
+            "endpoints": IMAGE_VIDEO_ENDPOINTS,
+            "kernel_selection": "DOUBAO-WEB-01",
+        },
         mappings=[
             MappingTemplate("t2i-fast", "doubao-image", [OPS["t2i"]], priority=15, speed_score=0.82, cost_score=0.75),
             MappingTemplate("image-edit", "doubao-image", [OPS["edit"], OPS["i2i"]], priority=30, speed_score=0.75),
@@ -332,7 +371,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["kling-i2v-standard", "kling-i2v-hq", "kling-t2v", "kling-extend"],
         operations=[OPS["t2v"], OPS["i2v"], OPS["extend"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200, "kernel_selection": "KLING-WEB-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 1200,
+            "endpoints": VIDEO_ENDPOINTS,
+            "kernel_selection": "KLING-WEB-01",
+        },
         mappings=[
             MappingTemplate("i2v-pro", "kling-i2v-hq", [OPS["i2v"]], priority=10, quality_score=0.9, reliability_score=0.6),
             MappingTemplate("t2v-general", "kling-t2v", [OPS["t2v"]], priority=35, quality_score=0.8),
@@ -360,7 +404,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["luma-dream-machine", "luma-extend"],
         operations=[OPS["t2v"], OPS["i2v"], OPS["extend"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200, "kernel_selection": "LUMA-WEB-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 1200,
+            "endpoints": VIDEO_ENDPOINTS,
+            "kernel_selection": "LUMA-WEB-01",
+        },
         mappings=[
             MappingTemplate("i2v-pro", "luma-dream-machine", [OPS["i2v"]], priority=30, quality_score=0.85),
             MappingTemplate("t2v-general", "luma-dream-machine", [OPS["t2v"]], priority=25, quality_score=0.85),
@@ -401,7 +450,12 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         adapter_type="http_adapter",
         models=["mj-v6", "mj-v7", "niji"],
         operations=[OPS["t2i"], OPS["i2i"]],
-        default_config={"health_endpoint": "/health", "poll_timeout_seconds": 1200, "kernel_selection": "MID-01"},
+        default_config={
+            "health_endpoint": "/health",
+            "poll_timeout_seconds": 1200,
+            "endpoints": IMAGE_ENDPOINTS,
+            "kernel_selection": "MID-01",
+        },
         mappings=[
             MappingTemplate("image-variation", "mj-v7", [OPS["i2i"]], priority=10, quality_score=0.9),
             MappingTemplate("t2i-pro", "mj-v7", [OPS["t2i"]], priority=50, quality_score=0.9),

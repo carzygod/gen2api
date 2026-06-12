@@ -34,6 +34,10 @@ The admin reports expose this explicitly as
   - `POST /v1/images/edits`
   - `POST /v1/videos/generations`
   - `GET /v1/videos/generations/{job_id}`
+
+Finalized proxy-kernel provider templates explicitly map image operations to
+`/v1/images/*` and video operations, including extension, to
+`/v1/videos/generations`.
 - Native media routes:
   - `POST /v1/media-jobs`
   - `GET /v1/media-jobs/{job_id}`

@@ -43,6 +43,7 @@ from media2api import models as db_models
 from media2api.config import settings
 from media2api.database import SessionLocal
 from media2api.main import app, build_proxy_kernel_release_checksums, proxy_kernel_asset_digest_sha256, proxy_kernel_best_release_candidate, proxy_kernel_service
+from media2api.provider_templates import FINALIZED_PROVIDER_IDS, PROVIDER_TEMPLATES
 from media2api.services_core import AccountScheduler, ModelRouter
 from media2api.services_proxy_kernels import ProxyKernelRuntimeService
 from media2api.utils import dumps
@@ -76,6 +77,17 @@ class StaticAssetHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    for provider_id in FINALIZED_PROVIDER_IDS:
+        template = PROVIDER_TEMPLATES[provider_id]
+        endpoints = template.default_config.get("endpoints") or {}
+        for operation in template.operations:
+            if operation in {"text_to_image", "image_to_image", "image_edit", "text_to_video", "image_to_video", "video_extend"}:
+                assert operation in endpoints, (provider_id, operation, endpoints)
+                if operation in {"text_to_image", "image_to_image", "image_edit"}:
+                    assert str(endpoints[operation]).startswith("/v1/images/"), (provider_id, operation, endpoints)
+                else:
+                    assert str(endpoints[operation]).startswith("/v1/videos/"), (provider_id, operation, endpoints)
+
     digest_value = "a" * 64
     assert proxy_kernel_asset_digest_sha256({"digest": f"sha256:{digest_value}"}) == digest_value
     assert proxy_kernel_asset_digest_sha256({"digest": digest_value.upper()}) == digest_value
