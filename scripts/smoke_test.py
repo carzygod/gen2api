@@ -575,6 +575,9 @@ def main() -> None:
         assert source_runtime_plan["object"] == "media2api.proxy_kernel.source_runtime_plan" and source_runtime_plan["source_available"] is True, source_runtime_plan
         assert {"node", "python"}.issubset(set(source_runtime_plan["detected_project_types"])) and source_runtime_plan["preferred_start_command"]["command"][:3] == ["npm", "run", "start"], source_runtime_plan
         assert any(item["id"] == "pip_install_requirements" for item in source_runtime_plan["dependency_commands"]), source_runtime_plan
+        pip_setup_command = next(item for item in source_runtime_plan["dependency_commands"] if item["id"] == "pip_install_requirements")
+        assert "source-venv" in pip_setup_command["command"][0] and pip_setup_command["pre_commands"][0]["id"] == "python_venv" and pip_setup_command["pre_commands"][0]["creates_path"], pip_setup_command
+        assert source_runtime_plan["policy"]["python_dependency_scope"] == "isolated_provider_venv", source_runtime_plan
         source_runtime_matrix = assert_ok(client.get("/v1/admin/proxy-kernels/source-runtime-plan", headers=headers))
         assert source_runtime_matrix["object"] == "media2api.proxy_kernel.source_runtime_plan_matrix", source_runtime_matrix
         assert source_runtime_matrix["summary"]["total"] >= 10 and source_runtime_matrix["policy"]["read_only"] is True, source_runtime_matrix
@@ -589,14 +592,16 @@ def main() -> None:
             )
         )
         assert source_setup_dry_run["dry_run"] is True and source_setup_dry_run["status"] == "planned" and source_setup_dry_run["command_id"] == "pip_install_requirements", source_setup_dry_run
+        assert source_setup_dry_run["isolated_env"] and source_setup_dry_run["pre_commands"][0]["id"] == "python_venv", source_setup_dry_run
         source_setup = assert_ok(
             client.post(
                 "/v1/admin/proxy-kernels/openai_web_session/source-runtime-setup",
                 headers=headers,
-                json={"dry_run": False, "command_id": "pip_install_requirements", "timeout_seconds": 60, "notes": "smoke source setup"},
+                json={"dry_run": False, "command_id": "pip_install_requirements", "timeout_seconds": 180, "notes": "smoke source setup"},
             )
         )
         assert source_setup["status"] == "completed" and source_setup["exit_code"] == 0, source_setup
+        assert source_setup["pre_command_results"] and source_setup["pre_command_results"][0]["status"] == "completed", source_setup
         assert Path(source_setup["stdout_log"]).exists() and Path(source_setup["stderr_log"]).exists(), source_setup
         source_launcher_dry_run = assert_ok(
             client.post(

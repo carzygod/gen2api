@@ -1301,15 +1301,30 @@ class ProxyKernelRuntimeService:
                 })
         if files.get("pyproject") or files.get("requirements") or files.get("uv_lock"):
             detected.append("python")
+            venv_dir = self.root / provider_id / "source-venv"
+            venv_python = venv_dir / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+            venv_create = [sys.executable, "-m", "venv", str(venv_dir)]
             if files.get("uv_lock"):
                 dependency_commands.append({"id": "uv_sync", "command": ["uv", "sync"], "cwd": str(repo_path)})
                 python_prefix = ["uv", "run", "python"]
             elif files.get("requirements"):
-                dependency_commands.append({"id": "pip_install_requirements", "command": [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], "cwd": str(repo_path)})
-                python_prefix = [sys.executable]
+                dependency_commands.append({
+                    "id": "pip_install_requirements",
+                    "command": [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
+                    "cwd": str(repo_path),
+                    "pre_commands": [{"id": "python_venv", "command": venv_create, "cwd": str(repo_path), "creates_path": str(venv_python), "timeout_seconds": 180}],
+                    "isolated_env": str(venv_dir),
+                })
+                python_prefix = [str(venv_python)]
             else:
-                dependency_commands.append({"id": "pip_install_editable", "command": [sys.executable, "-m", "pip", "install", "-e", "."], "cwd": str(repo_path)})
-                python_prefix = [sys.executable]
+                dependency_commands.append({
+                    "id": "pip_install_editable",
+                    "command": [str(venv_python), "-m", "pip", "install", "-e", "."],
+                    "cwd": str(repo_path),
+                    "pre_commands": [{"id": "python_venv", "command": venv_create, "cwd": str(repo_path), "creates_path": str(venv_python), "timeout_seconds": 180}],
+                    "isolated_env": str(venv_dir),
+                })
+                python_prefix = [str(venv_python)]
             if (repo_path / "main.py").exists():
                 start_candidates.append({
                     "id": "python_main",
@@ -1385,6 +1400,7 @@ class ProxyKernelRuntimeService:
                 "official_sdk_api": "forbidden",
                 "third_party_public_service": "forbidden",
                 "launcher_listener": "loopback_only",
+                "python_dependency_scope": "isolated_provider_venv",
                 "shell": "forbidden",
             },
         }
@@ -1478,9 +1494,11 @@ class ProxyKernelRuntimeService:
             "dry_run": bool(dry_run),
             "status": "planned" if dry_run else "running",
             "command": selected["command"],
+            "pre_commands": selected.get("pre_commands") if isinstance(selected.get("pre_commands"), list) else [],
             "command_id": selected.get("id") or "",
             "kind": selected.get("kind") or "",
             "cwd": selected["cwd"],
+            "isolated_env": selected.get("isolated_env") or "",
             "env_keys": sorted(setup_env.keys()),
             "timeout_seconds": max(1, min(int(timeout_seconds or 900), 3600)),
             "notes": notes,
@@ -1492,6 +1510,7 @@ class ProxyKernelRuntimeService:
                 "third_party_public_service": "forbidden",
                 "shell": "forbidden",
                 "cwd_scope": "source_repo_only",
+                "python_dependency_scope": "isolated_provider_venv",
                 "reference_commands": "dry_run_only_by_default",
             },
         }
@@ -1511,22 +1530,73 @@ class ProxyKernelRuntimeService:
         exit_code: int | None = None
         timed_out = False
         error = ""
+        pre_command_results: list[dict[str, Any]] = []
         try:
             with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
-                result = subprocess.run(
-                    selected["command"],
-                    cwd=selected["cwd"],
-                    env=child_env,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    stdin=subprocess.DEVNULL,
-                    shell=False,
-                    timeout=payload["timeout_seconds"],
-                    check=False,
-                )
-            exit_code = result.returncode
-            if exit_code != 0:
-                status = "failed"
+                for pre_command in payload["pre_commands"]:
+                    pre_cmd = pre_command.get("command") if isinstance(pre_command, dict) else []
+                    pre_cwd = Path(str(pre_command.get("cwd") or selected["cwd"])).expanduser().resolve() if isinstance(pre_command, dict) else Path(selected["cwd"]).resolve()
+                    pre_id = str(pre_command.get("id") or "pre_command") if isinstance(pre_command, dict) else "pre_command"
+                    if not pre_cmd or not all(isinstance(part, str) and part.strip() for part in pre_cmd):
+                        status = "failed"
+                        error = "SOURCE_RUNTIME_SETUP_PRE_COMMAND_REQUIRED"
+                        break
+                    if not self.path_within(pre_cwd, self.source_repo_path(spec).resolve()):
+                        status = "failed"
+                        error = "SOURCE_RUNTIME_SETUP_PRE_COMMAND_CWD_OUTSIDE_SOURCE_REPO"
+                        break
+                    creates_path = str(pre_command.get("creates_path") or "") if isinstance(pre_command, dict) else ""
+                    if creates_path:
+                        created = Path(creates_path).expanduser().resolve()
+                        if not self.path_within(created, self.root.resolve()):
+                            status = "failed"
+                            error = "SOURCE_RUNTIME_SETUP_PRE_COMMAND_CREATES_OUTSIDE_ROOT"
+                            break
+                        if created.exists():
+                            pre_command_results.append({"id": pre_id, "status": "skipped", "reason": "creates_path_exists", "creates_path": str(created)})
+                            continue
+                    pre_timeout = max(1, min(int(pre_command.get("timeout_seconds") or min(payload["timeout_seconds"], 180)), payload["timeout_seconds"])) if isinstance(pre_command, dict) else payload["timeout_seconds"]
+                    try:
+                        pre_result = subprocess.run(
+                            pre_cmd,
+                            cwd=str(pre_cwd),
+                            env=child_env,
+                            stdout=stdout_file,
+                            stderr=stderr_file,
+                            stdin=subprocess.DEVNULL,
+                            shell=False,
+                            timeout=pre_timeout,
+                            check=False,
+                        )
+                    except subprocess.TimeoutExpired:
+                        status = "timeout"
+                        timed_out = True
+                        error = f"PRE_COMMAND_TIMEOUT:{pre_id}"
+                        pre_command_results.append({"id": pre_id, "status": "timeout", "timeout_seconds": pre_timeout})
+                        break
+                    pre_command_results.append({"id": pre_id, "status": "completed" if pre_result.returncode == 0 else "failed", "exit_code": pre_result.returncode, "timeout_seconds": pre_timeout})
+                    if pre_result.returncode != 0:
+                        exit_code = pre_result.returncode
+                        status = "failed"
+                        error = f"PRE_COMMAND_FAILED:{pre_id}"
+                        break
+                if status in {"failed", "timeout"}:
+                    result = None
+                else:
+                    result = subprocess.run(
+                        selected["command"],
+                        cwd=selected["cwd"],
+                        env=child_env,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        stdin=subprocess.DEVNULL,
+                        shell=False,
+                        timeout=payload["timeout_seconds"],
+                        check=False,
+                    )
+                    exit_code = result.returncode
+                    if exit_code != 0:
+                        status = "failed"
         except subprocess.TimeoutExpired:
             status = "timeout"
             timed_out = True
@@ -1544,6 +1614,7 @@ class ProxyKernelRuntimeService:
             "exit_code": exit_code,
             "timed_out": timed_out,
             "error": error,
+            "pre_command_results": pre_command_results,
             "stdout_log": str(stdout_path),
             "stderr_log": str(stderr_path),
             "started_at": started_at,
