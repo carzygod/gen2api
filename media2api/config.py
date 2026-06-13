@@ -27,6 +27,7 @@ class Settings:
     default_user_email = os.getenv("MEDIA2API_DEFAULT_USER", "admin@media2api.local")
     seed_defaults_enabled = os.getenv("MEDIA2API_SEED_DEFAULTS", "true").lower() == "true"
     proxy_kernel_bootstrap_routes_enabled = os.getenv("MEDIA2API_PROXY_KERNEL_BOOTSTRAP_ROUTES", "true").lower() == "true"
+    proxy_kernel_autorestore_runtimes_enabled = os.getenv("MEDIA2API_PROXY_KERNEL_AUTORESTORE_RUNTIMES", "true").lower() == "true"
     image_sync_wait = os.getenv("MEDIA2API_IMAGE_SYNC_WAIT", "true").lower() == "true"
     asset_url_ttl_seconds = int(os.getenv("MEDIA2API_ASSET_URL_TTL_SECONDS", "86400"))
     asset_max_bytes = int(os.getenv("MEDIA2API_ASSET_MAX_BYTES", str(200 * 1024 * 1024)))

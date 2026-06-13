@@ -1279,6 +1279,12 @@ class ProxyKernelRuntimeHealthCheckRequest(BaseModel):
     fail_on_health_check: bool = False
 
 
+class ProxyKernelRuntimeRestoreRequest(BaseModel):
+    provider_ids: list[str] = Field(default_factory=list)
+    force: bool = False
+    run_health_check: bool = True
+
+
 class ProxyKernelLiveAcceptanceRequest(BaseModel):
     dry_run: bool = True
     operations: list[str] = Field(default_factory=list)
@@ -1618,6 +1624,11 @@ def startup() -> None:
                 priority_offset=0,
                 update_provider_base_url=True,
             )
+        if settings.proxy_kernel_autorestore_runtimes_enabled:
+            try:
+                proxy_kernel_service.restore_recorded_runtimes(notes="Restored during media2api startup")
+            except Exception as exc:
+                print(f"proxy kernel runtime autorestore failed: {exc}", flush=True)
         migrate_inline_account_credentials(db)
         scrub_existing_request_audit_queries(db)
 
@@ -8311,6 +8322,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/start-runtime"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-preflight"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/runtime-health-check"),
+    ("POST", "/v1/admin/proxy-kernels/restore-runtimes"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/live-acceptance"),
     ("POST", "/v1/admin/proxy-kernels/{provider_id}/stop-runtime"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/process"),
@@ -30530,6 +30542,47 @@ def admin_proxy_kernel_runtime_health_check(
         raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc), "runtime_policy": "runtime health checks require a registered loopback runtime and provider health endpoint"}) from exc
+
+
+@app.post("/v1/admin/proxy-kernels/restore-runtimes")
+def admin_proxy_kernels_restore_runtimes(
+    req: ProxyKernelRuntimeRestoreRequest = ProxyKernelRuntimeRestoreRequest(),
+    ctx: AuthContext = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = proxy_kernel_service.restore_recorded_runtimes(
+        provider_ids=req.provider_ids,
+        force=req.force,
+        notes="Restored by admin restore-runtimes",
+    )
+    if req.run_health_check:
+        health_checks: list[dict[str, Any]] = []
+        for item in result.get("data") or []:
+            provider_id = str(item.get("provider_id") or "")
+            if item.get("status") not in {"started", "already_running"} or not provider_id:
+                continue
+            try:
+                health_checks.append(
+                    run_proxy_kernel_runtime_health_check(
+                        db,
+                        provider_id,
+                        sync_provider_base_url_value=True,
+                        require_running_process=False,
+                        fail_on_health_check=False,
+                    )
+                )
+            except Exception as exc:
+                health_checks.append({
+                    "object": "media2api.proxy_kernel.runtime_health_check",
+                    "provider_id": provider_id,
+                    "ok": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                })
+        result["health_checks"] = health_checks
+        result["summary"]["health_ok"] = sum(1 for item in health_checks if item.get("ok"))
+        result["summary"]["health_failed"] = sum(1 for item in health_checks if not item.get("ok"))
+    return result
 
 
 @app.post("/v1/admin/proxy-kernels/{provider_id}/live-acceptance")

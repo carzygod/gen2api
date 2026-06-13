@@ -758,6 +758,96 @@ class ProxyKernelRuntimeService:
         self.save_state(state)
         return {"object": "media2api.proxy_kernel.process", "provider_id": provider_id, "stopped": stopped, "process": self.process_status(provider_id)}
 
+    def recorded_runtime_config_files(self, provider_id: str, process: dict[str, Any]) -> list[dict[str, Any]]:
+        provider_root = (self.root / provider_id).resolve()
+        config_files: list[dict[str, Any]] = []
+        for item in process.get("config_files") or []:
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            path = Path(str(item["path"])).expanduser().resolve()
+            if not self.path_within(path, provider_root) or not path.exists() or not path.is_file():
+                continue
+            if path.stat().st_size > 128 * 1024:
+                raise ValueError("RUNTIME_CONFIG_TOO_LARGE")
+            config_files.append({"path": str(path), "content": path.read_text(encoding="utf-8")})
+        return config_files
+
+    def restart_recorded_runtime(self, provider_id: str, *, force: bool = False, notes: str = "") -> dict[str, Any]:
+        self.require_spec(provider_id)
+        current = self.process_status(provider_id)
+        if current.get("running") and not force:
+            return {
+                "object": "media2api.proxy_kernel.process_restore",
+                "provider_id": provider_id,
+                "status": "already_running",
+                "process": current,
+            }
+        state = self.load_state()
+        entry = state.get("kernels", {}).get(provider_id, {})
+        runtime = entry.get("runtime") if isinstance(entry.get("runtime"), dict) else {}
+        process = entry.get("process") if isinstance(entry.get("process"), dict) else {}
+        command = [str(item) for item in process.get("command") or [] if str(item).strip()]
+        base_url = str(runtime.get("base_url") or "").strip()
+        artifact_path = str(process.get("artifact_path") or runtime.get("binary_path") or "").strip()
+        expected_sha256 = str(process.get("expected_sha256") or process.get("artifact_sha256") or runtime.get("sha256") or "").strip()
+        cwd = str(process.get("cwd") or "").strip()
+        if not runtime or not process:
+            raise ValueError("RECORDED_RUNTIME_PROCESS_REQUIRED")
+        if not command:
+            raise ValueError("RECORDED_RUNTIME_COMMAND_REQUIRED")
+        config_files = self.recorded_runtime_config_files(provider_id, process)
+        result = self.start_runtime(
+            provider_id=provider_id,
+            command=command,
+            base_url=base_url,
+            artifact_path=artifact_path,
+            expected_sha256=expected_sha256,
+            cwd=cwd,
+            env={},
+            config_files=config_files,
+            version=str(runtime.get("version") or "recorded-runtime"),
+            notes=notes or "Restored from recorded managed runtime state",
+            replace_existing=True,
+        )
+        return {
+            "object": "media2api.proxy_kernel.process_restore",
+            "provider_id": provider_id,
+            "status": "started",
+            **result,
+        }
+
+    def restore_recorded_runtimes(self, provider_ids: list[str] | None = None, *, force: bool = False, notes: str = "") -> dict[str, Any]:
+        selected = [item for item in (provider_ids or list(KERNEL_SPECS)) if item in KERNEL_SPECS]
+        data: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for provider_id in selected:
+            try:
+                state = self.load_state()
+                entry = state.get("kernels", {}).get(provider_id, {})
+                if not isinstance(entry.get("runtime"), dict) or not isinstance(entry.get("process"), dict):
+                    data.append({
+                        "object": "media2api.proxy_kernel.process_restore",
+                        "provider_id": provider_id,
+                        "status": "skipped",
+                        "reason": "recorded_runtime_or_process_missing",
+                    })
+                    continue
+                data.append(self.restart_recorded_runtime(provider_id, force=force, notes=notes))
+            except Exception as exc:
+                errors.append({"provider_id": provider_id, "error": str(exc), "error_type": type(exc).__name__})
+        return {
+            "object": "media2api.proxy_kernel.process_restore.list",
+            "data": data,
+            "errors": errors,
+            "summary": {
+                "selected": len(selected),
+                "started": sum(1 for item in data if item.get("status") == "started"),
+                "already_running": sum(1 for item in data if item.get("status") == "already_running"),
+                "skipped": sum(1 for item in data if item.get("status") == "skipped"),
+                "failed": len(errors),
+            },
+        }
+
     def process_status(self, provider_id: str) -> dict[str, Any]:
         state = self.load_state()
         process = state.get("kernels", {}).get(provider_id, {}).get("process", {})
