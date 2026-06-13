@@ -23478,7 +23478,7 @@ def sync_proxy_kernel_provider_base_url(db: Session, provider_id: str, base_url:
         raise HTTPException(status_code=404, detail={"error": "PROVIDER_TEMPLATE_NOT_FOUND"})
     config = provider_runtime_config(provider_id, loads(provider.base_config_json, {}))
     config["base_url"] = validate_provider_base_url_input(provider_id, base_url)
-    if provider_id == "gemini_cli_oauth" and str(config.get("health_endpoint") or "/health") == "/health":
+    if provider_id in {"gemini_cli_oauth", "qianwen_web_session"} and str(config.get("health_endpoint") or "/health") == "/health":
         config["health_endpoint"] = "/v1/models"
     provider.base_config_json = dumps(config)
     db.commit()
