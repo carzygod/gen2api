@@ -281,7 +281,7 @@ PROVIDER_TEMPLATES: dict[str, ProviderTemplate] = {
         models=["qianwen-image", "qianwen-video"],
         operations=[OPS["t2i"], OPS["i2i"], OPS["edit"], OPS["t2v"], OPS["i2v"]],
         default_config={
-            "health_endpoint": "/health",
+            "health_endpoint": "/v1/models",
             "poll_timeout_seconds": 900,
             "endpoints": IMAGE_VIDEO_ENDPOINTS,
             "kernel_selection": "QIANWEN-WEB-01",
