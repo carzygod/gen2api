@@ -273,6 +273,9 @@ with `--payload-file account-materials.json` for dry-run preflight, and finally
 add `--import` only after the response is `ready_to_import`. The script uses
 the platform HTTP endpoints only; it does not use official SDK/API clients and
 does not print credential bodies.
+The admin console also exposes the same flow in `反代内核 -> 生产解锁向导`:
+generate the credential intake sheet, replace placeholders in the bulk JSON,
+run batch dry-run, then import and optionally run account acceptance samples.
 `GET/POST /v1/admin/proxy-kernels/{provider_id}/account-materials` gives the
 operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also

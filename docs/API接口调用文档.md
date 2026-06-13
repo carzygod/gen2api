@@ -1366,6 +1366,8 @@ MEDIA2API_API_KEY="dev-admin-key" \
 python scripts/import_real_account_materials.py --payload-file account-materials.json --import --run-acceptance
 ```
 
+后台同样提供这条链路：打开“反代内核 -> 生产解锁向导”，先生成交接表，再把右侧 bulk JSON 的占位符替换为真实材料，依次点击“批量 dry-run”“正式导入”或“导入并验收”。该页面仍然只调用平台接口，不使用官方 SDK/API，也不会在响应区回显明文凭据。
+
 账号材料预检用于把“我要粘什么”变成可校验的导入包。后台可在“反代内核 -> 启动执行器 -> 账号材料导入”卡片中直接读取模板、粘贴材料、预检和导入；API 也可以直接调用。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
 
 ```bash

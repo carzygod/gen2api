@@ -14862,6 +14862,25 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .activation-provider-card {{ border:1px solid var(--line); border-radius:var(--radius); padding:12px; background:#0b1017; min-height:112px; }}
         .activation-provider-card b {{ display:block; margin-bottom:6px; overflow-wrap:anywhere; }}
         .activation-provider-card p {{ margin:0; color:var(--muted); line-height:1.45; font-size:12px; }}
+        .unlock-wizard {{ margin-top:14px; border:1px solid rgba(67,214,178,.22); border-radius:var(--radius); padding:14px; background:linear-gradient(145deg,#151c26,#0b1017); box-shadow:var(--shadow-soft); }}
+        .unlock-head {{ display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }}
+        .unlock-head h3 {{ margin:0; font-family:var(--font-display); font-size:17px; letter-spacing:0; }}
+        .unlock-head p {{ margin:5px 0 0; color:var(--muted); line-height:1.5; font-size:12px; max-width:760px; }}
+        .unlock-track {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:12px; }}
+        .unlock-step {{ position:relative; min-height:96px; border:1px solid var(--line); border-radius:var(--radius); padding:12px; background:#0b1017; }}
+        .unlock-step::before {{ content:attr(data-step); position:absolute; right:10px; top:8px; color:rgba(255,255,255,.08); font-family:var(--font-display); font-size:30px; font-weight:900; }}
+        .unlock-step b {{ display:block; color:var(--text); margin-bottom:6px; }}
+        .unlock-step span {{ display:block; color:var(--muted); font-size:12px; line-height:1.45; }}
+        .unlock-step.active {{ border-color:var(--accent-line); background:linear-gradient(145deg,rgba(67,214,178,.11),#0b1017); }}
+        .unlock-workbench {{ display:grid; grid-template-columns:minmax(0,.88fr) minmax(360px,1.12fr); gap:12px; margin-top:12px; }}
+        .unlock-panel {{ border:1px solid var(--line); border-radius:var(--radius); padding:12px; background:#0d1118; }}
+        .unlock-panel h4 {{ margin:0 0 8px; color:var(--soft); font-size:13px; }}
+        .unlock-panel textarea {{ min-height:210px; font-family:var(--font-data); font-size:12px; }}
+        .unlock-provider-list {{ display:grid; gap:8px; margin-top:10px; }}
+        .unlock-provider {{ border:1px solid var(--line); border-radius:var(--radius); padding:10px; background:#090d13; }}
+        .unlock-provider b {{ display:flex; justify-content:space-between; gap:8px; margin-bottom:6px; }}
+        .unlock-provider span {{ color:var(--muted); font-size:12px; line-height:1.5; }}
+        .unlock-provider code {{ display:inline-block; margin:4px 4px 0 0; }}
         .kernel-command-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
         .kernel-command-grid textarea {{ min-height:154px; }}
         .kernel-path-note {{ font-family:var(--font-data); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }}
@@ -14931,7 +14950,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions,.go-live-layout,.source-plan-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions,.go-live-layout,.source-plan-grid,.unlock-track,.unlock-workbench {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
       </style>
     </head>
     <body>
@@ -15216,6 +15235,51 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
                 <div><span class="eyebrow">缺账号</span><b>{admin_escape(proxy_kernel_summary.get("needs_account", 0))}</b></div>
                 <div><span class="eyebrow">缺运行时</span><b>{admin_escape(proxy_kernel_summary.get("needs_runtime", 0))}</b></div>
                 <div><span class="eyebrow">缺健康</span><b>{admin_escape(proxy_kernel_summary.get("needs_health", 0))}</b></div>
+              </div>
+              <div class="unlock-wizard" id="kernel-production-unlock-wizard">
+                <div class="unlock-head">
+                  <div>
+                    <h3>生产解锁向导</h3>
+                    <p>只处理最终可用前最容易卡住的一条路径：拿到真实反代账号材料，先 dry-run 预检，再导入账号池并运行真实账号验收。这里禁止官方 SDK/API key，也不会创建演示账号。</p>
+                  </div>
+                  <div class="activation-badges">
+                    <span class="activation-badge action-required">当前需真实材料</span>
+                    <span class="activation-badge">默认推荐 Gemini CLI OAuth</span>
+                  </div>
+                </div>
+                <div class="unlock-track">
+                  <div class="unlock-step active" data-step="01"><b>生成交接表</b><span>告诉账号持有人要提供哪些 session/OAuth/profile 字段。</span></div>
+                  <div class="unlock-step" data-step="02"><b>填入真实材料</b><span>把占位符替换为真实材料，敏感内容只留在提交框。</span></div>
+                  <div class="unlock-step" data-step="03"><b>Dry-run 预检</b><span>先校验字段形状和运行时同步计划，不写入账号池。</span></div>
+                  <div class="unlock-step" data-step="04"><b>导入并验收</b><span>确认通过后正式导入，再跑图片/视频真实样本验收。</span></div>
+                </div>
+                <div class="unlock-workbench">
+                  <div class="unlock-panel">
+                    <h4>材料交接表</h4>
+                    <div class="formline">
+                      <div><label>Provider IDs</label><input id="kernel-credential-intake-providers" placeholder="留空使用生产解锁推荐；例如 openai_web_session,gemini_cli_oauth" /></div>
+                      <button class="primary" type="button" id="kernel-credential-intake-load">生成交接表</button>
+                    </div>
+                    <div id="kernel-credential-intake-panel" class="account-material-status warn">
+                      <b>等待生成</b>
+                      点击“生成交接表”后，这里会列出每个 provider 必须提供的材料和禁止提供的官方 API key 类型。
+                    </div>
+                  </div>
+                  <div class="unlock-panel">
+                    <h4>批量预检与导入</h4>
+                    <textarea id="kernel-bulk-account-materials-json" placeholder='点击“生成交接表”后自动填入 bulk_submission_json_template；把 <...> 占位符替换为真实材料。'></textarea>
+                    <div class="account-material-actions">
+                      <button class="op" type="button" id="kernel-credential-intake-template">填入推荐模板</button>
+                      <button class="op" type="button" id="kernel-bulk-account-preflight">批量 dry-run</button>
+                      <button class="primary" type="button" id="kernel-bulk-account-import">正式导入</button>
+                      <button class="primary" type="button" id="kernel-bulk-account-import-accept">导入并验收</button>
+                    </div>
+                    <div class="account-material-status warn" id="kernel-production-unlock-status">
+                      <b>还未预检</b>
+                      先 dry-run。只有响应是 ready_to_import，再执行正式导入。
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="activation-panel" id="kernel-activation-overview" style="margin-top:14px">
                 <div class="activation-empty">点击“上线执行向导”，这里会按 provider 汇总下一步；普通操作者先看这里，再去对应 Tab 补材料。</div>
@@ -15729,6 +15793,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         const providerHints = {json.dumps(provider_hint_payload, ensure_ascii=False)};
         const proxyKernelHints = {json.dumps(proxy_kernel_hint_payload, ensure_ascii=False)};
         const result = document.getElementById('result');
+        let kernelCredentialIntakePayload = null;
         function escapeHtml(value) {{
           return String(value || '').replace(/[&<>"']/g, char => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
         }}
@@ -17271,6 +17336,115 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           }} catch (_) {{}}
           return raw.split(/[,\\n]/).map(item => item.trim()).filter(Boolean);
         }}
+        function selectedCredentialIntakeProviders() {{
+          const raw = document.getElementById('kernel-credential-intake-providers')?.value.trim() || '';
+          return raw.split(',').map(item => item.trim()).filter(Boolean);
+        }}
+        function providerIdsQuery(providerIds) {{
+          return providerIds.length ? '?provider_ids=' + encodeURIComponent(providerIds.join(',')) : '';
+        }}
+        function providerIdsFromBulkPayload(payload) {{
+          const items = Array.isArray(payload?.items) ? payload.items : [];
+          const ids = items.map(item => item?.provider_id).filter(Boolean);
+          return [...new Set(ids)];
+        }}
+        function setKernelBulkTemplate(payload = null, force = false) {{
+          const source = payload || kernelCredentialIntakePayload || {{}};
+          const template = source.bulk_submission_json_template || {{}};
+          const textarea = document.getElementById('kernel-bulk-account-materials-json');
+          if (!textarea || !Object.keys(template).length) return;
+          if (force || !textarea.value.trim() || textarea.dataset.templateLoaded === 'true') {{
+            textarea.value = prettyJson(template, '{{}}');
+            textarea.dataset.templateLoaded = 'true';
+          }}
+        }}
+        function renderKernelCredentialIntakeSheet(payload) {{
+          kernelCredentialIntakePayload = payload;
+          const panel = document.getElementById('kernel-credential-intake-panel');
+          const statusBox = document.getElementById('kernel-production-unlock-status');
+          const providersInput = document.getElementById('kernel-credential-intake-providers');
+          const providerIds = Array.isArray(payload?.provider_ids) ? payload.provider_ids : [];
+          const rows = Array.isArray(payload?.data) ? payload.data : [];
+          const summary = payload?.summary || {{}};
+          if (providersInput && providerIds.length && !providersInput.value.trim()) providersInput.value = providerIds.join(',');
+          setKernelBulkTemplate(payload);
+          if (panel) {{
+            const forbidden = Array.isArray(payload?.forbidden_materials) ? payload.forbidden_materials : [];
+            const cards = rows.map(row => {{
+              const required = Array.isArray(row.required_items) ? row.required_items : [];
+              const requiredHtml = required.length
+                ? required.map(item => `<code>${{escapeHtml(item.label || item.name || item.section || '-')}}</code>`).join('')
+                : '<span>已有可用账号材料</span>';
+              return `
+                <div class="unlock-provider">
+                  <b><span>${{escapeHtml(row.provider_id || '-')}}</span><span class="activation-badge ${{row.account_ready ? 'done' : 'needs-input'}}">${{row.account_ready ? 'ready' : 'needs material'}}</span></b>
+                  <span>${{escapeHtml(row.name || row.selection_id || '')}}</span>
+                  <div>${{requiredHtml}}</div>
+                </div>
+              `;
+            }}).join('');
+            panel.className = 'account-material-status ' + (summary.production_ready ? 'ok' : 'warn');
+            panel.innerHTML = `
+              <b>${{summary.production_ready ? '账号材料已满足' : '等待真实账号材料'}}</b>
+              Provider ${{Number(summary.total || rows.length)}} · 已就绪 ${{Number(summary.account_ready || 0)}} · 待材料 ${{Number(summary.needs_real_account_material || 0)}}
+              <div class="kernel-blockers">${{forbidden.map(item => `<span>禁止：${{escapeHtml(item)}}</span>`).join('')}}</div>
+              <div class="unlock-provider-list">${{cards}}</div>
+            `;
+          }}
+          if (statusBox) {{
+            statusBox.className = 'account-material-status warn';
+            statusBox.innerHTML = '<b>模板已生成</b>替换右侧 JSON 中的占位符，然后先点击“批量 dry-run”。';
+          }}
+        }}
+        async function loadKernelCredentialIntakeSheet() {{
+          const providerIds = selectedCredentialIntakeProviders();
+          const payload = await callAdmin('/v1/admin/proxy-kernels/credential-intake-sheet' + providerIdsQuery(providerIds));
+          renderKernelCredentialIntakeSheet(payload);
+          return payload;
+        }}
+        function readKernelBulkAccountMaterialsPayload(dryRun) {{
+          const payload = readJsonObjectOrFallback('kernel-bulk-account-materials-json', {{}});
+          if (!Object.keys(payload).length) throw new Error('请先生成交接表并填写 account-materials JSON。');
+          const body = Object.assign({{}}, payload);
+          body.dry_run = dryRun;
+          body.continue_on_error = true;
+          return body;
+        }}
+        function renderKernelBulkAccountStatus(payload, label = '预检结果') {{
+          const statusBox = document.getElementById('kernel-production-unlock-status');
+          if (!statusBox) return;
+          const summary = payload?.summary || {{}};
+          const ok = payload?.ok === true || payload?.status === 'ready_to_import' || payload?.status === 'imported';
+          const errors = Array.isArray(payload?.errors) ? payload.errors : [];
+          statusBox.className = 'account-material-status ' + (ok ? 'ok' : 'warn');
+          statusBox.innerHTML = `
+            <b>${{escapeHtml(label)}}：${{escapeHtml(payload?.status || (ok ? 'ok' : 'action_required'))}}</b>
+            ready=${{Number(summary.ready || 0)}} · imported=${{Number(summary.imported || 0)}} · failed=${{Number(summary.failed || errors.length || 0)}}
+            ${{errors.length ? `<ul>${{errors.slice(0, 4).map(item => `<li>${{escapeHtml(item.message || item.error || JSON.stringify(item))}}</li>`).join('')}}</ul>` : ''}}
+          `;
+        }}
+        async function submitKernelBulkAccountMaterials(dryRun = true, runAcceptance = false) {{
+          const body = readKernelBulkAccountMaterialsPayload(dryRun);
+          const bulk = await callAdmin('/v1/admin/proxy-kernels/account-materials-bulk', 'POST', body);
+          renderKernelBulkAccountStatus(bulk, dryRun ? 'Dry-run' : '导入');
+          if (!dryRun && runAcceptance) {{
+            const providerIds = providerIdsFromBulkPayload(body);
+            const operations = kernelCredentialIntakePayload?.required_operations || ['text_to_image', 'image_edit', 'text_to_video', 'image_to_video'];
+            const acceptance = await callAdmin('/v1/admin/account-acceptance-suite', 'POST', {{
+              dry_run: false,
+              external_only: true,
+              active_only: true,
+              provider_ids: providerIds,
+              operations,
+              run_samples: true,
+              max_samples: 1,
+              require_production_ready: false,
+            }});
+            renderKernelBulkAccountStatus(acceptance, '账号验收');
+          }}
+          try {{ await loadKernelAccountMaterialsMatrix(); }} catch (_) {{}}
+          return bulk;
+        }}
         function commandLineText(command) {{
           return Array.isArray(command) && command.length ? command.join(' ') : '等待平台识别';
         }}
@@ -18566,6 +18740,41 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         document.getElementById('kernel-production-unblock-package')?.addEventListener('click', async () => {{
           try {{
             const payload = await loadProductionUnblockPackage();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-bulk-account-materials-json')?.addEventListener('input', event => {{
+          event.target.dataset.templateLoaded = 'false';
+        }});
+        document.getElementById('kernel-credential-intake-load')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await loadKernelCredentialIntakeSheet();
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-credential-intake-template')?.addEventListener('click', async () => {{
+          try {{
+            if (!kernelCredentialIntakePayload) await loadKernelCredentialIntakeSheet();
+            setKernelBulkTemplate(kernelCredentialIntakePayload, true);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-bulk-account-preflight')?.addEventListener('click', async () => {{
+          try {{
+            const payload = await submitKernelBulkAccountMaterials(true, false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-bulk-account-import')?.addEventListener('click', async () => {{
+          try {{
+            if (!window.confirm('将把右侧 JSON 中的真实账号材料写入账号池。请确认已经先通过 dry-run。')) return;
+            const payload = await submitKernelBulkAccountMaterials(false, false);
+            result.textContent = JSON.stringify(payload, null, 2);
+          }} catch (error) {{ result.textContent = String(error); }}
+        }});
+        document.getElementById('kernel-bulk-account-import-accept')?.addEventListener('click', async () => {{
+          try {{
+            if (!window.confirm('将正式导入账号材料，并运行真实账号验收样本。该操作可能消耗上游账号额度。')) return;
+            const payload = await submitKernelBulkAccountMaterials(false, true);
             result.textContent = JSON.stringify(payload, null, 2);
           }} catch (error) {{ result.textContent = String(error); }}
         }});
