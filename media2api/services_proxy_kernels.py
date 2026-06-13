@@ -1359,6 +1359,10 @@ class ProxyKernelRuntimeService:
                 "requirements": (repo_path / "requirements.txt").exists(),
                 "go_mod": (repo_path / "go.mod").exists(),
                 "dockerfile": (repo_path / "Dockerfile").exists(),
+                "public_package_json": (repo_path / "public" / "package.json").exists(),
+                "public_package_lock": (repo_path / "public" / "package-lock.json").exists(),
+                "public_pnpm_lock": (repo_path / "public" / "pnpm-lock.yaml").exists(),
+                "public_yarn_lock": (repo_path / "public" / "yarn.lock").exists(),
             }
         if files.get("package_json"):
             detected.append("node")
@@ -1389,6 +1393,18 @@ class ProxyKernelRuntimeService:
                     "env": {"HOST": host, "PORT": port, "BASE_URL": url},
                     "reason": "package.json main exists",
                 })
+        if files.get("public_package_json"):
+            detected.append("node-public")
+            public_path = repo_path / "public"
+            public_package = self.load_json_file(public_path / "package.json")
+            public_scripts = public_package.get("scripts") if isinstance(public_package.get("scripts"), dict) else {}
+            public_manager = "pnpm" if files.get("public_pnpm_lock") else "yarn" if files.get("public_yarn_lock") else "npm"
+            public_install = [public_manager, "install"]
+            if public_manager == "npm" and files.get("public_package_lock"):
+                public_install = ["npm", "ci"]
+            dependency_commands.append({"id": f"{public_manager}_install_public", "command": public_install, "cwd": str(public_path)})
+            if "build" in public_scripts:
+                build_commands.append({"id": f"{public_manager}_build_public", "command": [public_manager, "run", "build"], "cwd": str(public_path)})
         if files.get("pyproject") or files.get("requirements") or files.get("uv_lock"):
             detected.append("python")
             venv_dir = self.root / provider_id / "source-venv"
