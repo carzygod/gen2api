@@ -5563,21 +5563,11 @@ def run_mock_stability_self_test(db: Session, req: MockStabilitySelfTestRequest)
                         "n": 1,
                         "provider_preference": ["mock"],
                     },
+                    enqueue=False,
                 )
-                claimed = runtime.claim_queued_job(db, job.id)
-                if claimed:
-                    job = db.get(models.MediaJob, job.id) or job
-                    runtime.record_event(db, job, "admitted", "Job admitted by mock stability self-test.", metadata={"self_test": True})
-                    db.commit()
-                    job = runtime.process_job(db, job.id)
-                else:
-                    deadline = time.time() + 30
-                    while time.time() < deadline:
-                        db.expire_all()
-                        job = db.get(models.MediaJob, job.id) or job
-                        if job.status in {"completed", "failed", "cancelled", "expired"}:
-                            break
-                        time.sleep(0.05)
+                runtime.record_event(db, job, "admitted", "Job admitted by isolated mock stability self-test.", metadata={"self_test": True})
+                db.commit()
+                job = runtime.process_job(db, job.id)
                 job_ids.append(job.id)
                 if job.status != "completed":
                     failures.append({"index": index, "job_id": job.id, "status": job.status, "error_code": job.error_code, "error_message": job.error_message})
@@ -7192,6 +7182,7 @@ def build_stability_acceptance_rows(results: dict[str, Any], iterations: int) ->
                 "assets": {"output_asset_count": (mock.get("assets") or {}).get("output_asset_count")},
                 "billing": mock.get("billing"),
                 "leases": mock.get("leases"),
+                "failures": mock.get("failures") or [],
             },
         },
         "AC-S-002": {
