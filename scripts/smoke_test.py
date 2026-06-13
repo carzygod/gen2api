@@ -603,6 +603,14 @@ def main() -> None:
         assert source_setup["status"] == "completed" and source_setup["exit_code"] == 0, source_setup
         assert source_setup["pre_command_results"] and source_setup["pre_command_results"][0]["status"] == "completed", source_setup
         assert Path(source_setup["stdout_log"]).exists() and Path(source_setup["stderr_log"]).exists(), source_setup
+        source_setup_repeat = assert_ok(
+            client.post(
+                "/v1/admin/proxy-kernels/openai_web_session/source-runtime-setup",
+                headers=headers,
+                json={"dry_run": False, "command_id": "pip_install_requirements", "timeout_seconds": 180, "notes": "smoke source setup repeat"},
+            )
+        )
+        assert source_setup_repeat["status"] == "completed" and source_setup_repeat["pre_command_results"][0]["status"] == "skipped", source_setup_repeat
         source_launcher_dry_run = assert_ok(
             client.post(
                 "/v1/admin/proxy-kernels/openai_web_session/source-runtime-launcher",

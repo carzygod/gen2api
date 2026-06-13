@@ -1547,13 +1547,19 @@ class ProxyKernelRuntimeService:
                         break
                     creates_path = str(pre_command.get("creates_path") or "") if isinstance(pre_command, dict) else ""
                     if creates_path:
-                        created = Path(creates_path).expanduser().resolve()
-                        if not self.path_within(created, self.root.resolve()):
+                        created = Path(creates_path).expanduser()
+                        if not created.is_absolute():
+                            created = Path(selected["cwd"]) / created
+                        created_for_scope = Path(os.path.abspath(created))
+                        root_for_scope = Path(os.path.abspath(self.root))
+                        try:
+                            created_for_scope.relative_to(root_for_scope)
+                        except ValueError:
                             status = "failed"
                             error = "SOURCE_RUNTIME_SETUP_PRE_COMMAND_CREATES_OUTSIDE_ROOT"
                             break
-                        if created.exists():
-                            pre_command_results.append({"id": pre_id, "status": "skipped", "reason": "creates_path_exists", "creates_path": str(created)})
+                        if created_for_scope.exists():
+                            pre_command_results.append({"id": pre_id, "status": "skipped", "reason": "creates_path_exists", "creates_path": str(created_for_scope)})
                             continue
                     pre_timeout = max(1, min(int(pre_command.get("timeout_seconds") or min(payload["timeout_seconds"], 180)), payload["timeout_seconds"])) if isinstance(pre_command, dict) else payload["timeout_seconds"]
                     try:
