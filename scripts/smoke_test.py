@@ -409,6 +409,15 @@ def main() -> None:
         assert set(production_unblock["required_operations"]) == {"text_to_image", "image_edit", "text_to_video", "image_to_video"}, production_unblock
         assert production_unblock["policy"]["official_sdk_api"] == "forbidden" and production_unblock["policy"]["no_fake_account_created"] is True, production_unblock
         assert production_unblock["account_connection_package"]["bulk_submission_json_template"]["items"], production_unblock
+        credential_intake = assert_ok(client.get("/v1/admin/proxy-kernels/credential-intake-sheet", headers=headers))
+        assert credential_intake["object"] == "media2api.proxy_kernel.credential_intake_sheet", credential_intake
+        assert credential_intake["recommended_provider_ids"][0] == "gemini_cli_oauth" and credential_intake["provider_ids"] == ["gemini_cli_oauth"], credential_intake
+        assert credential_intake["policy"]["official_sdk_api"] == "forbidden" and credential_intake["policy"]["no_fake_account_created"] is True, credential_intake
+        assert credential_intake["bulk_submission_json_template"]["dry_run"] is True and credential_intake["bulk_submission_json_template"]["items"], credential_intake
+        assert "official OpenAI API key" in credential_intake["forbidden_materials"], credential_intake
+        openai_gemini_intake = assert_ok(client.get("/v1/admin/proxy-kernels/credential-intake-sheet?provider_ids=openai_web_session,gemini_cli_oauth", headers=headers))
+        assert openai_gemini_intake["provider_ids"] == ["openai_web_session", "gemini_cli_oauth"], openai_gemini_intake
+        assert len(openai_gemini_intake["data"]) == 2 and openai_gemini_intake["summary"]["needs_real_account_material"] == 2, openai_gemini_intake
         openai_account_materials = assert_ok(client.get("/v1/admin/proxy-kernels/openai_web_session/account-materials", headers=headers))
         assert openai_account_materials["object"] == "media2api.proxy_kernel.account_materials" and openai_account_materials["provider_id"] == "openai_web_session", openai_account_materials
         assert openai_account_materials["status"] == "needs_input" and openai_account_materials["credential_value_json_template"], openai_account_materials

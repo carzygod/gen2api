@@ -8294,6 +8294,7 @@ ACCEPTANCE_REQUIRED_ROUTES = [
     ("GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
     ("GET", "/v1/admin/proxy-kernels/account-connection-package"),
     ("GET", "/v1/admin/proxy-kernels/production-unblock-package"),
+    ("GET", "/v1/admin/proxy-kernels/credential-intake-sheet"),
     ("POST", "/v1/admin/proxy-kernels/account-materials-bulk"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
     ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
@@ -8582,6 +8583,7 @@ def build_operator_workbench_report(db: Session) -> dict[str, Any]:
                 ("GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
                 ("GET", "/v1/admin/proxy-kernels/account-connection-package"),
                 ("GET", "/v1/admin/proxy-kernels/production-unblock-package"),
+                ("GET", "/v1/admin/proxy-kernels/credential-intake-sheet"),
                 ("POST", "/v1/admin/proxy-kernels/account-materials-bulk"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/materials-request"),
                 ("GET", "/v1/admin/proxy-kernels/{provider_id}/account-materials"),
@@ -14450,6 +14452,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("账号材料矩阵", "GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
         ("账号连接请求包", "GET", "/v1/admin/proxy-kernels/account-connection-package"),
         ("生产解锁包", "GET", "/v1/admin/proxy-kernels/production-unblock-package"),
+        ("账号材料交接表", "GET", "/v1/admin/proxy-kernels/credential-intake-sheet"),
         ("账号材料批量预检", "POST", "/v1/admin/proxy-kernels/account-materials-bulk"),
         ("全量 Release 探测矩阵", "GET", "/v1/admin/proxy-kernels/release-probe-matrix"),
         ("全量 Release Hash 候选", "GET", "/v1/admin/proxy-kernels/release-checksum-matrix"),
@@ -14470,6 +14473,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ("账号材料矩阵", "GET", "/v1/admin/proxy-kernels/account-materials-matrix"),
         ("账号连接请求包", "GET", "/v1/admin/proxy-kernels/account-connection-package"),
         ("生产解锁包", "GET", "/v1/admin/proxy-kernels/production-unblock-package"),
+        ("账号材料交接表", "GET", "/v1/admin/proxy-kernels/credential-intake-sheet"),
         ("OpenAI Web 材料清单", "GET", "/v1/admin/proxy-kernels/openai_web_session/materials-request"),
         ("全量交付包", "GET", "/v1/admin/proxy-kernels/operator-handoff"),
         ("OpenAI Web 交付包", "GET", "/v1/admin/proxy-kernels/openai_web_session/operator-handoff"),
@@ -14549,6 +14553,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/account-materials-matrix",
         "/v1/admin/proxy-kernels/account-connection-package",
         "/v1/admin/proxy-kernels/production-unblock-package",
+        "/v1/admin/proxy-kernels/credential-intake-sheet",
         "/v1/admin/proxy-kernels/account-materials-bulk",
         "/v1/admin/proxy-kernels/release-probe-matrix",
         "/v1/admin/proxy-kernels/release-checksum-matrix",
@@ -14564,6 +14569,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         "/v1/admin/proxy-kernels/account-materials-matrix",
         "/v1/admin/proxy-kernels/account-connection-package",
         "/v1/admin/proxy-kernels/production-unblock-package",
+        "/v1/admin/proxy-kernels/credential-intake-sheet",
         "/v1/admin/proxy-kernels/account-materials-bulk",
         "/v1/admin/proxy-kernels/openai_web_session/materials-request",
         "/v1/admin/proxy-kernels/loopback-contract-test",
@@ -22784,6 +22790,17 @@ def admin_proxy_kernels_production_unblock_package(provider_ids: str = "", ctx: 
         raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
 
 
+@app.get("/v1/admin/proxy-kernels/credential-intake-sheet")
+def admin_proxy_kernels_credential_intake_sheet(provider_ids: str = "", ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> dict[str, Any]:
+    selected = [item.strip() for item in provider_ids.split(",") if item.strip()]
+    try:
+        return build_proxy_kernel_credential_intake_sheet(db, selected)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "PROXY_KERNEL_NOT_FOUND"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "materials_policy": "only finalized proxy kernel provider ids may be inspected"}) from exc
+
+
 @app.post("/v1/admin/proxy-kernels/account-materials-bulk")
 def admin_proxy_kernels_account_materials_bulk(
     req: ProxyKernelAccountMaterialsBulkRequest,
@@ -25270,6 +25287,102 @@ def build_proxy_kernel_production_unblock_package(db: Session, provider_ids: lis
             "third_party_public_service": "forbidden",
             "release_binary_first": True,
             "source_repo_only_when_needed": True,
+            "no_fake_account_created": True,
+            "real_account_material_required_for_production_ready": True,
+        },
+    }
+
+
+def proxy_kernel_credential_intake_sheet_item(row: dict[str, Any]) -> dict[str, Any]:
+    credential_template = row.get("credential_value_json_template") or {}
+    profile_template = row.get("resource_profile_json_template") or {}
+    submission_template = dict(row.get("submission_item_template") or {})
+    submission_template["dry_run"] = True
+    return {
+        "provider_id": row.get("provider_id"),
+        "selection_id": row.get("selection_id"),
+        "name": row.get("name"),
+        "status": row.get("status"),
+        "account_ready": bool(row.get("account_ready")),
+        "required_items": row.get("required_items") or [],
+        "copyable_request": row.get("copyable_request") or {},
+        "credential_value_json_template": credential_template,
+        "resource_profile_json_template": profile_template,
+        "submission_item_template": submission_template,
+        "operator_notes": [
+            "Put sensitive cookie/session/OAuth/profile/token material only under credential_value.",
+            "Put non-secret routing fields such as guild_id, channel_id, project_id, region, or plan under resource_profile.",
+            "Leave dry_run=true for preflight. Change only the top-level bulk payload to dry_run=false after preflight passes.",
+            "Do not provide official SDK/API keys; this platform accepts only reverse-proxy/session/agent material.",
+        ],
+    }
+
+
+def build_proxy_kernel_credential_intake_sheet(db: Session, provider_ids: list[str] | None = None) -> dict[str, Any]:
+    unblock = build_proxy_kernel_production_unblock_package(db, provider_ids)
+    selected = [item.strip() for item in provider_ids or [] if item.strip()]
+    if not selected:
+        selected = [str(item) for item in unblock.get("recommended_provider_ids") or [] if str(item)]
+    connection = build_proxy_kernel_account_connection_package(db, selected)
+    rows = [proxy_kernel_credential_intake_sheet_item(row) for row in connection.get("data") or []]
+    bulk_payload = {
+        "dry_run": True,
+        "continue_on_error": True,
+        "items": [row.get("submission_item_template") or {} for row in rows],
+    }
+    base = settings.public_base_url
+    return {
+        "object": "media2api.proxy_kernel.credential_intake_sheet",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "production_ready" if unblock.get("status") == "production_ready" else "waiting_for_real_account_material",
+        "provider_ids": selected,
+        "required_operations": unblock.get("required_operations") or [],
+        "recommended_provider_ids": unblock.get("recommended_provider_ids") or [],
+        "summary": {
+            "total": len(rows),
+            "account_ready": sum(1 for row in rows if row.get("account_ready")),
+            "needs_real_account_material": sum(1 for row in rows if not row.get("account_ready")),
+            "production_ready": bool((unblock.get("summary") or {}).get("production_ready")),
+            "core_ready": bool((unblock.get("summary") or {}).get("core_ready")),
+        },
+        "forbidden_materials": [
+            "official OpenAI API key",
+            "official Gemini API key",
+            "official SDK credential",
+            "third-party hosted proxy URL that is not your controlled loopback runtime",
+        ],
+        "accepted_materials": [
+            "web cookie/session header or exported session JSON",
+            "CLI OAuth credential JSON/profile directory",
+            "agent-provider credential/profile material from the selected reverse-proxy project",
+            "Discord/user-session token plus non-secret guild/channel profile when the selected kernel requires it",
+            "loopback runtime base_url only when the selected release/source runtime requires one",
+        ],
+        "data": rows,
+        "bulk_submission_json_template": bulk_payload,
+        "commands": {
+            "inspect": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {base}/v1/admin/proxy-kernels/credential-intake-sheet",
+            "inspect_openai_gemini": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {base}/v1/admin/proxy-kernels/credential-intake-sheet?provider_ids=openai_web_session,gemini_cli_oauth",
+            "bulk_preflight": f"curl -X POST -H \"Authorization: Bearer $MEDIA2API_API_KEY\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/account-materials-bulk -d '{json.dumps(bulk_payload, ensure_ascii=False, separators=(',', ':'))}'",
+            "bulk_import": f"curl -X POST -H \"Authorization: Bearer $MEDIA2API_API_KEY\" -H \"Content-Type: application/json\" {base}/v1/admin/proxy-kernels/account-materials-bulk -d '{json.dumps({**bulk_payload, 'dry_run': False}, ensure_ascii=False, separators=(',', ':'))}'",
+            "production_unblock_package": f"curl -H \"Authorization: Bearer $MEDIA2API_API_KEY\" {base}/v1/admin/proxy-kernels/production-unblock-package",
+            "account_acceptance_suite": f"curl -X POST -H \"Authorization: Bearer $MEDIA2API_API_KEY\" -H \"Content-Type: application/json\" {base}/v1/admin/account-acceptance-suite -d '{{\"dry_run\":false,\"external_only\":true,\"active_only\":true,\"operations\":{json.dumps(unblock.get('required_operations') or [], ensure_ascii=False)},\"run_samples\":true,\"max_samples\":1,\"require_production_ready\":true}}'",
+        },
+        "operator_steps": [
+            {"step": 1, "name": "collect_material", "detail": "Copy data[].copyable_request to the real account owner and collect only the requested reverse-proxy/session material."},
+            {"step": 2, "name": "replace_placeholders", "detail": "Replace every <...> placeholder in bulk_submission_json_template.items with real material."},
+            {"step": 3, "name": "dry_run_preflight", "detail": "POST the filled payload to /v1/admin/proxy-kernels/account-materials-bulk with dry_run=true."},
+            {"step": 4, "name": "import", "detail": "If preflight is ready_to_import, resend the same payload with dry_run=false."},
+            {"step": 5, "name": "runtime_and_acceptance", "detail": "Start or sync the selected loopback runtime if required, then run account acceptance and final acceptance matrix."},
+        ],
+        "policy": {
+            "read_only": True,
+            "upstream_calls": False,
+            "official_sdk_api": "forbidden",
+            "third_party_public_service": "forbidden",
+            "release_binary_first": True,
+            "source_repo_only_when_needed": True,
+            "credential_value_echo": "redacted",
             "no_fake_account_created": True,
             "real_account_material_required_for_production_ready": True,
         },

@@ -1311,6 +1311,24 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/production-unblock-package" \
 - `account_connection_package.bulk_submission_json_template`: 推荐 provider 的批量预检模板。
 - `final_acceptance.blocked_by`: 当前生产阻塞原因，通常是 `authorized_external_connector_accounts`。
 
+材料交接表用于把“还缺真实账号材料”压缩成一份可直接发给账号持有人的清单。默认采用生产解锁包的推荐 provider；如果你要同时准备 OpenAI Web 与 Gemini CLI，可显式传入 provider_ids。该接口只读，不调用上游、不创建账号，且会在 `forbidden_materials` 中明确排除官方 SDK/API key：
+
+```bash
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/credential-intake-sheet" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+
+curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/credential-intake-sheet?provider_ids=openai_web_session,gemini_cli_oauth" \
+  -H "Authorization: Bearer $MEDIA2API_API_KEY"
+```
+
+重点看：
+
+- `data[].copyable_request`: 可直接发给账号持有人的材料请求。
+- `data[].required_items`: 每个 provider 的必填字段，区分 `credential_value` 与 `resource_profile`。
+- `bulk_submission_json_template`: 填入真实材料后提交到 `/v1/admin/proxy-kernels/account-materials-bulk` 的模板。
+- `commands.bulk_preflight` / `commands.bulk_import`: 预检和正式导入命令。
+- `commands.account_acceptance_suite`: 导入后用于推进 `AC-PROD-001` 的账号验收命令。
+
 账号材料预检用于把“我要粘什么”变成可校验的导入包。后台可在“反代内核 -> 启动执行器 -> 账号材料导入”卡片中直接读取模板、粘贴材料、预检和导入；API 也可以直接调用。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
 
 ```bash

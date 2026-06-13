@@ -258,6 +258,15 @@ matching account-material template, runtime status, and live-acceptance
 commands. When multiple providers cover every required operation, it prefers
 the clearest release/CLI/subprocess path first, currently Gemini CLI OAuth. It
 is read-only and does not create fake accounts.
+`GET /v1/admin/proxy-kernels/credential-intake-sheet` is the shortest handoff
+artifact for the remaining production blocker. By default it uses the
+production-unblock recommendation; with
+`provider_ids=openai_web_session,gemini_cli_oauth` it produces an OpenAI Web +
+Gemini CLI OAuth intake form. The response lists accepted reverse-proxy/session
+materials, forbidden official SDK/API keys, per-provider required fields,
+copyable requests for account owners, a bulk dry-run JSON template, and the
+exact preflight/import/acceptance commands to run after placeholders are
+replaced with real material.
 `GET/POST /v1/admin/proxy-kernels/{provider_id}/account-materials` gives the
 operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also
