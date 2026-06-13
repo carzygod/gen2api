@@ -267,6 +267,12 @@ materials, forbidden official SDK/API keys, per-provider required fields,
 copyable requests for account owners, a bulk dry-run JSON template, and the
 exact preflight/import/acceptance commands to run after placeholders are
 replaced with real material.
+`scripts/import_real_account_materials.py` wraps that same path for operators:
+first run it without a payload to print the redacted intake sheet, then run it
+with `--payload-file account-materials.json` for dry-run preflight, and finally
+add `--import` only after the response is `ready_to_import`. The script uses
+the platform HTTP endpoints only; it does not use official SDK/API clients and
+does not print credential bodies.
 `GET/POST /v1/admin/proxy-kernels/{provider_id}/account-materials` gives the
 operator an exact account-material template and dry-run validation before a
 real cookie/session/profile is imported. The admin proxy-kernel workspace also

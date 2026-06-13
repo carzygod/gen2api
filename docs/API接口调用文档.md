@@ -1329,6 +1329,43 @@ curl "$MEDIA2API_BASE_URL/v1/admin/proxy-kernels/credential-intake-sheet?provide
 - `commands.bulk_preflight` / `commands.bulk_import`: 预检和正式导入命令。
 - `commands.account_acceptance_suite`: 导入后用于推进 `AC-PROD-001` 的账号验收命令。
 
+也可以用仓库内脚本串起同一条路径。第一次不带 `--payload-file` 时只打印脱敏交接表，不导入账号：
+
+```bash
+MEDIA2API_BASE_URL="http://192.168.31.26:18082" \
+MEDIA2API_API_KEY="dev-admin-key" \
+python scripts/import_real_account_materials.py
+```
+
+准备好真实材料后，先保存为本地 JSON 文件并 dry-run。下面是 Gemini CLI OAuth 的最小形状，`gemini_oauth_creds_file` 填 `~/.gemini/oauth_creds.json` 的 JSON 内容；也可以改用 `gemini_oauth_creds_base64`：
+
+```json
+{
+  "providers": {
+    "gemini_cli_oauth": {
+      "credential_value": {
+        "gemini_oauth_creds_file": {
+          "token": {
+            "refresh_token": "<real-refresh-token>"
+          },
+          "email": "<account-email>"
+        }
+      }
+    }
+  }
+}
+```
+
+```bash
+MEDIA2API_BASE_URL="http://192.168.31.26:18082" \
+MEDIA2API_API_KEY="dev-admin-key" \
+python scripts/import_real_account_materials.py --payload-file account-materials.json
+
+MEDIA2API_BASE_URL="http://192.168.31.26:18082" \
+MEDIA2API_API_KEY="dev-admin-key" \
+python scripts/import_real_account_materials.py --payload-file account-materials.json --import --run-acceptance
+```
+
 账号材料预检用于把“我要粘什么”变成可校验的导入包。后台可在“反代内核 -> 启动执行器 -> 账号材料导入”卡片中直接读取模板、粘贴材料、预检和导入；API 也可以直接调用。`GET` 返回字段模板，`POST` 默认 dry-run；只有显式 `dry_run=false` 且材料通过同一套账号导入校验时，才会写入账号池。响应不会回显明文 cookie/session/profile：
 
 ```bash
