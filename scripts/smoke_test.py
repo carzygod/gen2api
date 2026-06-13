@@ -280,6 +280,18 @@ def main() -> None:
         applied_mapping_count = bulk_routing_apply["summary"]["mappings"]["created"] + bulk_routing_apply["summary"]["mappings"]["updated"]
         assert bulk_routing_apply["summary"]["total"] >= 10 and applied_mapping_count >= 1, bulk_routing_apply
         assert all(item["routing_plan"]["route_config_ready"] and not item["routing_plan"]["missing_mappings"] for item in bulk_routing_apply["data"]), bulk_routing_apply
+        proxy_kernel_service.register_runtime("grok", "http://127.0.0.1:19086", version="smoke", notes="disallowed base_url shape")
+        bulk_routing_with_invalid_runtime = assert_ok(
+            client.post(
+                "/v1/admin/proxy-kernels/apply-routing",
+                headers=headers,
+                json={"provider_ids": ["grok"], "status": "active", "enable_mappings": True, "priority_offset": 0, "update_provider_base_url": True},
+            )
+        )
+        assert bulk_routing_with_invalid_runtime["summary"]["failed"] == 1, bulk_routing_with_invalid_runtime
+        assert bulk_routing_with_invalid_runtime["errors"][0]["provider_id"] == "grok", bulk_routing_with_invalid_runtime
+        assert bulk_routing_with_invalid_runtime["errors"][0]["error"] == "PROVIDER_BASE_URL_NOT_ALLOWED", bulk_routing_with_invalid_runtime
+        proxy_kernel_service.clear_runtime("grok")
         bulk_go_live = assert_ok(client.get("/v1/admin/proxy-kernels/go-live-checklist", headers=headers))
         assert bulk_go_live["object"] == "media2api.proxy_kernel.go_live_checklist.list" and bulk_go_live["summary"]["total"] >= 10, bulk_go_live
         bulk_materials = assert_ok(client.get("/v1/admin/proxy-kernels/materials-request", headers=headers))

@@ -23757,28 +23757,42 @@ def apply_proxy_kernel_bulk_routing(
     update_provider_base_url: bool = True,
 ) -> dict[str, Any]:
     selected = proxy_kernel_routing_provider_ids(db, provider_ids)
-    results = [
-        apply_proxy_kernel_routing(
-            db,
-            provider_id,
-            status=status,
-            enable_mappings=enable_mappings,
-            priority_offset=priority_offset,
-            update_provider_base_url=update_provider_base_url,
-        )
-        for provider_id in selected
-    ]
-    plans = [result["routing_plan"] for result in results]
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for provider_id in selected:
+        try:
+            results.append(
+                apply_proxy_kernel_routing(
+                    db,
+                    provider_id,
+                    status=status,
+                    enable_mappings=enable_mappings,
+                    priority_offset=priority_offset,
+                    update_provider_base_url=update_provider_base_url,
+                )
+            )
+        except HTTPException as exc:
+            db.rollback()
+            error = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+            errors.append({"provider_id": provider_id, "status_code": exc.status_code, **error})
+        except (KeyError, ValueError) as exc:
+            db.rollback()
+            errors.append({"provider_id": provider_id, "error": str(exc)})
+    plans = [result["routing_plan"] for result in results if result.get("routing_plan")]
     mapping_summary = {
-        "created": sum(result["mappings"]["summary"]["created"] for result in results),
-        "updated": sum(result["mappings"]["summary"]["updated"] for result in results),
-        "skipped": sum(result["mappings"]["summary"]["skipped"] for result in results),
+        "created": sum(result["mappings"]["summary"]["created"] for result in results if result.get("mappings")),
+        "updated": sum(result["mappings"]["summary"]["updated"] for result in results if result.get("mappings")),
+        "skipped": sum(result["mappings"]["summary"]["skipped"] for result in results if result.get("mappings")),
     }
     return {
         "object": "media2api.proxy_kernel.routing_apply.list",
         "data": results,
+        "errors": errors,
         "summary": {
             **summarize_proxy_kernel_routing_plans(plans),
+            "selected": len(selected),
+            "applied": len(results),
+            "failed": len(errors),
             "created_providers": sum(1 for result in results if result.get("created_provider")),
             "mappings": mapping_summary,
         },
