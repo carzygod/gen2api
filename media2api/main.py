@@ -14667,6 +14667,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
     ])
     all_action_controls = operation_controls
     tabs = [
+        ("quickstart", "快速接入", "deploy", "开始"),
         ("overview", "总览", "overview", "运营"),
         ("users", "用户与 API Key", "users", "运营"),
         ("oauth", "授权资源", "shield", "接入"),
@@ -14691,7 +14692,7 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
             current_group = group
             nav_parts.append(f'<div class="nav-group-label">{admin_escape(group)}</div>')
         nav_parts.append(
-            f'<button class="nav-item{" active" if tab_id == "overview" else ""}" data-tab="{tab_id}" data-title="{admin_escape(label)}">'
+            f'<button class="nav-item{" active" if tab_id == "quickstart" else ""}" data-tab="{tab_id}" data-title="{admin_escape(label)}">'
             f'{admin_icon(icon, "nav-icon")}<span>{admin_escape(label)}</span></button>'
         )
     nav = "".join(nav_parts)
@@ -14962,7 +14963,51 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         .deploy-builder textarea {{ min-height:240px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }}
         .setup-open-link {{ display:inline-flex; min-height:42px; align-items:center; justify-content:center; gap:8px; border:1px solid var(--line); border-radius:var(--radius); padding:0 12px; background:linear-gradient(145deg,#171d27,#111720); color:var(--soft); text-decoration:none; font-weight:900; }}
         .setup-open-link:hover {{ border-color:var(--line-strong); color:white; background:var(--surface-3); }}
-        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions,.go-live-layout,.source-plan-grid,.unlock-track,.unlock-workbench {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} }}
+        .quick-page {{ display:grid; gap:16px; }}
+        .quick-hero {{ position:relative; overflow:hidden; display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:18px; align-items:stretch; padding:22px; border:1px solid rgba(255,255,255,.06); border-radius:var(--radius); background:linear-gradient(145deg,#101720,#080c12); box-shadow:var(--shadow); }}
+        .quick-hero::before {{ content:""; position:absolute; inset:0; pointer-events:none; background:repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 34px); opacity:.22; }}
+        .quick-hero-copy,.quick-hero-status {{ position:relative; z-index:1; }}
+        .quick-kicker {{ display:inline-flex; align-items:center; min-height:26px; padding:0 10px; border:1px solid var(--accent-line); border-radius:999px; color:#dffdf5; background:rgba(67,214,178,.08); font-size:12px; font-weight:900; }}
+        .quick-hero h2 {{ margin:12px 0 8px; max-width:760px; font-family:var(--font-display); font-size:30px; line-height:1.16; letter-spacing:0; }}
+        .quick-hero p {{ margin:0; max-width:800px; color:var(--soft); line-height:1.65; }}
+        .quick-hero-status {{ display:grid; gap:10px; align-content:center; padding:14px; border:1px solid var(--line); border-radius:var(--radius); background:rgba(8,12,18,.74); }}
+        .quick-status-line {{ display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font-size:12px; font-weight:900; }}
+        .quick-status-line code {{ color:#edf2f7; font-family:var(--font-data); font-size:12px; }}
+        .quick-chip-row {{ display:flex; flex-wrap:wrap; gap:8px; }}
+        .quick-chip {{ display:inline-flex; min-height:28px; align-items:center; padding:0 10px; border:1px solid var(--line); border-radius:999px; color:var(--soft); background:#0b1017; font-size:12px; font-weight:900; }}
+        .quick-chip.good {{ color:#dffdf5; border-color:rgba(67,214,178,.34); background:rgba(67,214,178,.08); }}
+        .quick-layout {{ display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:14px; align-items:start; }}
+        .quick-flow {{ display:grid; gap:10px; }}
+        .quick-step {{ display:grid; grid-template-columns:54px minmax(0,1fr); gap:12px; padding:14px; border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,#151b24,#0b1017); box-shadow:var(--shadow-soft); }}
+        .quick-step.current {{ border-color:var(--accent-line); background:linear-gradient(145deg,#16241f,#0b1017); }}
+        .quick-step-index {{ width:38px; height:38px; display:grid; place-items:center; border:1px solid var(--line); border-radius:8px; color:#e9eef7; background:linear-gradient(145deg,#1b2430,#0b1017); font-family:var(--font-data); font-size:13px; font-weight:900; }}
+        .quick-step.current .quick-step-index {{ border-color:var(--accent-line); color:#dffdf5; background:rgba(67,214,178,.09); }}
+        .quick-step h3 {{ margin:0; font-family:var(--font-display); font-size:16px; letter-spacing:0; }}
+        .quick-step p {{ margin:5px 0 0; color:var(--muted); line-height:1.55; font-size:13px; }}
+        .quick-form-grid {{ display:grid; grid-template-columns:220px minmax(0,1fr); gap:10px; margin-top:12px; }}
+        .quick-form-grid.full {{ grid-template-columns:1fr; }}
+        .quick-form-grid textarea {{ min-height:120px; font-family:var(--font-data); font-size:12px; }}
+        .quick-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }}
+        .quick-actions .primary,.quick-actions .op {{ min-height:38px; }}
+        .quick-side {{ display:grid; gap:12px; }}
+        .quick-side-panel,.quick-result {{ border:1px solid var(--line); border-radius:var(--radius); background:linear-gradient(145deg,#141a23,#0b1017); padding:14px; box-shadow:var(--shadow-soft); }}
+        .quick-side-panel h3,.quick-result b {{ display:block; margin:0 0 8px; font-family:var(--font-display); font-size:15px; letter-spacing:0; color:var(--text); }}
+        .quick-side-panel p {{ margin:0; color:var(--muted); line-height:1.55; font-size:12px; }}
+        .quick-status-grid {{ display:grid; gap:8px; margin-top:10px; }}
+        .quick-status-item {{ display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:38px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); background:#090d13; color:var(--soft); font-size:12px; font-weight:900; }}
+        .quick-pill {{ display:inline-flex; align-items:center; min-height:24px; padding:0 8px; border:1px solid var(--line); border-radius:999px; background:#101722; color:var(--muted); font-size:11px; font-weight:900; white-space:nowrap; }}
+        .quick-pill.ok {{ color:#c7f9db; border-color:rgba(112,217,139,.34); background:rgba(112,217,139,.08); }}
+        .quick-pill.warn {{ color:#ffe1a3; border-color:rgba(224,177,90,.34); background:rgba(224,177,90,.08); }}
+        .quick-pill.error {{ color:#ffd0cc; border-color:rgba(255,123,114,.36); background:rgba(255,123,114,.08); }}
+        .quick-pill.loading {{ color:#dbeafe; border-color:rgba(130,165,255,.32); background:rgba(130,165,255,.08); }}
+        .quick-shortcuts {{ display:grid; grid-template-columns:1fr; gap:8px; margin-top:10px; }}
+        .quick-shortcuts .op {{ justify-content:flex-start; min-height:38px; }}
+        .quick-result {{ min-height:132px; }}
+        .quick-result pre {{ max-height:260px; overflow:auto; margin:8px 0 0; padding:10px; border:1px solid var(--line); border-radius:var(--radius); background:#070a0f; color:#dbe7f4; font-family:var(--font-data); font-size:11px; white-space:pre-wrap; }}
+        .quick-result.ok {{ border-color:rgba(112,217,139,.34); }}
+        .quick-result.warn {{ border-color:rgba(224,177,90,.34); }}
+        .quick-result.error {{ border-color:rgba(255,123,114,.36); }}
+        @media (max-width:980px) {{ body {{ overflow:auto; }} .app {{ grid-template-columns:1fr; height:auto; }} aside {{ position:sticky; top:0; z-index:3; max-height:48vh; }} .grid,.two,.ops,.formline,.action-grid,.product-flow,.status-strip,.shortcut-grid,.deploy-builder,.kernel-rail,.kernel-command-grid,.activation-stage-grid,.activation-samples,.activation-provider-grid,.account-material-grid,.account-material-actions,.downstream-grid,.downstream-actions,.go-live-layout,.source-plan-grid,.unlock-track,.unlock-workbench,.quick-hero,.quick-layout,.quick-form-grid {{ grid-template-columns:1fr; }} .page-intro {{ display:block; }} main {{ padding:16px; }} .quick-step {{ grid-template-columns:42px minmax(0,1fr); }} }}
       </style>
     </head>
     <body>
@@ -14973,11 +15018,109 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         </aside>
         <main>
           <header>
-            <div><h1 id="page-title">总览</h1><div class="sub">统一管理 t2i / t2v / i2v / 图片编辑反代服务。运行模式：{admin_escape(dashboard["runtime"]["queue_backend"])} · 资产存储：{admin_escape(dashboard["runtime"]["asset_store"])}</div></div>
+            <div><h1 id="page-title">快速接入</h1><div class="sub">按步骤接入真实上游账号，再发放下游 API Key。运行模式：{admin_escape(dashboard["runtime"]["queue_backend"])} · 资产存储：{admin_escape(dashboard["runtime"]["asset_store"])}</div></div>
             <form method="post" action="/admin/logout"><button class="logout" type="submit">退出登录</button></form>
           </header>
 
-          <section id="tab-overview" class="tab active">
+          <section id="tab-quickstart" class="tab active">
+            <div class="quick-page">
+              <div class="quick-hero">
+                <div class="quick-hero-copy">
+                  <span class="quick-kicker">最短可用路径</span>
+                  <h2>4 步接入 ChatGPT Web，让 gpt-image-2 可以被调用</h2>
+                  <p>这里不填写 OpenAI 官方 API Key。你只需要准备本人已授权的 ChatGPT Web session 或 Cookie header，平台会完成账号入池、模型映射和基础验收。复杂内核、账号矩阵、日志仍在高级页里。</p>
+                </div>
+                <div class="quick-hero-status">
+                  <div class="quick-status-line"><span>上游内核</span><code>openai_web_session</code></div>
+                  <div class="quick-status-line"><span>目标模型</span><code>gpt-image-2</code></div>
+                  <div class="quick-chip-row">
+                    <span class="quick-chip good">/v1/images/generations</span>
+                    <span class="quick-chip good">/v1/images/edits</span>
+                    <span class="quick-chip">ChatGPT Web session</span>
+                  </div>
+                </div>
+              </div>
+              <div class="quick-layout">
+                <div class="quick-flow">
+                  <article class="quick-step current">
+                    <div class="quick-step-index">01</div>
+                    <div>
+                      <h3>确认这次要接入什么</h3>
+                      <p>当前向导只处理 ChatGPT Web session 到 gpt-image-2 的路径。Codex、Gemini、豆包、Qwen 等账号从右侧高级入口进入，避免把不同账号体系混在一起。</p>
+                      <div class="quick-actions">
+                        <button class="op" type="button" id="quick-refresh-status">{admin_icon("refresh", "button-icon")}刷新当前状态</button>
+                        <button class="op" type="button" data-jump-tab="overview">{admin_icon("overview", "button-icon")}查看运营总览</button>
+                      </div>
+                    </div>
+                  </article>
+                  <article class="quick-step">
+                    <div class="quick-step-index">02</div>
+                    <div>
+                      <h3>粘贴 ChatGPT session</h3>
+                      <p>可以粘贴完整 Cookie header、session jar JSON，或只包含 <code>chatgpt_cookie_or_session</code> 字段的 JSON。内容只用于提交并保存为受管凭据引用。</p>
+                      <div class="quick-form-grid">
+                        <div><label>账号名称</label><input id="quick-chatgpt-label" value="ChatGPT Web session 01" /></div>
+                        <div><label>目标模型</label><input value="gpt-image-2" readonly /></div>
+                      </div>
+                      <div class="quick-form-grid full">
+                        <div><label>ChatGPT session / Cookie header</label><textarea id="quick-chatgpt-session" placeholder="粘贴本人已登录 ChatGPT Web 后导出的 Cookie header 或 session JSON"></textarea></div>
+                      </div>
+                    </div>
+                  </article>
+                  <article class="quick-step">
+                    <div class="quick-step-index">03</div>
+                    <div>
+                      <h3>先预检，再保存</h3>
+                      <p>预检只检查字段是否足够，不写入数据库；保存会创建或更新 OpenAI Web 平台账号，并自动创建模型映射。</p>
+                      <div class="quick-actions">
+                        <button class="op" type="button" id="quick-chatgpt-preflight">{admin_icon("check", "button-icon")}预检材料</button>
+                        <button class="primary" type="button" id="quick-chatgpt-import">{admin_icon("database", "button-icon")}保存并入账号池</button>
+                      </div>
+                    </div>
+                  </article>
+                  <article class="quick-step">
+                    <div class="quick-step-index">04</div>
+                    <div>
+                      <h3>验证是否真的可用</h3>
+                      <p>先跑 Runtime 健康检查，再跑 dry-run 验收。只有你确认要消耗上游额度时，再运行真实样本验收。</p>
+                      <div class="quick-actions">
+                        <button class="op" type="button" id="quick-openai-health">{admin_icon("health", "button-icon")}检查 Runtime</button>
+                        <button class="op" type="button" id="quick-openai-acceptance-dry">{admin_icon("check", "button-icon")}验收 dry-run</button>
+                        <button class="primary" type="button" id="quick-openai-acceptance-live">{admin_icon("deploy", "button-icon")}跑 1 条真实样本</button>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+                <div class="quick-side">
+                  <div class="quick-side-panel">
+                    <h3>当前接入状态</h3>
+                    <p>刷新后只看三件事：账号材料是否存在、Runtime 是否运行、验收是否完成。</p>
+                    <div class="quick-status-grid">
+                      <div class="quick-status-item"><span>账号材料</span><span class="quick-pill" id="quick-material-state">待读取</span></div>
+                      <div class="quick-status-item"><span>Runtime</span><span class="quick-pill" id="quick-runtime-state">待读取</span></div>
+                      <div class="quick-status-item"><span>验收</span><span class="quick-pill" id="quick-acceptance-state">待读取</span></div>
+                    </div>
+                  </div>
+                  <div class="quick-side-panel">
+                    <h3>高级管理入口</h3>
+                    <p>当你已经完成首个账号接入，再进入这些页面处理批量账号、内核日志、路由和下游用户。</p>
+                    <div class="quick-shortcuts">
+                      <button class="op" type="button" data-jump-tab="kernels">{admin_icon("server", "button-icon")}反代内核与账号材料</button>
+                      <button class="op" type="button" data-jump-tab="users">{admin_icon("key", "button-icon")}用户与下游 API Key</button>
+                      <button class="op" type="button" data-jump-tab="models">{admin_icon("model", "button-icon")}模型路由</button>
+                      <button class="op" type="button" data-jump-tab="jobs">{admin_icon("job", "button-icon")}任务结果</button>
+                    </div>
+                  </div>
+                  <div class="quick-result" id="quick-result-box">
+                    <b>等待操作</b>
+                    <span class="note">把 session 粘贴到第 2 步，然后先点“预检材料”。接口返回会显示在这里，完整原始结果也会同步到底部结果面板。</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="tab-overview" class="tab">
             <div class="grid">{metric_cards}</div>
             <div class="panel">
               <div class="page-intro">
@@ -15908,6 +16051,181 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
           result.textContent = JSON.stringify(payload, null, 2);
           if (!response.ok) throw new Error(text);
           return payload;
+        }}
+        const QUICK_OPENAI_PROVIDER = 'openai_web_session';
+        async function quickFetchAdmin(path, method = 'GET', body = null) {{
+          const options = {{ method, credentials: 'same-origin', headers: {{ 'Content-Type': 'application/json' }} }};
+          if (body !== null) options.body = JSON.stringify(body);
+          const response = await fetch(path, options);
+          const text = await response.text();
+          let payload = text;
+          try {{ payload = JSON.parse(text); }} catch (_) {{}}
+          if (!response.ok) throw new Error(text);
+          return payload;
+        }}
+        function quickSetPill(id, text, tone = '') {{
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.textContent = text;
+          el.className = 'quick-pill' + (tone ? ' ' + tone : '');
+        }}
+        function quickSetResult(title, payload = null, tone = 'info') {{
+          const box = document.getElementById('quick-result-box');
+          if (!box) return;
+          box.className = 'quick-result ' + tone;
+          const detail = payload === null ? '<span class="note">等待下一步操作。</span>' : `<pre>${{escapeHtml(JSON.stringify(payload, null, 2))}}</pre>`;
+          box.innerHTML = `<b>${{escapeHtml(title)}}</b>${{detail}}`;
+        }}
+        function quickCredentialValue() {{
+          const raw = document.getElementById('quick-chatgpt-session')?.value.trim() || '';
+          if (!raw) throw new Error('请先在第 2 步粘贴 ChatGPT Web session 或 Cookie header。');
+          try {{
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') return parsed;
+          }} catch (_) {{}}
+          return {{
+            chatgpt_cookie_or_session: raw,
+            cookie_header_or_cookie_jar: raw,
+          }};
+        }}
+        function quickOpenAIAccountPayload(dryRun) {{
+          return {{
+            dry_run: dryRun,
+            account_id: 'openai_web_quickstart',
+            label: document.getElementById('quick-chatgpt-label')?.value.trim() || 'ChatGPT Web session 01',
+            resource_type: 'web_cookie_provider',
+            auth_method: 'cookie_secret',
+            credential_value: quickCredentialValue(),
+            resource_profile: {{
+              domain: 'chatgpt.com',
+              source: 'admin_quickstart',
+              credential_boundary: 'ChatGPT Web session only',
+            }},
+            supported_operations: ['text_to_image', 'image_to_image', 'image_edit'],
+            supported_provider_models: ['gpt-image-2'],
+            concurrency_limit: 1,
+            region: 'global',
+            plan: 'chatgpt-web',
+            status: 'active',
+            upsert: true,
+            auto_create_mappings: true,
+            sync_capabilities: false,
+            run_health_check: false,
+          }};
+        }}
+        function quickMaterialLooksReady(payload) {{
+          const status = String(payload?.status || payload?.account_materials?.status || '').toLowerCase();
+          return Boolean(payload?.ok || ['ready', 'ready_to_import', 'imported', 'ready_to_use'].includes(status));
+        }}
+        async function quickLoadOpenAIStatus() {{
+          quickSetPill('quick-material-state', '读取中', 'loading');
+          quickSetPill('quick-runtime-state', '读取中', 'loading');
+          quickSetPill('quick-acceptance-state', '读取中', 'loading');
+          try {{
+            const materials = await quickFetchAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(QUICK_OPENAI_PROVIDER) + '/account-materials');
+            const ready = quickMaterialLooksReady(materials);
+            quickSetPill('quick-material-state', ready ? '已有材料' : '等待 session', ready ? 'ok' : 'warn');
+          }} catch (error) {{
+            quickSetPill('quick-material-state', '读取失败', 'error');
+          }}
+          try {{
+            const processPayload = await quickFetchAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(QUICK_OPENAI_PROVIDER) + '/process');
+            const running = Boolean(processPayload?.running || processPayload?.process?.running || String(processPayload?.status || '').toLowerCase() === 'running');
+            quickSetPill('quick-runtime-state', running ? '运行中' : '需检查', running ? 'ok' : 'warn');
+          }} catch (error) {{
+            quickSetPill('quick-runtime-state', '读取失败', 'error');
+          }}
+          try {{
+            const readiness = await quickFetchAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(QUICK_OPENAI_PROVIDER) + '/production-readiness');
+            const status = String(readiness?.status || readiness?.production_status || '').toLowerCase();
+            const ready = Boolean(readiness?.usable || readiness?.ready || readiness?.ok || status.includes('ready') || status.includes('usable'));
+            quickSetPill('quick-acceptance-state', ready ? '可验收' : '待验收', ready ? 'ok' : 'warn');
+          }} catch (error) {{
+            quickSetPill('quick-acceptance-state', '待读取', 'warn');
+          }}
+        }}
+        async function quickSubmitChatGPTMaterial(dryRun) {{
+          const actionText = dryRun ? '正在预检 ChatGPT session...' : '正在保存 ChatGPT session 并创建账号映射...';
+          result.textContent = actionText;
+          quickSetResult(actionText, null, 'info');
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(QUICK_OPENAI_PROVIDER) + '/account-materials', 'POST', quickOpenAIAccountPayload(dryRun));
+          const ok = Boolean(payload?.ok || payload?.status === 'imported');
+          quickSetResult(dryRun ? (ok ? '预检通过，可以保存' : '预检未通过') : (ok ? '已保存到账号池' : '保存后仍需处理'), payload, ok ? 'ok' : 'warn');
+          await quickLoadOpenAIStatus();
+          return payload;
+        }}
+        async function quickCheckOpenAIRuntime() {{
+          result.textContent = '正在检查 OpenAI Web Runtime...';
+          quickSetResult('正在检查 Runtime', null, 'info');
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(QUICK_OPENAI_PROVIDER) + '/runtime-health-check', 'POST', {{
+            sync_provider_base_url: true,
+            require_running_process: false,
+            fail_on_health_check: false,
+          }});
+          const ok = Boolean(payload?.ok || payload?.healthy || payload?.runtime?.healthy || String(payload?.status || '').toLowerCase().includes('healthy'));
+          quickSetPill('quick-runtime-state', ok ? '已通过' : '需处理', ok ? 'ok' : 'warn');
+          quickSetResult(ok ? 'Runtime 检查通过' : 'Runtime 需要处理', payload, ok ? 'ok' : 'warn');
+          return payload;
+        }}
+        async function quickRunOpenAIAcceptance(dryRun) {{
+          if (!dryRun && !window.confirm('真实样本验收会调用上游账号并可能消耗额度。确认运行 1 条样本吗？')) return null;
+          const label = dryRun ? '正在运行 dry-run 验收...' : '正在运行真实样本验收...';
+          result.textContent = label;
+          quickSetResult(label, null, 'info');
+          const payload = await callAdmin('/v1/admin/proxy-kernels/' + encodeURIComponent(QUICK_OPENAI_PROVIDER) + '/live-acceptance', 'POST', {{
+            dry_run: dryRun,
+            operations: ['text_to_image', 'image_edit', 'image_to_image'],
+            run_runtime_health: true,
+            require_runtime_health: true,
+            sync_provider_base_url: true,
+            require_running_process: false,
+            run_health_check: true,
+            run_contract_tests: true,
+            contract_run_submit: false,
+            run_quota_sync: true,
+            run_samples: true,
+            max_samples: 1,
+            max_accounts: 1,
+            require_production_ready: false,
+          }});
+          const status = String(payload?.status || payload?.acceptance_status || '').toLowerCase();
+          const ok = Boolean(payload?.ok || payload?.usable || status.includes('ready') || status.includes('passed'));
+          quickSetPill('quick-acceptance-state', ok ? (dryRun ? 'dry-run 通过' : '真实可用') : '需处理', ok ? 'ok' : 'warn');
+          quickSetResult(ok ? (dryRun ? 'dry-run 验收通过' : '真实样本验收通过') : '验收结果需要处理', payload, ok ? 'ok' : 'warn');
+          await quickLoadOpenAIStatus();
+          return payload;
+        }}
+        function wireQuickstart() {{
+          document.getElementById('quick-refresh-status')?.addEventListener('click', async () => {{
+            try {{
+              quickSetResult('正在刷新状态', null, 'info');
+              await quickLoadOpenAIStatus();
+              quickSetResult('状态已刷新', null, 'ok');
+            }} catch (error) {{
+              quickSetResult('刷新失败', {{ error: String(error) }}, 'error');
+            }}
+          }});
+          document.getElementById('quick-chatgpt-preflight')?.addEventListener('click', async () => {{
+            try {{ await quickSubmitChatGPTMaterial(true); }} catch (error) {{ quickSetResult('预检失败', {{ error: String(error) }}, 'error'); result.textContent = String(error); }}
+          }});
+          document.getElementById('quick-chatgpt-import')?.addEventListener('click', async () => {{
+            try {{
+              if (!window.confirm('确认把这份 ChatGPT Web session 保存为 OpenAI Web 平台账号吗？')) return;
+              await quickSubmitChatGPTMaterial(false);
+            }} catch (error) {{
+              quickSetResult('保存失败', {{ error: String(error) }}, 'error');
+              result.textContent = String(error);
+            }}
+          }});
+          document.getElementById('quick-openai-health')?.addEventListener('click', async () => {{
+            try {{ await quickCheckOpenAIRuntime(); }} catch (error) {{ quickSetResult('Runtime 检查失败', {{ error: String(error) }}, 'error'); result.textContent = String(error); }}
+          }});
+          document.getElementById('quick-openai-acceptance-dry')?.addEventListener('click', async () => {{
+            try {{ await quickRunOpenAIAcceptance(true); }} catch (error) {{ quickSetResult('dry-run 验收失败', {{ error: String(error) }}, 'error'); result.textContent = String(error); }}
+          }});
+          document.getElementById('quick-openai-acceptance-live')?.addEventListener('click', async () => {{
+            try {{ await quickRunOpenAIAcceptance(false); }} catch (error) {{ quickSetResult('真实样本验收失败', {{ error: String(error) }}, 'error'); result.textContent = String(error); }}
+          }});
         }}
         function selectedKernelProvider() {{
           return document.getElementById('kernel-provider')?.value
@@ -19545,6 +19863,8 @@ def admin_dashboard_html(db: Session, admin_user: models.User) -> str:
         ['admin-setup-database-url', 'admin-setup-redis-url', 'admin-setup-email', 'admin-setup-public-url', 'admin-setup-port', 'admin-setup-password', 'admin-setup-bootstrap'].forEach(id => {{
           document.getElementById(id)?.addEventListener('input', buildAdminSetupOutput);
         }});
+        wireQuickstart();
+        quickLoadOpenAIStatus().catch(error => quickSetResult('状态读取失败', {{ error: String(error) }}, 'error'));
         enhanceManagedTables();
         buildAdminSetupOutput();
       </script>
